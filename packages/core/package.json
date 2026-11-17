@@ -10,17 +10,16 @@
   "main": "dist/src/index.js",
   "types": "dist/src/index.d.ts",
   "exports": {
-    ".": {
-      "types": "./dist/src/index.d.ts",
-      "default": "./dist/src/index.js"
-    },
-    "./cordis.patch.yml": "./cordis.patch.yml",
+    ".": "./dist/src/index.js",
+    "./client": "./client.js",
     "./package.json": "./package.json"
   },
   "files": [
     "dist",
+    "client.js",
+    "cordis.patch.yml",
     "bin",
-    "cordis.patch.yml"
+    "THIRD-PARTY-NOTICES.md"
   ],
   "bin": {
     "dsh-channels-doctor": "bin/doctor.mjs"
@@ -34,6 +33,13 @@
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-conversation"
+      ]
     },
     "manifestVersion": 1
   }
