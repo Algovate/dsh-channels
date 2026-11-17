@@ -122,3 +122,25 @@ test('no default route means no agentOptions, not a broken one', async () => {
   await driver.run({ message: inbound() })
   assert.equal((h.created[0] as { agentOptions?: unknown }).agentOptions, undefined)
 })
+
+test('the host preset is mounted during setup, which is what brings the tools', async () => {
+  const h = createHarness({ reply: '在' })
+  const mounted: string[] = []
+  const ctx = {
+    get: (name: string) => {
+      if (name === 'agents') return h.agentsService
+      if (name === 'agentPresets') {
+        return {
+          resolve: async () => ({ id: 'coder' }),
+          mount: async (_agentCtx: unknown, id: string) => {
+            mounted.push(id)
+          },
+        }
+      }
+      return undefined
+    },
+  }
+  const driver = new TurnDriver({ ctx, logger: { info: () => {}, warn: () => {} }, workingDirectory: '/tmp', pollMs: 5, createUserMessage: h.createUserMessage })
+  await driver.run({ message: inbound() })
+  assert.deepEqual(mounted, ['coder'])
+})

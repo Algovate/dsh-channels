@@ -16,6 +16,8 @@ import fs from 'node:fs'
 import path from 'node:path'
 
 import { Config as CoreConfig, resolveConfig, type ChannelsConfig } from './config.js'
+import { answerApproval } from './interaction/approval.js'
+import { answerUserQuestion, type AskUserQuestionItem } from './interaction/questions.js'
 import { createLogger } from './log.js'
 import { ChannelsRuntime } from './runtime.js'
 import { stateRoot } from './store/root.js'
@@ -31,6 +33,8 @@ export const Config = CoreConfig
 export interface PluginContext {
   get?: (name: string) => unknown
   logger?: { info?: (line: string) => void; warn?: (line: string) => void }
+  /** Cordis event bus; absent in a bare test context. */
+  on?: (event: string, listener: (...args: never[]) => unknown, options?: Record<string, unknown>) => () => void
 }
 
 export interface ChannelPlugin {
@@ -104,11 +108,13 @@ export async function startChannels({ ctx, config }: { ctx: PluginContext; confi
     }
   }
   const stopOutbox = runtime.startOutboxRetry()
+  const offSeams = registerInteractionSeams({ ctx, config, runtime, logger })
 
   return {
     runtime,
     adapters,
     async dispose() {
+      offSeams()
       stopOutbox()
       runtime.dispose()
       for (const { adapter } of loaded) {
@@ -139,6 +145,71 @@ export function readConfigOverlay(root: string): Partial<ChannelsConfig> {
     return parsed !== null && typeof parsed === 'object' ? (parsed as Partial<ChannelsConfig>) : {}
   } catch {
     return {}
+  }
+}
+
+/**
+ * Wire the two blocking seams into the chat.
+ *
+ * `prepend: true` and `global: true` are both load-bearing: `prepend` runs
+ * before the shipped desktop answerer so the chat prompt and the desktop card
+ * appear at the same time, and `global` is required because both seams dispatch
+ * in the asking agent's scope — a listener bound to this plugin's own scope
+ * would never see a request.
+ */
+function registerInteractionSeams({
+  ctx,
+  config,
+  runtime,
+  logger,
+}: {
+  ctx: PluginContext
+  config: ChannelsConfig
+  runtime: ChannelsRuntime
+  logger: { info: (line: string) => void; warn: (line: string) => void }
+}): () => void {
+  if (typeof ctx.on !== 'function') return () => {}
+  const offs: Array<() => void> = []
+  offs.push(
+    ctx.on(
+      'user-questions/request',
+      ((request: { agent?: unknown; questions?: unknown[]; signal?: AbortSignal }, next: () => Promise<unknown>) =>
+        answerUserQuestion({
+          queue: runtime.interactions,
+          target: runtime.targetForAgent(request?.agent),
+          questions: (Array.isArray(request?.questions) ? request.questions : []) as AskUserQuestionItem[],
+          request: request ?? {},
+          next,
+          enabled: config.questionsEnabled,
+          logger,
+        })) as never,
+      { prepend: true, global: true },
+    ),
+  )
+  offs.push(
+    ctx.on(
+      'approval/request',
+      ((request: { agent?: unknown; toolName?: string; reason?: string; displayReason?: unknown; signal?: AbortSignal }, next: () => Promise<unknown>) =>
+        answerApproval({
+          queue: runtime.interactions,
+          target: runtime.targetForAgent(request?.agent),
+          request: request ?? {},
+          next,
+          enabled: config.approvalsEnabled,
+          logger,
+        })) as never,
+      { prepend: true, global: true },
+    ),
+  )
+  logger.info(`interaction seams registered (questions=${config.questionsEnabled}, approvals=${config.approvalsEnabled})`)
+  return () => {
+    for (const off of offs) {
+      try {
+        off()
+      } catch {
+        // Unregistering must not fail an unload.
+      }
+    }
   }
 }
 

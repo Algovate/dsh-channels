@@ -22,6 +22,9 @@ export const Config = z.object({
   turnPollMs: z.number().default(120).description('Reply polling interval (the event-driven wakeup replaces this in M1).'),
   senderPerMinute: z.number().default(6).description('Per sender, per minute. 0 disables the gate.'),
   senderPerDay: z.number().default(60).description('Per sender, per day. 0 disables the gate.'),
+  questionsEnabled: z.boolean().default(true).description('Let the agent ask its questions in the chat and take the answer back.'),
+  approvalsEnabled: z.boolean().default(true).description('Let the chat approve or reject tool calls (allowed once only).'),
+  interactionTimeoutMs: z.number().default(600000).description('How long one question or approval waits for a chat reply before falling back to the desktop.'),
 })
 
 export interface ChannelsConfig {
@@ -37,6 +40,9 @@ export interface ChannelsConfig {
   turnPollMs: number
   senderPerMinute: number
   senderPerDay: number
+  questionsEnabled: boolean
+  approvalsEnabled: boolean
+  interactionTimeoutMs: number
 }
 
 const DEFAULTS: ChannelsConfig = {
@@ -52,6 +58,9 @@ const DEFAULTS: ChannelsConfig = {
   turnPollMs: 120,
   senderPerMinute: 6,
   senderPerDay: 60,
+  questionsEnabled: true,
+  approvalsEnabled: true,
+  interactionTimeoutMs: 600_000,
 }
 
 /** Fill missing fields; tolerate a config object from an older version. */
@@ -70,6 +79,9 @@ export function resolveConfig(raw: Partial<ChannelsConfig> | undefined): Channel
     turnPollMs: Number.isFinite(input.turnPollMs) ? Number(input.turnPollMs) : DEFAULTS.turnPollMs,
     senderPerMinute: Number.isFinite(input.senderPerMinute) ? Number(input.senderPerMinute) : DEFAULTS.senderPerMinute,
     senderPerDay: Number.isFinite(input.senderPerDay) ? Number(input.senderPerDay) : DEFAULTS.senderPerDay,
+    questionsEnabled: input.questionsEnabled ?? DEFAULTS.questionsEnabled,
+    approvalsEnabled: input.approvalsEnabled ?? DEFAULTS.approvalsEnabled,
+    interactionTimeoutMs: Number.isFinite(input.interactionTimeoutMs) ? Number(input.interactionTimeoutMs) : DEFAULTS.interactionTimeoutMs,
   }
 }
 

@@ -72,6 +72,8 @@ export interface TurnDriverOptions {
   pollMs?: number
   /** Injected in tests; defaults to the host's `createUserMessage`. */
   createUserMessage?: (fields: Record<string, unknown>) => unknown
+  /** Called once per conversation when its session is attached or created. */
+  onAttach?: (target: Target, sessionId: string) => void
 }
 
 type MessageFactory = (fields: Record<string, unknown>) => unknown
@@ -165,7 +167,29 @@ export class TurnDriver {
     const agents = this.#agents()
     if (agents === undefined) throw new Error('the agents service is not available')
 
+    // The preset is what gives the agent its tool set. A session created
+    // without one gets the bare default (a working-directory tool and little
+    // else), so `ask_user_question`, bash and the rest would be missing — the
+    // first thing a real turn exposes.
+    const presets = this.#options.ctx.get?.('agentPresets') as
+      | { resolve?: (id: undefined) => Promise<{ id?: string } | undefined>; mount?: (agentCtx: unknown, id: string) => Promise<unknown> }
+      | undefined
+    let presetId: string | undefined
+    try {
+      const resolved = await presets?.resolve?.(undefined)
+      if (typeof resolved?.id === 'string' && resolved.id !== '') presetId = resolved.id
+    } catch (error) {
+      this.#options.logger.warn(`agentPresets.resolve failed (continuing without a preset): ${String((error as Error)?.message ?? error)}`)
+    }
+
     const setup = async (agentCtx: Record<string, unknown>): Promise<void> => {
+      if (presetId !== undefined && typeof presets?.mount === 'function') {
+        try {
+          await presets.mount(agentCtx, presetId)
+        } catch (error) {
+          this.#options.logger.warn(`agentPresets.mount(${presetId}) failed: ${String((error as Error)?.message ?? error)}`)
+        }
+      }
       const systemPrompt = agentCtx['systemPrompt'] as { section?: (options: Record<string, unknown>) => void } | undefined
       if (options.system === undefined || typeof systemPrompt?.section !== 'function') return
       systemPrompt.section({ name: 'channels:persona', order: 60, text: options.system, interpolate: false })
@@ -213,6 +237,11 @@ export class TurnDriver {
 
     const attached = { handle, sessionId }
     this.#attached.set(sessionId, attached)
+    try {
+      this.#options.onAttach?.(target, sessionId)
+    } catch {
+      // A mapping callback cannot be the reason a turn fails.
+    }
     return attached
   }
 

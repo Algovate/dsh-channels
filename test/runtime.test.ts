@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 
 import { createFakeAdapter, createChannelsRuntime } from './runtime-helper.js'
+import { sessionIdFor } from '../packages/core/src/ids.js'
 import { createHarness, inbound } from './harness.js'
 
 const tick = (ms = 0) => new Promise((resolve) => setTimeout(resolve, ms))
@@ -84,5 +85,65 @@ test('an unknown channel is refused instead of throwing', async () => {
   const runtime = h.makeRuntime({ allowedSenders: ['sender'] })
   const results = await runtime.send({ channel: 'nope', accountId: 'a', conversationId: 'c' }, { text: 'x', kind: 'reply' })
   assert.equal(results[0]?.ok, false)
+  runtime.dispose()
+})
+
+test('a reply to a pending question is consumed instead of starting a turn', async () => {
+  const h = createHarness()
+  const runtime = h.makeRuntime()
+  const adapter = createFakeAdapter()
+  runtime.register(adapter)
+  const pending = runtime.interactions.ask({
+    kind: 'question',
+    target: { channel: 'fake', accountId: 'acct', conversationId: 'conv' },
+    view: { title: '选哪个', options: [{ id: '1', label: '甲' }, { id: '2', label: '乙' }] },
+    parse: (text) => (text === '1' ? { ok: true, value: '1' } : text === '2' ? { ok: true, value: '2' } : { ok: false, hint: '回复序号' }),
+    expiredNotice: '',
+    retiredNotice: '',
+    retireValue: '',
+  })
+  await tick(10)
+  const decision = runtime.dispatch(inbound({ text: '2' }))
+  assert.equal(decision.allow, true)
+  assert.equal(await pending, '2')
+  await tick(30)
+  assert.equal(h.created.length, 0, 'answering does not start a turn')
+  runtime.dispose()
+})
+
+test('a non-answer keeps the question open and sends a hint', async () => {
+  const h = createHarness()
+  const runtime = h.makeRuntime()
+  const adapter = createFakeAdapter()
+  runtime.register(adapter)
+  const pending = runtime.interactions.ask({
+    kind: 'question',
+    target: { channel: 'fake', accountId: 'acct', conversationId: 'conv' },
+    view: { title: '选哪个', options: [{ id: '1', label: '甲' }] },
+    parse: (text) => (text === '1' ? { ok: true, value: '1' } : { ok: false, hint: '请回复 1' }),
+    expiredNotice: '',
+    retiredNotice: '',
+    retireValue: '',
+  })
+  await tick(10)
+  runtime.dispatch(inbound({ text: '随便' }))
+  await tick(20)
+  assert.ok(adapter.sent.some((entry) => entry.outgoing.kind === 'notice' && entry.outgoing.text === '请回复 1'))
+  assert.equal(runtime.interactions.busy({ channel: 'fake', accountId: 'acct', conversationId: 'conv' }), true)
+  runtime.dispatch(inbound({ text: '1' }))
+  assert.equal(await pending, '1')
+  runtime.dispose()
+})
+
+test('an agent that answers for a conversation can be mapped back to it', async () => {
+  const h = createHarness({ reply: '在' })
+  const runtime = h.makeRuntime()
+  runtime.register(createFakeAdapter())
+  runtime.dispatch(inbound())
+  await tick(150)
+  const agent = h.agents.get(sessionIdFor({ channel: 'fake', accountId: 'acct', conversationId: 'conv' }))
+  assert.ok(agent !== undefined)
+  assert.deepEqual(runtime.targetForAgent(agent), { channel: 'fake', accountId: 'acct', conversationId: 'conv' })
+  assert.equal(runtime.targetForAgent({ session: { id: 'someone-elses-session' } }), undefined)
   runtime.dispose()
 })

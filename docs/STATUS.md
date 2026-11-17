@@ -1,8 +1,8 @@
-# 状态 · M0（0.1.0 骨架）
+# 状态 · M0 + M1（0.1.0）
 
 - 日期：2026-11-17
-- 结论：**M0 真机通过** —— 微信发一句、agent 真实回复一句，重启后 resume 同一条会话。
-- 范围：只做文字。媒体、交互（提问/审批）、GUI 卡片、Chat 行、存储域迁移都在后续里程碑（见 DESIGN §12）。
+- 结论：**M0 真机通过**（文字往返、重启 resume）**，M1 单元/契约测试完成**（提问 + 审批进微信，每会话单待答，回复 bypass，TTL，与桌面同时提问先答者胜）。
+- 范围：文字 + 交互。媒体、GUI 卡片、Chat 行、存储域迁移仍在后续里程碑（见 DESIGN §12）。
 
 ## 已实现
 
@@ -41,10 +41,26 @@ turn/end       {"reason":{"kind":"completed"}}
 另外一条部署经验：pnpm 的 `file:` 目录依赖是**复制**进 profile 的，换了源码目录必须
 重新 `pnpm install`，否则跑的还是旧代码（这次被它坑了一次真机验证）。
 
+## M1：交互 seam（提问 + 审批）
+
+| 部分 | 内容 |
+|---|---|
+| `interaction/queue` | 每会话一个待答；队列头才发提示；`claim` 解析回复、`retire` 处理桌面先答、超时/撤销都 reject（`ETIMEDOUT`）而不编造答案；队列本身负责编号（编号就是回复语法） |
+| `interaction/questions` | 多题渲染（题号/【标题】/详情截断/选项描述/多选说明）、解析（`1`/`1.`/全角数字/`1,2`/跳过词/无选项即自由文本）、`answerUserQuestion` 同时问桌面与微信、先真答者胜、桌面赢则 `retire` 微信提示 |
+| `interaction/approval` | 工具名 + 理由渲染；`1/允许/yes` → `allowed-once`、`2/拒绝` → `rejected`、`取消` → `cancelled`；桌面的 `unavailable` **不算决定**（微信还挂着就继续等）；没人决定时**失败关闭**返回 `unavailable`，不伪造拒绝 |
+| 运行时 | `agent → 会话` 反查映射（seam 只拿到 agent）；入站回复在门链之后、回合队列之前被消费（bypass），乱回复只回提示、不消耗待答 |
+| 接线 | `ctx.on('user-questions/request' | 'approval/request', …, { prepend: true, global: true })`：prepend 让微信与桌面同时出现，global 因为它们在被问 agent 的作用域里派发 |
+
+已知边界（M1 之后）：
+
+- 多题只支持「一题一行/分号分隔」，没有逐题确认；
+- 审批只给「允许一次 / 拒绝」，没有"允许并记住"（宿主也没有稳定的一次性授权）；
+- 微信没有按钮，全部走编号（适配器的 `interactions.format = 'numbered'`）。
+
 ## 已知边界（M0 有意不做）
 
 - 只处理文字；图片/文件/语音的消息被丢弃（`normalizeInbound` 返回 null，日志有行）。
-- 没有提问/审批（M1），因此 `ask_user_question` 在微信会话里会落到宿主的审批/提问 UI（GUI）。
+- 提问/审批已在 M1 接入（见上），未做的是「逐题确认」与「允许并记住」。
 - 没有 GUI 卡片，也没有 Chat 行：微信消息在 GUI 里暂时显示为 context 行（M3 补）。
 - 回合回复靠轮询 `snapshotEvents()`（默认 120ms）；事件唤醒是 M1。
 - 没有 journal / 审计 / `/diag export` / 限流持久化（M2）。

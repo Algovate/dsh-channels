@@ -8,6 +8,7 @@
  *
  * @module @rodin/dsh-channels/runtime
  */
+import { InteractionQueue } from './interaction/queue.js'
 import { ConversationQueue } from './inbound/queue.js'
 import { createRateLimiter, gateMessage, type GateContext, type GateDecision } from './inbound/gates.js'
 import { allowlistFor, type ChannelsConfig } from './config.js'
@@ -39,11 +40,19 @@ export class ChannelsRuntime {
   readonly #expiredAccounts = new Set<string>()
   readonly #outbox: Outbox
   readonly #driver: TurnDriver
+  readonly #interactions: InteractionQueue
+  /** session id → the conversation it answers for; the interaction seams need it. */
+  readonly #targets = new Map<string, Target>()
   readonly #stopTimers: Array<() => void> = []
 
   constructor(options: RuntimeOptions) {
     this.#options = options
     this.#outbox = new Outbox({ stateRoot: options.stateRoot, warn: options.logger.warn })
+    this.#interactions = new InteractionQueue({
+      send: (target, outgoing) => this.send(target, outgoing),
+      logger: options.logger,
+      timeoutMs: () => options.config.interactionTimeoutMs,
+    })
     this.#driver = new TurnDriver({
       ctx: options.ctx,
       logger: options.logger,
@@ -51,6 +60,15 @@ export class ChannelsRuntime {
       maxTurnWaitMs: options.config.maxTurnWaitMs,
       pollMs: options.config.turnPollMs,
       ...(options.createUserMessage === undefined ? {} : { createUserMessage: options.createUserMessage }),
+      onAttach: (target, sessionId) => {
+        // Keep only the addressing fields: a Target is what the seams need, and
+        // holding the whole message would keep its text (and media paths) alive.
+        this.#targets.set(sessionId, {
+          channel: target.channel,
+          accountId: target.accountId,
+          conversationId: target.conversationId,
+        })
+      },
     })
   }
 
@@ -64,6 +82,27 @@ export class ChannelsRuntime {
 
   get outbox(): Outbox {
     return this.#outbox
+  }
+
+  get interactions(): InteractionQueue {
+    return this.#interactions
+  }
+
+  /**
+   * The conversation an agent answers for, when it answers for one.
+   *
+   * `undefined` means "not this channel's business" — a session created in the
+   * desktop UI, or a side session — so the desktop answerer stays in charge.
+   */
+  targetForAgent(agent: unknown): Target | undefined {
+    const sessionId = (agent as { session?: { id?: unknown } } | undefined)?.session?.id
+    if (typeof sessionId !== 'string' || sessionId === '') return undefined
+    return this.#targets.get(sessionId)
+  }
+
+  /** Forget a conversation (tests, or after the adapter is removed). */
+  forgetTarget(sessionId: string): void {
+    this.#targets.delete(sessionId)
   }
 
   register(adapter: ChannelAdapter): () => void {
@@ -106,6 +145,18 @@ export class ChannelsRuntime {
     const gate = gateMessage(message, this.gateContext())
     if (gate.allow !== true) {
       this.#options.logger.info(`refused ${message.channel} message from ${message.senderId}: ${gate.reason}${gate.detail === undefined ? '' : ` (${gate.detail})`}`)
+      return gate
+    }
+    // A reply to an open question or approval is consumed here, before the turn
+    // queue: queueing it behind the very turn that is asking deadlocks until the
+    // timeout. The gate above still applies — a stranger cannot answer for you.
+    const claim = this.#interactions.claim(message, message.text)
+    if (claim.status === 'answered') {
+      this.#options.logger.info(`answered the pending interaction in ${lineKey(message)}`)
+      return gate
+    }
+    if (claim.status === 'invalid') {
+      void this.send(message, { text: claim.hint, kind: 'notice' })
       return gate
     }
     void this.#queue
@@ -189,8 +240,10 @@ export class ChannelsRuntime {
     return stop
   }
 
-  /** Stop every timer this runtime started. */
+  /** Stop every timer this runtime started, and reject every pending interaction. */
   dispose(): void {
     for (const stop of this.#stopTimers.splice(0)) stop()
+    this.#interactions.dispose()
+    this.#targets.clear()
   }
 }
