@@ -355,3 +355,25 @@ test('cancelling an input behind desktop work removes only that input and never 
     assert.deepEqual(removed, [input.id])
   } finally { await runtime.dispose() }
 })
+
+test('a long-running task sends one progress reminder to its original chat', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  let started!: () => void
+  const submitted = new Promise<void>((resolve) => { started = resolve })
+  const h = createHarness({ silent: true, maxTurnWaitMs: 180_000, onFollowup: started })
+  const runtime = h.makeRuntime()
+  const adapter = createFakeAdapter()
+  runtime.register(adapter)
+  const progress = () => adapter.sent.filter((item) => item.outgoing.text?.includes('任务仍在处理'))
+  try {
+    runtime.dispatch(inbound({ conversationId: 'long-task-chat' }))
+    await submitted
+    t.mock.timers.tick(59_999)
+    assert.equal(progress().length, 0)
+    t.mock.timers.tick(1)
+    assert.equal(progress().length, 1)
+    assert.equal(progress()[0]?.target.conversationId, 'long-task-chat')
+    t.mock.timers.tick(60_000)
+    assert.equal(progress().length, 1)
+  } finally { await runtime.dispose() }
+})

@@ -552,8 +552,15 @@ export class ChannelsRuntime {
     const outputDir = this.#turnOutputDirectory()
     try {
       let reply
+      const progressNotice = setTimeout(() => {
+        if (signal.aborted || this.#disposed || this.#interactions.busy(message)) return
+        void this.send(message, { text: '任务仍在处理。发 /status 查看当前状态，或发 /cancel 请求停止。', kind: 'notice' })
+          .catch((error: unknown) => this.logger.warn(`progress notice failed for ${key}: ${String(error)}`))
+      }, 60_000)
+      progressNotice.unref()
       try { reply = await this.#driver.run({ message, signal, sessionId, outputDirectory: outputDir }) }
       catch (error) { reply = { text: String(error), failed: true, cancelled: false, interrupted: false, settled: false } }
+      finally { clearTimeout(progressNotice) }
       if (this.#disposed || queueSignal.aborted) return
       if (controller.signal.aborted && (reply.cancelled === true || reply.settled !== true)) {
         const confirmed = reply.cancelled === true
