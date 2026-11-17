@@ -175,7 +175,7 @@ export async function answerUserQuestion({
   queue: InteractionQueue
   target: Target | undefined
   questions: readonly AskUserQuestionItem[]
-  request: { signal?: AbortSignal }
+  request: { signal?: AbortSignal; deadlineAt?: number }
   next: () => Promise<unknown>
   enabled?: boolean
   logger?: { info: (line: string) => void; warn: (line: string) => void }
@@ -183,7 +183,7 @@ export async function answerUserQuestion({
   if (enabled !== true || target === undefined) return next()
   const entry = questionEntry({ target, questions })
   const remote = queue
-    .ask(entry, { ...(request.signal === undefined ? {} : { signal: request.signal }) })
+    .ask(entry, { signal: request.signal, deadlineAt: request.deadlineAt })
     .then((value) => ({ side: 'remote' as const, ok: true as const, value: JSON.parse(value) as { answers: QuestionAnswer[] } }), (error: unknown) => ({ side: 'remote' as const, ok: false as const, error }))
   const local = Promise.resolve()
     .then(() => next())

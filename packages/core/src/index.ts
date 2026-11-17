@@ -231,7 +231,7 @@ function registerInteractionSeams({
           queue: runtime.interactions,
           target,
           questions: (Array.isArray(request?.questions) ? request.questions : []) as AskUserQuestionItem[],
-          request: { ...request, ...(interaction === undefined ? {} : { signal: request?.signal === undefined ? interaction.signal : AbortSignal.any([request.signal, interaction.signal]) }) },
+          request: { ...request, ...(interaction === undefined ? {} : { deadlineAt: interaction.deadlineAt, signal: request?.signal === undefined ? interaction.signal : AbortSignal.any([request.signal, interaction.signal]) }) },
           next,
           enabled: config.questionsEnabled,
           logger,
@@ -250,7 +250,7 @@ function registerInteractionSeams({
         return answerApproval({
           queue: runtime.interactions,
           target,
-          request: { ...request, ...(interaction === undefined ? {} : { signal: request?.signal === undefined ? interaction.signal : AbortSignal.any([request.signal, interaction.signal]) }) },
+          request: { ...request, ...(interaction === undefined ? {} : { deadlineAt: interaction.deadlineAt, signal: request?.signal === undefined ? interaction.signal : AbortSignal.any([request.signal, interaction.signal]) }) },
           next,
           enabled: config.approvalsEnabled,
           logger,

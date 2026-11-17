@@ -1,9 +1,12 @@
-/** Latest execution per chat; never replay this file as work. */
+/** Recent executions per chat; never replay this file as work. */
 import fs from 'node:fs'
 import { sameTarget } from '../ids.js'
 import type { Target } from '../types.js'
 import { atomicWriteJson } from './atomic.js'
 import { statePath } from './layout.js'
+
+const MAX_TASKS = 500
+const MAX_TASKS_PER_CHAT = 10
 
 export type ExecutionState = 'running' | 'stopping' | 'completed' | 'failed' | 'cancelled' | 'unknown'
 export type DeliveryState = 'none' | 'sending' | 'sent' | 'pending' | 'unknown' | 'failed'
@@ -38,17 +41,35 @@ export class Tasks {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') { this.#unreadable = true; warn(`tasks could not be loaded: ${String(error)}`) }
     }
   }
-  latest(target: Target): TaskRecord | undefined { return this.#items.find((task) => sameTarget(task.target, target)) }
+  latest(target: Target): TaskRecord | undefined { return this.#items.findLast((task) => sameTarget(task.target, target)) }
+  get(target: Target, id: string): TaskRecord | undefined {
+    return this.#items.find((task) => task.id === id && sameTarget(task.target, target))
+  }
+  recent(target: Target, senderId?: string): TaskRecord[] {
+    return this.#items.filter((task) => sameTarget(task.target, target) && (senderId === undefined || task.senderId === senderId)).slice(-5).reverse()
+  }
   save(task: TaskRecord): boolean {
-    const items = [...this.#items.filter((item) => !sameTarget(item.target, task.target)), task].slice(-500)
+    // The inbox may still contain this ID if the process stopped between the two writes.
+    const previous = this.#items.filter((item) => item.id !== task.id || !sameTarget(item.target, task.target))
+    const chatTasks = previous.filter((item) => sameTarget(item.target, task.target))
+    const overflow = Math.max(0, chatTasks.length + 1 - MAX_TASKS_PER_CHAT)
+    const evicted = new Set(chatTasks.slice(0, overflow))
+    const retained = previous.filter((item) => !evicted.has(item))
+    return this.#write([...retained, task].slice(-MAX_TASKS))
+  }
+  #write(items: TaskRecord[]): boolean {
     if (this.#unreadable || !atomicWriteJson(this.#file, items, { warn: this.#warn })) return false
     this.#items = items
     return true
   }
   update(target: Target, id: string, patch: Partial<Pick<TaskRecord, 'execution' | 'delivery' | 'endedAt' | 'unconfirmed' | 'filesUnsent'>>): void {
-    const task = this.latest(target)
-    if (task?.id === id && !this.save({ ...task, ...patch })) {
-      this.#items = this.#items.map((item) => item.id === id ? { ...item, execution: 'unknown', delivery: 'unknown' } : item)
+    const index = this.#items.findIndex((item) => item.id === id && sameTarget(item.target, target))
+    const task = this.#items[index]
+    if (task === undefined) return
+    const items = this.#items.slice()
+    items[index] = { ...task, ...patch }
+    if (!this.#write(items)) {
+      this.#items[index] = { ...task, execution: 'unknown', delivery: 'unknown' }
       this.#warn('task status could not be saved')
     }
   }

@@ -20,7 +20,8 @@ import { chatParagraphs } from '../outbound.js'
 export const DEFAULT_INTERACTION_TIMEOUT_MS = 10 * 60_000
 
 export function interactionValidity(timeoutMs: number): string {
-  const seconds = Math.max(1, Math.ceil(timeoutMs / 1000))
+  const seconds = Math.floor(timeoutMs / 1000)
+  if (seconds < 1) return '即将截止'
   const minutes = Math.floor(seconds / 60)
   const remainder = seconds % 60
   const duration = [minutes ? `${minutes} 分钟` : '', remainder ? `${remainder} 秒` : ''].filter(Boolean).join(' ')
@@ -53,6 +54,8 @@ export interface InteractionEntry {
 interface Pending {
   entry: InteractionEntry
   started: boolean
+  deadlineAt: number | undefined
+  expiresAt?: number
   resolve(value: string): void
   reject(error: Error): void
   timer: ReturnType<typeof setTimeout> | undefined
@@ -121,7 +124,7 @@ export class InteractionQueue {
   }
 
   /** Queue one interaction and resolve with the answer the person gave. */
-  ask(entry: InteractionEntry, { signal }: { signal?: AbortSignal } = {}): Promise<string> {
+  ask(entry: InteractionEntry, { signal, deadlineAt }: { signal?: AbortSignal; deadlineAt?: number } = {}): Promise<string> {
     if (this.#disposed) return Promise.reject(new Error('the interaction queue is disposed'))
     if (signal?.aborted === true) return Promise.reject(withdrawnError(entry.kind))
     const key = keyOf(entry.target)
@@ -132,6 +135,7 @@ export class InteractionQueue {
       const pending: Pending = {
         entry,
         started: false,
+        deadlineAt,
         resolve,
         reject,
         timer: undefined,
@@ -166,9 +170,16 @@ export class InteractionQueue {
     const { entry } = pending
     this.#sendInOrder(entry.target, async () => {
       if (!this.#isHead(pending)) return
+      const timeoutMs = this.#timeoutMs()
+      const remaining = () => Math.min(timeoutMs, (pending.deadlineAt ?? Infinity) - Date.now())
+      const validity = remaining()
+      if (validity <= 0) {
+        this.#settle(pending, undefined, timedOutError(entry.kind))
+        return
+      }
       pending.started = true
       try {
-        const results = await this.#options.send(entry.target, { text: this.#renderText(entry), kind: 'question' })
+        const results = await this.#options.send(entry.target, { text: this.#renderText(entry, validity), kind: 'question' })
         const failed = results.find((result) => result.ok === false)
         if (failed !== undefined) throw new Error(failed.detail ?? failed.code)
         if (results.length === 0) throw new Error('nothing was sent')
@@ -180,21 +191,27 @@ export class InteractionQueue {
       if (!this.#isHead(pending)) return
       const transmission = this.#transmissions.get(keyOf(entry.target))
       if (transmission !== undefined) transmission.retired.length = 0
+      const waitMs = remaining()
+      pending.expiresAt = Date.now() + waitMs
+      if (waitMs <= 0) {
+        this.#settle(pending, undefined, timedOutError(entry.kind), entry.expiredNotice)
+        return
+      }
       pending.timer = setTimeout(() => {
         this.#settle(pending, undefined, timedOutError(entry.kind), entry.expiredNotice)
-      }, this.#timeoutMs())
+      }, waitMs)
       pending.timer.unref?.()
     })
   }
 
   /** Add the deadline to the reply instructions provided by each interaction. */
-  #renderText(entry: InteractionEntry): string {
+  #renderText(entry: InteractionEntry, validity: number): string {
     const { title, options, hint } = entry.view
     return chatParagraphs(
       title,
       ...options.map((option, index) => `${index + 1}. ${option.label}`),
       hint ?? (options.length > 0 ? '回复序号即可。' : ''),
-      `【回复时限】${interactionValidity(this.#timeoutMs())}`,
+      `【回复时限】${interactionValidity(validity)}`,
     )
   }
 
@@ -221,6 +238,10 @@ export class InteractionQueue {
     const sender = head.entry.target
     if (sender.group && sender.senderId !== undefined && (target as { senderId?: string }).senderId !== sender.senderId) {
       return { status: 'invalid', hint: '请由任务发起者回复。' }
+    }
+    if (head.expiresAt !== undefined && Date.now() >= head.expiresAt) {
+      this.#settle(head, undefined, timedOutError(head.entry.kind))
+      return { status: 'invalid', hint: head.entry.expiredNotice }
     }
     const parsed = head.entry.parse(text)
     if (parsed === null) return { status: 'none' }

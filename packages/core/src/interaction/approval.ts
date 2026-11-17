@@ -44,6 +44,11 @@ export function parseApprovalOutcome(text: string): ApprovalOutcome | null {
   return null
 }
 
+export function isApprovalReply(text: string): boolean {
+  const match = /^[a-f0-9]{6}\s+(\S+)$/i.exec(text.trim())
+  return match?.[1] !== undefined && parseApprovalOutcome(match[1]) !== null
+}
+
 export function approvalEntry({ target, request }: { target: Target; request: { toolName?: string; reason?: string; displayReason?: unknown } }): InteractionEntry {
   const code = randomBytes(3).toString('hex')
   const hint = chatParagraphs('请回复下面任意一组验证码和序号。', `「${code} 1」允许一次`, `「${code} 2」拒绝`, `「${code} 3」取消审批`)
@@ -82,7 +87,7 @@ export async function answerApproval({
 }: {
   queue: InteractionQueue
   target: Target | undefined
-  request: { toolName?: string; reason?: string; displayReason?: unknown; signal?: AbortSignal }
+  request: { toolName?: string; reason?: string; displayReason?: unknown; signal?: AbortSignal; deadlineAt?: number }
   next: () => Promise<unknown>
   enabled?: boolean
   logger?: { info: (line: string) => void; warn: (line: string) => void }
@@ -90,7 +95,7 @@ export async function answerApproval({
   if (enabled !== true || target === undefined) return next()
   const entry = approvalEntry({ target, request })
   const remote = queue
-    .ask(entry, { ...(request.signal === undefined ? {} : { signal: request.signal }) })
+    .ask(entry, { signal: request.signal, deadlineAt: request.deadlineAt })
     .then((value) => ({ side: 'remote' as const, ok: true as const, value: value as ApprovalOutcome }), (error: unknown) => ({ side: 'remote' as const, ok: false as const, error }))
   const local = Promise.resolve()
     .then(() => next())

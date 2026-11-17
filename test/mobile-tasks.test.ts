@@ -207,7 +207,7 @@ test('task controls remain available after the sender exhausts turn quota', asyn
   } finally { await runtime.dispose() }
 })
 
-test('an uncertain early reply part stays uncertain after the remaining text retries successfully', async () => {
+test('retry updates each task without changing history order or losing delivery uncertainty', async () => {
   const h = createHarness({ reply: 'x'.repeat(25) })
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'mobile-retry-'))
   const runtime = createChannelsRuntime({ ctx: h.ctx, stateRoot: root, config: { senderPerMinute: 0 } })
@@ -223,20 +223,23 @@ test('an uncertain early reply part stays uncertain after the remaining text ret
   }
   runtime.register(adapter)
   try {
-    runtime.dispatch(inbound())
+    runtime.dispatch(inbound({ text: 'first task' }))
     await until(() => runtime.outbox.list().length > 0)
-    await tick(10)
+    runtime.dispatch(inbound({ text: 'second task' }))
+    await until(() => runtime.outbox.list().length === 2)
     const file = path.join(root, 'outbox.json')
     const outbox = JSON.parse(fs.readFileSync(file, 'utf8'))
-    outbox.items[0].nextAt = 0
+    for (const item of outbox.items) item.nextAt = 0
     fs.writeFileSync(file, JSON.stringify(outbox))
     retry = true
     runtime.startOutboxRetry(5)
     await until(() => runtime.outbox.list().length === 0)
     await tick(10)
-    const task = JSON.parse(fs.readFileSync(path.join(root, 'tasks.json'), 'utf8'))[0]
-    assert.equal(task.execution, 'completed')
-    assert.equal(task.delivery, 'unknown')
+    const tasks: Array<{ summary: string; execution: string; delivery: string }> = JSON.parse(fs.readFileSync(path.join(root, 'tasks.json'), 'utf8'))
+    assert.deepEqual(tasks.map(({ summary, execution, delivery }) => [summary, execution, delivery]), [
+      ['first task', 'completed', 'unknown'],
+      ['second task', 'completed', 'sent'],
+    ])
   } finally { await runtime.dispose() }
 })
 
@@ -376,4 +379,93 @@ test('a long-running task sends one progress reminder to its original chat', asy
     t.mock.timers.tick(60_000)
     assert.equal(progress().length, 1)
   } finally { await runtime.dispose() }
+})
+
+test('/tasks keeps five recent tasks across restart and scopes group history to the requester', async () => {
+  const h = createHarness({ reply: 'done' })
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'mobile-history-'))
+  const config = { senderPerMinute: 0, senderPerDay: 0, allowedSenders: ['sender', 'other'] }
+  const runtime = createChannelsRuntime({ ctx: h.ctx, stateRoot: root, config })
+  const adapter = createFakeAdapter()
+  runtime.register(adapter)
+  try {
+    for (let i = 1; i <= 6; i++) runtime.dispatch(inbound({ text: `我的任务 ${i}`, group: true }))
+    runtime.dispatch(inbound({ text: '其他人的任务', group: true, senderId: 'other' }))
+    runtime.dispatch(inbound({ text: '其他聊天的任务', conversationId: 'other-chat' }))
+    await until(() => adapter.sent.filter((item) => item.outgoing.kind === 'reply').length === 8)
+  } finally { await runtime.dispose() }
+
+  const reopened = createChannelsRuntime({ ctx: h.ctx, stateRoot: root, config })
+  const after = createFakeAdapter()
+  reopened.register(after)
+  try {
+    reopened.dispatch(inbound({ text: '/tasks', group: true }))
+    await until(() => after.sent.length > 0)
+    const text = after.sent.map((item) => item.outgoing.text).join('\n')
+    assert.deepEqual(text.match(/我的任务 \d/g), ['我的任务 6', '我的任务 5', '我的任务 4', '我的任务 3', '我的任务 2'])
+    assert.doesNotMatch(text, /其他人的任务|其他聊天的任务/)
+    assert.match(text, /#[0-9a-f]{8}.*完成.*已发送/)
+    assert.equal(h.followedUp.length, 8)
+  } finally { await reopened.dispose(); fs.rmSync(root, { recursive: true, force: true }) }
+})
+
+test('an approval near the turn deadline advertises the shorter window and rejects a late code', async () => {
+  const h = createHarness({ silent: true })
+  const runtime = createChannelsRuntime({ ctx: h.ctx, maxTurnWaitMs: 350, config: { interactionTimeoutMs: 600_000 } })
+  const adapter = createFakeAdapter()
+  runtime.register(adapter)
+  try {
+    const target = inbound()
+    runtime.dispatch(target)
+    await until(() => h.followedUp.length === 1)
+    ownTurn(h)
+    const interaction = runtime.interactionForAgent([...h.agents.values()][0]!)!
+    const { approvalEntry } = await import('../packages/core/src/interaction/approval.js')
+    const answer = runtime.interactions.ask(approvalEntry({ target, request: { toolName: 'test' } }), interaction).catch(() => 'expired')
+    await until(() => adapter.sent.some((item) => item.outgoing.kind === 'question'))
+    const prompt = adapter.sent.find((item) => item.outgoing.kind === 'question')?.outgoing.text ?? ''
+    const code = prompt.match(/「([a-f0-9]{6}) 1」/)?.[1]
+    assert.ok(code)
+    assert.equal(await answer, 'expired')
+    runtime.dispatch(inbound({ text: `${code} 1` }))
+    await until(() => adapter.sent.some((item) => item.outgoing.text?.includes('审批已失效')) || h.followedUp.length === 2)
+    assert.match(prompt, /回复时限.*即将截止/)
+    assert.equal(h.followedUp.length, 1)
+    assert.ok(adapter.sent.some((item) => item.outgoing.text?.includes('审批已失效')))
+  } finally { await runtime.dispose() }
+})
+
+test('a host completion already recorded at the deadline is still delivered', async () => {
+  const h = createHarness({ reply: 'finished before deadline' })
+  const runtime = createChannelsRuntime({ ctx: h.ctx, maxTurnWaitMs: 60, pollMs: 200 })
+  const adapter = createFakeAdapter()
+  runtime.register(adapter)
+  try {
+    runtime.dispatch(inbound())
+    await until(() => adapter.sent.some((item) => item.outgoing.kind === 'reply' || item.outgoing.text?.includes('任务等待超时')))
+    assert.ok(adapter.sent.some((item) => item.outgoing.text === 'finished before deadline'))
+  } finally { await runtime.dispose() }
+})
+
+test('recovering work left in the inbox reuses its task history entry', async () => {
+  const h = createHarness({ reply: 'recovered' })
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'mobile-recovery-'))
+  const message = inbound({ text: '恢复这个任务' })
+  const target = { channel: message.channel, accountId: message.accountId, conversationId: message.conversationId }
+  const id = '12345678-aaaa-4444-abcd-123456789abc'
+  fs.writeFileSync(path.join(root, 'inbox.json'), JSON.stringify([{ id, message, sessionId: 'recovery-session' }]))
+  fs.writeFileSync(path.join(root, 'tasks.json'), JSON.stringify([
+    { id, target, senderId: message.senderId, summary: message.text, startedAt: Date.now(), execution: 'running', delivery: 'none' },
+  ]))
+  const runtime = createChannelsRuntime({ ctx: h.ctx, stateRoot: root })
+  const adapter = createFakeAdapter()
+  runtime.register(adapter)
+  try {
+    await runtime.resumePending()
+    await until(() => adapter.sent.some((item) => item.outgoing.kind === 'reply'))
+    await until(() => JSON.parse(fs.readFileSync(path.join(root, 'tasks.json'), 'utf8')).some((task: { delivery: string }) => task.delivery === 'sent'))
+    const tasks: Array<{ id: string; execution: string; delivery: string }> = JSON.parse(fs.readFileSync(path.join(root, 'tasks.json'), 'utf8'))
+    assert.deepEqual(tasks.map((task) => [task.id, task.execution, task.delivery]), [[id, 'completed', 'sent']])
+    assert.equal(h.followedUp.length, 1)
+  } finally { await runtime.dispose(); fs.rmSync(root, { recursive: true, force: true }) }
 })

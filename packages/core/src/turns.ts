@@ -106,17 +106,17 @@ export class TurnDriver {
   readonly #options: TurnDriverOptions
   readonly #attached = new Map<string, Attached>()
   readonly #owned = new Set<AgentHandle>()
-  readonly #running = new Map<AgentHandle['agent'], { message: InboundMessage; progress: TurnProgress; signal: AbortSignal; removed: boolean }>()
+  readonly #running = new Map<AgentHandle['agent'], { message: InboundMessage; progress: TurnProgress; signal: AbortSignal; deadlineAt: number; removed: boolean }>()
   #disposed = false
   readonly #shutdown = new AbortController()
 
   /** Only the host turn consuming this exact input may export its interactions. */
-  interactionForAgent(value: unknown): { target: InboundMessage; signal: AbortSignal } | undefined {
+  interactionForAgent(value: unknown): { target: InboundMessage; signal: AbortSignal; deadlineAt: number } | undefined {
     const agent = value as AgentHandle['agent']
     const running = this.#running.get(agent)
     if (running === undefined || running.signal.aborted) return undefined
     running.progress.update(agent.session?.snapshotEvents?.() ?? [])
-    return running.progress.ownsActiveTurn ? { target: running.message, signal: running.signal } : undefined
+    return running.progress.ownsActiveTurn ? { target: running.message, signal: running.signal, deadlineAt: running.deadlineAt } : undefined
   }
 
   async dispose(): Promise<void> {
@@ -294,7 +294,9 @@ export class TurnDriver {
   async run(request: TurnRequest & { sessionId?: string }): Promise<TurnReply> {
     const deadline = new AbortController()
     const signal = AbortSignal.any([deadline.signal, this.#shutdown.signal, ...(request.signal === undefined ? [] : [request.signal])])
-    const timer = setTimeout(() => deadline.abort(new Error('the turn timed out')), this.#options.maxTurnWaitMs ?? 20 * 60_000)
+    const timeoutMs = this.#options.maxTurnWaitMs ?? 20 * 60_000
+    const deadlineAt = Date.now() + timeoutMs
+    const timer = setTimeout(() => deadline.abort(new Error('the turn timed out')), timeoutMs)
     const lifecycle: { submitted: boolean; result?: TurnReply } = { submitted: false }
     let cancellation: Promise<TurnReply> | undefined
     let onAbort!: () => void
@@ -302,8 +304,20 @@ export class TurnDriver {
       onAbort = () => {
         const reply = { text: '回合已取消或超时', failed: true, interrupted: true, sessionId: request.sessionId ?? sessionIdFor(request.message) }
         if (lifecycle.result?.settled) { resolve(lifecycle.result); return }
+        const running = [...this.#running.entries()].find(([, value]) => value.signal === signal)
+        if (running !== undefined) {
+          const [agent, state] = running
+          try {
+            state.progress.update(agent.session?.snapshotEvents?.() ?? [])
+          } catch (error) {
+            this.logger.warn(`could not read final turn state: ${String(error)}`)
+          }
+          if (state.progress.result !== undefined) {
+            resolve({ ...state.progress.result, sessionId: reply.sessionId, settled: true, cancelled: state.progress.cancelled })
+            return
+          }
+        }
         if (request.signal?.reason === 'user-cancel') {
-          const running = [...this.#running.entries()].find(([, value]) => value.signal === signal)
           cancellation = (async () => {
             if (running === undefined) return { ...reply, cancelled: !lifecycle.submitted }
             const [agent, state] = running
@@ -322,7 +336,7 @@ export class TurnDriver {
       else signal.addEventListener('abort', onAbort, { once: true })
     })
     try {
-      const result = await Promise.race([this.#run({ ...request, signal, lifecycle }), aborted])
+      const result = await Promise.race([this.#run({ ...request, signal, deadlineAt, lifecycle }), aborted])
       return await (cancellation ?? Promise.resolve(result))
     } finally {
       clearTimeout(timer)
@@ -331,7 +345,7 @@ export class TurnDriver {
     }
   }
 
-  async #run(request: TurnRequest & { sessionId?: string; signal: AbortSignal; lifecycle: { submitted: boolean; result?: TurnReply } }): Promise<TurnReply> {
+  async #run(request: TurnRequest & { sessionId?: string; signal: AbortSignal; deadlineAt: number; lifecycle: { submitted: boolean; result?: TurnReply } }): Promise<TurnReply> {
     const { message, signal } = request
     const sessionId = request.sessionId ?? sessionIdFor(message)
     if (signal?.aborted) return { text: '', failed: true, sessionId }
@@ -387,7 +401,7 @@ export class TurnDriver {
     const before = this.#lastSeq(agent)
     if (signal?.aborted) return { text: '', failed: true, sessionId }
     const progress = new TurnProgress(before, messageId)
-    const running = { message, progress, signal, removed: false }
+    const running = { message, progress, signal, deadlineAt: request.deadlineAt, removed: false }
     this.#running.set(agent, running)
     const cancel = (): void => {
       try {

@@ -12,6 +12,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 
 import { InteractionQueue } from './interaction/queue.js'
+import { isApprovalReply } from './interaction/approval.js'
 import { ConversationQueue } from './inbound/queue.js'
 import { authorizeMessage, createDurableRateLimiter, createRateLimiter, reserveMessage, type GateContext, type GateDecision, type Reservation } from './inbound/gates.js'
 import type { CounterStore } from './store/counters.js'
@@ -26,6 +27,7 @@ import { Journal, receiptKey } from './store/journal.js'
 import { TurnDriver } from './turns.js'
 import { chatParagraphs, plainText, splitIntoBubbles } from './outbound.js'
 import { listProducedFiles } from './produced.js'
+import { taskHistoryText, taskStatusText } from './task-messages.js'
 import type { ChannelAdapter, InboundMessage, Outgoing, SendResult, Target } from './types.js'
 
 export interface RuntimeLogger {
@@ -254,7 +256,7 @@ export class ChannelsRuntime {
     }
     if (!this.#checkInbound(message, context).allow) return false
     const command = parseCommand(message.text)
-    if (!hasAttachments && command !== null && TASK_CONTROLS.has(command.name)) return true
+    if (!hasAttachments && (isApprovalReply(message.text) || (command !== null && TASK_CONTROLS.has(command.name)))) return true
     // Plain replies can settle an in-flight turn even if it consumed the last slot.
     if (!hasAttachments && this.#interactions.busy(message)) return true
     if (this.#preflightReservations.has(message)) return true
@@ -296,8 +298,18 @@ export class ChannelsRuntime {
     }
     const command = parseCommand(message.text)
     // Answers must bypass the queue: the running turn is waiting for them.
-    const claim = command === null ? this.#interactions.claim(message, message.text) : { status: 'none' as const }
+    const approvalReply = isApprovalReply(message.text)
+    const claim = command === null && (!approvalReply || this.#interactions.active(message) === 'approval')
+      ? this.#interactions.claim(message, message.text)
+      : { status: 'none' as const }
     let reservation = this.#takeReservation(message)
+    if (approvalReply && (claim.status === 'none' || claim.status === 'invalid')) {
+      reservation?.(false)
+      this.#acceptInbound(message)
+      const text = claim.status === 'invalid' ? claim.hint : '审批已失效。请使用最新审批提示中的验证码。'
+      void this.send(message, { text, kind: 'notice' })
+      return access
+    }
     if (claim.status === 'waiting' || claim.status === 'answered') {
       reservation?.(false)
       if (claim.status === 'answered') {
@@ -487,44 +499,25 @@ export class ChannelsRuntime {
       await this.send(message, { text: `已清除 ${entries.length} 条你的排队消息。`, kind: 'notice' })
       return
     }
-    if (name === 'status') {
-      const paragraphs = [`【任务状态 · ${this.#adapters.get(message.channel)?.label.zh ?? message.channel}】`]
+    if (name === 'tasks' || name === 'status') {
       const outbox = this.#outbox.list().filter((entry) => sameTarget(entry.target, message))
-      const active = this.#activeTasks.get(lineKey(message))
-      const saved = this.#tasks.latest(message)
-      const task = active?.record ?? (saved === undefined ? undefined : { ...saved, execution: saved.execution === 'running' || saved.execution === 'stopping' ? 'unknown' as const : saved.execution })
-      if (task !== undefined) {
-        const interaction = this.#interactions.active(message)
-        const execution = task.execution === 'running' && interaction !== undefined ? (interaction === 'approval' ? '等待审批' : '等待回答') : {
-          running: '执行中', stopping: '正在停止', completed: '完成', failed: '失败', cancelled: '已取消', unknown: '未知（请在 DSH 核对后再重试）',
-        }[task.execution]
-        const pending = outbox.some((entry) => entry.taskId === task.id)
-        const delivery = task.delivery === 'pending' && !pending ? '未知（请在 DSH 核对发送记录）' : {
-          none: '尚无结果', sending: '发送中', sent: '已发送', pending: task.filesUnsent ? '文字待重发（附件可在 DSH 取回）' : '待重发', unknown: '未获平台确认', failed: '发送失败（可在 DSH 查看结果）',
-        }[task.delivery]
-        const seconds = Math.max(0, Math.floor(((task.endedAt ?? Date.now()) - task.startedAt) / 1000))
-        paragraphs.push(
-          `${active === undefined ? '最近任务' : '当前任务'}：${statusPreview(task.summary, 42)}`,
-          `执行状态：${execution}　｜　已用时：${seconds} 秒`,
-          `结果发送：${delivery}`,
-        )
-      } else paragraphs.push('当前任务：无')
-      paragraphs.push(`【队列】排队：${this.pendingInputs(message)} 条　｜　待重发：${outbox.length} 条`)
-      if (this.#interactions.busy(message) && this.#interactions.active(message) === undefined) paragraphs.push('提示发送中')
-      const recent = this.#journal.outbound(undefined, message, 'reply').slice(-2).reverse()
-      if (recent.length > 0) {
-        paragraphs.push('【最近结果】')
-        const labels = { accepted: '已发送', unconfirmed: '未确认', failed: '发送失败', pending: '投递未知' }
-        const previews = new Map<string, number>()
-        for (const entry of recent) {
-          const preview = `${labels[entry.state]}｜${statusPreview(entry.text, 28) || '附件'}`
-          previews.set(preview, (previews.get(preview) ?? 0) + 1)
-        }
-        for (const [preview, count] of previews) {
-          paragraphs.push(count > 1 ? `· ${preview}（${count} 条）` : `· ${preview}`)
-        }
+      const context = {
+        active: this.#activeTasks.get(lineKey(message))?.record,
+        interaction: this.#interactions.active(message),
+        pendingTaskIds: new Set(outbox.flatMap((entry) => entry.taskId === undefined ? [] : [entry.taskId])),
       }
-      await this.send(message, { text: chatParagraphs(...paragraphs), kind: 'notice' })
+      const text = name === 'tasks'
+        ? taskHistoryText(this.#tasks.recent(message, message.group ? message.senderId : undefined), context)
+        : taskStatusText({
+          channel: this.#adapters.get(message.channel)?.label.zh ?? message.channel,
+          latest: this.#tasks.latest(message),
+          queued: this.pendingInputs(message),
+          pending: outbox.length,
+          promptSending: context.interaction === undefined && this.#interactions.busy(message),
+          recent: this.#journal.outbound(undefined, message, 'reply'),
+          context,
+        })
+      await this.send(message, { text, kind: 'notice' })
       return
     }
     if (name !== 'new') {
@@ -732,7 +725,7 @@ export class ChannelsRuntime {
         .then(() => {
           for (const task of retryTasks.values()) {
             if (this.#outbox.list().some((entry) => entry.taskId === task.id && sameTarget(entry.target, task.target))) continue
-            const saved = this.#tasks.latest(task.target)
+            const saved = this.#tasks.get(task.target, task.id)
             const delivery = saved?.filesUnsent ? 'failed' : task.unconfirmed || saved?.unconfirmed || saved?.delivery === 'unknown' ? 'unknown' : 'sent'
             this.#tasks.update(task.target, task.id, { delivery })
           }
@@ -754,9 +747,4 @@ export class ChannelsRuntime {
     this.#interactions.dispose()
     return this.#driver.dispose()
   }
-}
-
-function statusPreview(text: string, limit: number): string {
-  const chars = Array.from(text.trim().replace(/\s+/g, ' '))
-  return chars.length > limit ? chars.slice(0, limit).join('') + '…' : chars.join('')
 }
