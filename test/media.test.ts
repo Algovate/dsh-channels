@@ -46,3 +46,12 @@ test('a document is a file to read, and a video says it cannot be read', () => {
   assert.match(inboundTextWithMedia({ text: '', media: [file] }), /请用 read 工具读取/)
   assert.match(inboundTextWithMedia({ text: '', media: [{ kind: 'video', path: '/v.mp4', mime: 'video/mp4', bytes: 10 }] }), /视频文件，无法直接读取/)
 })
+
+test('an extracted document body travels inside the note, fenced and attributed', () => {
+  const document = { kind: 'file' as const, path: '/state/media/c.docx', mime: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', bytes: 4096, name: 'c.docx', text: '第三条 甲方应于十日内付款。' }
+  const text = inboundTextWithMedia({ text: '第三条写了什么？', media: [document] })
+  assert.match(text, /<document path="\/state\/media\/c\.docx">/)
+  assert.match(text, /第三条 甲方应于十日內付款。|第三条 甲方应于十日内付款。/)
+  assert.match(text, /可能被截断/)
+  assert.equal(text.split('\n\n').at(-1), '第三条写了什么？', 'the person\'s question stays last')
+})

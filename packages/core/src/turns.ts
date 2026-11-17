@@ -24,6 +24,8 @@
 import type { InboundMessage, Target } from './types.js'
 import { sessionIdFor } from './ids.js'
 import { inboundTextWithMedia } from './media.js'
+import { extractDocumentText } from './documents.js'
+import type { InboundMedia } from './types.js'
 
 /** What `agents.create` / `agents.get` hand back, as far as this module cares. */
 export interface AgentHandle {
@@ -75,6 +77,8 @@ export interface TurnDriverOptions {
   createUserMessage?: (fields: Record<string, unknown>) => unknown
   /** Called once per conversation when its session is attached or created. */
   onAttach?: (target: Target, sessionId: string) => void
+  /** Extract document text for inbound files; a failure keeps the path-only note. */
+  documentChars?: number
 }
 
 type MessageFactory = (fields: Record<string, unknown>) => unknown
@@ -265,11 +269,12 @@ export class TurnDriver {
 
     const before = this.#lastSeq(agent)
     if (typeof agent.followup !== 'function') throw new Error('the agent cannot accept a followup message')
+    const enriched = await this.#enrichDocuments(message)
     agent.followup(
       factory({
         // Attachments become text the model can act on ("saved here, open it
         // with read_image"); the person's own words stay last.
-        content: [{ type: 'text', text: inboundTextWithMedia(message) }],
+        content: [{ type: 'text', text: inboundTextWithMedia({ ...message, media: enriched }) }],
         source: {
           kind: message.channel,
           form: 'message',
@@ -281,6 +286,29 @@ export class TurnDriver {
     )
     const reply = await this.#awaitReply(agent, before, request.signal)
     return { ...reply, sessionId: attached.sessionId }
+  }
+
+  /**
+   * Fill in the extracted text of each document attachment.
+   *
+   * Only `file` items are tried: an image is for `read_image`, a voice note is
+   * already transcribed by the adapter when ASR is available, a video has no
+   * text. An extraction failure is a log line; the path still reaches the model.
+   */
+  async #enrichDocuments(message: TurnRequest['message']): Promise<InboundMedia[]> {
+    const media = Array.isArray(message.media) ? message.media : []
+    if (media.length === 0) return media
+    return Promise.all(
+      media.map(async (item) => {
+        if (item.kind !== 'file' || item.text !== undefined) return item
+        const result = await extractDocumentText(item.path, { maxChars: this.#options.documentChars ?? 4000 })
+        if (result.ok !== true) {
+          this.#options.logger.info(`document text not extracted from ${item.name ?? item.path}: ${result.reason}`)
+          return item
+        }
+        return { ...item, text: result.truncated ? `${result.text}\n…（已截断）` : result.text }
+      }),
+    )
   }
 
   #lastSeq(agent: AgentHandle['agent']): number {

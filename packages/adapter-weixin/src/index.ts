@@ -7,21 +7,49 @@
  *
  * @module @rodin/dsh-channels-weixin
  */
+import fs from 'node:fs'
 import path from 'node:path'
 
 import { listIndexedWeixinAccountIds } from '../vendor/openclaw-weixin/auth/accounts.js'
 import type { AccountInfo, ChannelAdapter, InboundMessage, InteractionReply, InteractionView, Outgoing, SendResult, Target } from '@rodin/dsh-channels'
 import { mediaItemsOf, normalizeInbound, type RawMediaItem, type RawMessage } from './normalize.js'
 import { MAX_INBOUND_MEDIA, saveInboundItem } from './media.js'
+import { AsrBridge } from './asr.js'
 import { WeixinTransport, readAccount } from './transport.js'
 
 export const CHANNEL_ID = 'weixin'
+
+/** Nearest ancestor that looks like a package root (holds a package.json). */
+export function packageRoot(from: string): string {
+  let dir = path.resolve(from)
+  for (let depth = 0; depth < 6; depth += 1) {
+    try {
+      if (fs.existsSync(path.join(dir, 'package.json'))) return dir
+    } catch {
+      // Keep walking.
+    }
+    const parent = path.dirname(dir)
+    if (parent === dir) break
+    dir = parent
+  }
+  return path.resolve(from)
+}
 
 export interface WeixinAdapterOptions {
   ctx?: unknown
   runtime?: { logger?: { info: (line: string) => void; warn: (line: string) => void }; markExpired?: (accountId: string, expired?: boolean) => void }
   stateRoot?: string
-  config?: { accountId?: string; longPollTimeoutMs?: number; stateDir?: string; cdnBaseUrl?: string; mediaEnabled?: boolean }
+  config?: {
+    accountId?: string
+    longPollTimeoutMs?: number
+    stateDir?: string
+    cdnBaseUrl?: string
+    mediaEnabled?: boolean
+    asrEnabled?: boolean
+    asrCommand?: string
+    asrModelDir?: string
+    asrLanguage?: string
+  }
 }
 
 export async function createAdapter({ runtime, config = {}, stateRoot }: WeixinAdapterOptions): Promise<ChannelAdapter> {
@@ -72,6 +100,25 @@ export async function createAdapter({ runtime, config = {}, stateRoot }: WeixinA
   const mediaEnabled = config.mediaEnabled !== false && stateRootUsed !== ''
   if (config.mediaEnabled !== false && stateRootUsed === '') logger.warn('no state root: inbound media will not be saved')
   const mediaRoot = stateRootUsed === '' ? '' : path.join(stateRootUsed, 'media', 'inbound')
+
+  // Voice notes become text when the Python bridge and a model are available;
+  // otherwise the WAV path travels and the note says it could not be listened
+  // to. The bridge is optional on purpose (python3 + whisper is not something a
+  // channel plugin may require).
+  const asr =
+    (config.asrEnabled ?? true) && stateRootUsed !== ''
+      ? new AsrBridge({
+          // `import.meta.url` is `dist/src/index.js` in the published package and
+          // `src/index.ts` in a checkout, so the package root is found by walking
+          // up to the manifest instead of guessing `..` twice.
+          scriptPath: path.join(packageRoot(path.dirname(new URL(import.meta.url).pathname)), 'bin', 'asr-bridge.py'),
+          modelDir: config.asrModelDir ?? path.join(stateRootUsed, 'asr-models'),
+          ...(config.asrCommand === undefined ? {} : { command: config.asrCommand }),
+          ...(config.asrLanguage === undefined ? {} : { language: config.asrLanguage }),
+          logger,
+        })
+      : undefined
+  if (asr !== undefined && !asr.available()) logger.warn('asr bridge not found: voice notes will be sent as files')
   const cdnBaseUrl = config.cdnBaseUrl ?? 'https://novac2c.cdn.weixin.qq.com/c2c'
 
   /** Fetch the attachments of one message, in parallel, without failing the message. */
@@ -89,8 +136,22 @@ export async function createAdapter({ runtime, config = {}, stateRoot }: WeixinA
       ),
     )
     for (const result of saved) {
-      if (result.ok) message.media.push(result.media)
-      else logger.warn(`inbound ${result.kind} not saved: ${result.reason}`)
+      if (!result.ok) {
+        logger.warn(`inbound ${result.kind} not saved: ${result.reason}`)
+        continue
+      }
+      // A voice note that is still SILK cannot be transcribed; only the WAV the
+      // vendored transcoder produced is worth handing to whisper.
+      if (result.media.kind === 'voice' && result.media.mime === 'audio/wav' && asr !== undefined) {
+        const transcription = await asr.transcribe(result.media.path)
+        if (transcription.ok) {
+          result.media.transcript = transcription.text
+          logger.info(`transcribed voice note (${transcription.text.length} chars)`)
+        } else {
+          logger.warn(`voice note not transcribed: ${transcription.reason}`)
+        }
+      }
+      message.media.push(result.media)
     }
   }
 
@@ -146,6 +207,7 @@ export async function createAdapter({ runtime, config = {}, stateRoot }: WeixinA
     },
     async stop(): Promise<void> {
       await transport.stop()
+      await asr?.dispose()
     },
     onInbound(handler: (message: InboundMessage) => void): () => void {
       handlers.add(handler)

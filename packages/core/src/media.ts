@@ -49,6 +49,9 @@ function describeOne(item: InboundMedia): string {
     case 'video':
       return `${head}\n这是一个视频文件，无法直接读取内容；需要了解画面时请让用户描述或发截图。`
     default:
+      if (typeof item.text === 'string' && item.text.trim() !== '') {
+        return `${head}\n<document path="${item.path}">\n${item.text}\n</document>\n以上是文件正文（可能被截断）。请据此回答，需要更多细节时再用 read 工具读取原文。`
+      }
       return `${head}\n请用 read 工具读取这个文件的内容。`
   }
 }

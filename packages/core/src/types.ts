@@ -27,6 +27,8 @@ export interface InboundMedia {
   name?: string
   /** Present only for voice notes that were actually transcribed. */
   transcript?: string
+  /** Present only for documents whose text could be extracted. */
+  text?: string
 }
 
 export interface InboundMessage extends Target {

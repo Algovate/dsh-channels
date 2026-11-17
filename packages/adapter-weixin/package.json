@@ -19,9 +19,13 @@
   "files": [
     "dist",
     "vendor",
+    "bin",
     "THIRD-PARTY-NOTICES.md"
   ],
   "scripts": {
     "build": "tsc -b"
+  },
+  "optionalDependencies": {
+    "silk-wasm": "^3.7.1"
   }
 }
