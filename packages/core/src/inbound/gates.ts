@@ -54,19 +54,27 @@ export function gateMessage(message: InboundMessage, context: GateContext): Gate
   return { allow: true }
 }
 
+/** A limit is a number or a reader, so a settings change applies without a rebuild. */
+export type LimitSource = number | (() => number)
+
+function resolveLimit(limit: LimitSource): number {
+  return typeof limit === 'function' ? limit() : limit
+}
+
 /** Fixed-window limiter. `limit <= 0` means unlimited. */
-export function createRateLimiter({ limit, windowMs, now = Date.now }: { limit: number; windowMs: number; now?: () => number }): RateLimiter {
+export function createRateLimiter({ limit, windowMs, now = Date.now }: { limit: LimitSource; windowMs: number; now?: () => number }): RateLimiter {
   const buckets = new Map<string, { startedAt: number; used: number }>()
   return {
     take(key: string): boolean {
-      if (!Number.isFinite(limit) || limit <= 0) return true
+      const current = resolveLimit(limit)
+      if (!Number.isFinite(current) || current <= 0) return true
       const at = now()
       const bucket = buckets.get(key)
       if (bucket === undefined || at - bucket.startedAt >= windowMs) {
         buckets.set(key, { startedAt: at, used: 1 })
         return true
       }
-      if (bucket.used >= limit) return false
+      if (bucket.used >= current) return false
       bucket.used += 1
       return true
     },
@@ -87,7 +95,7 @@ export function createDurableRateLimiter({
   store,
   now = Date.now,
 }: {
-  limit: number
+  limit: LimitSource
   windowMs: number
   prefix: string
   store: { get(key: string): number; set(key: string, value: number): void }
@@ -95,12 +103,13 @@ export function createDurableRateLimiter({
 }): RateLimiter {
   return {
     take(key: string): boolean {
-      if (!Number.isFinite(limit) || limit <= 0) return true
+      const current = resolveLimit(limit)
+      if (!Number.isFinite(current) || current <= 0) return true
       const at = now()
       const windowStart = Math.floor(at / windowMs) * windowMs
       const windowKey = `${prefix}:${key}:${windowStart}`
       const used = store.get(windowKey)
-      if (used >= limit) return false
+      if (used >= current) return false
       store.set(windowKey, used + 1)
       return true
     },

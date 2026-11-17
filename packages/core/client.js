@@ -297,6 +297,7 @@ window.__ModuleLoader__.load({
                   h('span', null, `${t('Waiting for an answer', '等待答复')}: ${data.interactions && data.interactions.pending ? t('yes', '有') : t('no', '无')}`),
                 ),
                 h(AllowlistEditor, { data, reload: load, t }),
+                h(SettingsEditor, { data, reload: load, t }),
                 (data.journal || []).length > 0
                   ? h('div', { style: { display: 'flex', flexDirection: 'column', gap: 6 } },
                       h('div', { style: { fontSize: 12, fontWeight: 600, opacity: 0.85 } }, t('Recent outbound', '最近的发出')),
@@ -415,6 +416,119 @@ window.__ModuleLoader__.load({
           }, busy ? t('Saving…', '保存中…') : t('Add', '添加')),
         ),
         error !== '' ? h('div', { 'data-channels-allowlist-error': '', style: { color: '#c92a2a', fontSize: 12 } }, error) : null,
+      )
+    }
+
+
+    /**
+     * The few settings that can change without a restart.
+     *
+     * Both the live value and the saved overlay change together, so the next
+     * message obeys the new limit and a restart does not undo it. Fields that
+     * need the adapter rebuilt are not here, on purpose: a form that lies about
+     * taking effect immediately is worse than a small form.
+     */
+    function SettingsEditor({ data, reload, t }) {
+      const live = data.settings || {}
+      const [values, setValues] = React.useState({
+        senderPerMinute: String(live.senderPerMinute ?? 6),
+        senderPerDay: String(live.senderPerDay ?? 60),
+        autoSendFiles: live.autoSendFiles !== false,
+        questionsEnabled: live.questionsEnabled !== false,
+        approvalsEnabled: live.approvalsEnabled !== false,
+      })
+      const [busy, setBusy] = React.useState(false)
+      const [saved, setSaved] = React.useState('')
+      const [error, setError] = React.useState('')
+
+      const save = () => {
+        setBusy(true)
+        setError('')
+        setSaved('')
+        fetch('/channels/settings', {
+          method: 'POST',
+          credentials: 'same-origin',
+          headers: { 'content-type': 'application/json', accept: 'application/json' },
+          body: JSON.stringify({
+            senderPerMinute: Number(values.senderPerMinute),
+            senderPerDay: Number(values.senderPerDay),
+            autoSendFiles: values.autoSendFiles,
+            questionsEnabled: values.questionsEnabled,
+            approvalsEnabled: values.approvalsEnabled,
+          }),
+        })
+          .then(async (response) => {
+            const body = await response.json().catch(() => ({}))
+            if (!response.ok || body.ok !== true) throw new Error(body.detail || `${response.status} ${response.statusText}`)
+            setSaved(t('Saved — it applies to the next message.', '已保存 —— 下一条消息就生效。'))
+            reload()
+          })
+          .catch((cause) => setError(String((cause && cause.message) || cause)))
+          .finally(() => setBusy(false))
+      }
+
+      const numberField = (label, key) =>
+        h('label', { key, style: { display: 'flex', flexDirection: 'column', gap: 4, fontSize: 12 } },
+          h('span', { style: { opacity: 0.8 } }, label),
+          h('input', {
+            type: 'number',
+            min: 0,
+            value: values[key],
+            onChange: (event) => setValues((current) => ({ ...current, [key]: event.target.value })),
+            style: {
+              width: 96,
+              padding: '5px 8px',
+              borderRadius: 'var(--dsw-radius-m, 10px)',
+              border: '1px solid var(--dsw-alias-divider, rgba(128,128,128,0.3))',
+              background: 'transparent',
+              color: 'inherit',
+              fontSize: 13,
+            },
+          }),
+        )
+
+      const toggle = (label, key) =>
+        h('label', { key, style: { display: 'flex', alignItems: 'center', gap: 6, fontSize: 12 } },
+          h('input', {
+            type: 'checkbox',
+            checked: values[key],
+            onChange: (event) => setValues((current) => ({ ...current, [key]: event.target.checked })),
+          }),
+          h('span', { style: { opacity: 0.85 } }, label),
+        )
+
+      return h(
+        'div',
+        { 'data-channels-settings': '', style: { display: 'flex', flexDirection: 'column', gap: 10 } },
+        h('div', { style: { fontSize: 12, fontWeight: 600, opacity: 0.85 } }, t('Limits and behaviour', '限流与行为')),
+        h('div', { style: { display: 'flex', gap: 16, flexWrap: 'wrap', alignItems: 'flex-end' } },
+          numberField(t('Messages / minute (0 = unlimited)', '每分钟消息数（0 = 不限）'), 'senderPerMinute'),
+          numberField(t('Messages / day (0 = unlimited)', '每天消息数（0 = 不限）'), 'senderPerDay'),
+        ),
+        h('div', { style: { display: 'flex', gap: 16, flexWrap: 'wrap' } },
+          toggle(t('Send files the agent produced', '发送 agent 产生的文件'), 'autoSendFiles'),
+          toggle(t('Ask questions in the chat', '允许在聊天里提问'), 'questionsEnabled'),
+          toggle(t('Approve tool calls in the chat', '允许在聊天里审批'), 'approvalsEnabled'),
+        ),
+        h('div', { style: { display: 'flex', alignItems: 'center', gap: 10 } },
+          h('button', {
+            type: 'button',
+            disabled: busy,
+            onClick: save,
+            style: {
+              padding: '6px 14px',
+              borderRadius: 'var(--dsw-radius-m, 10px)',
+              border: '1px solid var(--dsw-alias-divider, rgba(128,128,128,0.3))',
+              background: 'transparent',
+              color: 'inherit',
+              fontSize: 13,
+              cursor: busy ? 'default' : 'pointer',
+              opacity: busy ? 0.5 : 1,
+            },
+          }, busy ? t('Saving…', '保存中…') : t('Save', '保存')),
+          saved !== '' ? h('span', { style: { color: '#2f9e44', fontSize: 12 } }, saved) : null,
+          error !== '' ? h('span', { 'data-channels-settings-error': '', style: { color: '#c92a2a', fontSize: 12 } }, error) : null,
+        ),
       )
     }
 

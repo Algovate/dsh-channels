@@ -122,6 +122,20 @@ GUI 侧栏 → Channels 分组展开后出现 "o9cq807BqQ0x: proceed"，点开�
 插件页（Plugins → `@rodin/dsh-channels`）里有一张「通道」卡片：通道、媒体能力、允许的发送者数量、
 待重发数、是否在等答复、最近 8 条发出的状态（accepted / unconfirmed / failed / pending），带刷新。
 
+卡片还能**改限流与行为**（每分钟/每天消息数、是否回发产物、是否在聊天里提问/审批）：写入
+`POST /channels/settings`，同样一次改**运行中的值**与 `config.json`，下一条消息就生效。真机：
+
+```
+GET  /channels/status  → settings {senderPerMinute:6, senderPerDay:60, …}
+POST {senderPerDay:90} → {"ok":true,…}；config.json 同步 90
+POST {senderPerDay:999999} → 400 {"code":"invalid",…}
+卡片（Plugins → @rodin/dsh-channels）→ [data-channels-settings] 渲染出限流与三个开关 + 保存
+```
+
+**顺带修掉一个真 bug**：闸门的限流器原来是每次派发**新建**的，内存桶因此每次清零——
+没有持久计数时"每人每分钟 6 条"根本不生效。现在限流器在运行时构造时建一次，且 limit 读的是
+`() => config.senderPerMinute`，所以设置一改就生效（这正是设置表单能"立即生效"的前提）。
+
 卡片还能**改白名单**：输入发送者 id → 添加，或点某个条目上的 ✕ 移除。写入走宿主自己的
 `POST /channels/allowlist`（同源 + `Origin` 校验），一次同时改**运行中的门链**与状态目录里的
 `config.json`，所以下一条消息就生效、重启后还在。真机：

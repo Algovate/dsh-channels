@@ -135,11 +135,13 @@ export async function startChannels({ ctx, config }: { ctx: PluginContext; confi
   const remote = await registerRemote({ ctx, config, runtime, root, logger })
   const offStatusRoute = registerStatusRoute({ ctx, config, runtime, root, logger })
   const offAllowlistRoute = registerAllowlistRoute({ ctx, config, runtime, root, logger })
+  const offSettingsRoute = registerSettingsRoute({ ctx, config, runtime, root, logger })
 
   return {
     runtime,
     adapters,
     async dispose() {
+      offSettingsRoute()
       offAllowlistRoute()
       offStatusRoute()
       remote?.dispose?.()
@@ -484,6 +486,101 @@ function registerAllowlistRoute({
   }
 }
 
+/**
+ * The settings that can change while the plugin runs.
+ *
+ * Same shape as the allowlist route and the same reasoning: the Host owns the
+ * write, it goes to the plugin's own overlay (never the profile patch), and it
+ * changes the live value at the same time so the next message sees it. The
+ * fields are an explicit list — a form that can write any key is a form that can
+ * break the plugin with a typo.
+ */
+function registerSettingsRoute({
+  ctx,
+  runtime,
+  root,
+  logger,
+}: {
+  ctx: PluginContext
+  config: ChannelsConfig
+  runtime: ChannelsRuntime
+  root: string
+  logger: { info: (line: string) => void; warn: (line: string) => void }
+}): () => void {
+  const webServer = ctx.get?.('webServer') as { register?: (route: unknown) => () => void; getOrigin?: () => string } | undefined
+  if (typeof webServer?.register !== 'function') return () => {}
+  const allowedOrigin = ((): string | undefined => {
+    try {
+      return webServer.getOrigin?.()
+    } catch {
+      return undefined
+    }
+  })()
+  try {
+    const off = webServer.register({
+      path: '/channels/settings',
+      kind: 'exact',
+      handler: (req: { method?: string; headers: Record<string, string | string[] | undefined>; on: (event: string, listener: (chunk?: unknown) => void) => void }, res: { writeHead: (status: number, headers: Record<string, string>) => void; end: (body?: string) => void }) => {
+        const json = (status: number, body: unknown): void => {
+          res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
+          res.end(JSON.stringify(body))
+        }
+        if (req.method !== 'POST') return json(405, { ok: false, code: 'method', detail: 'POST only' })
+        const origin = typeof req.headers['origin'] === 'string' ? req.headers['origin'] : ''
+        if (allowedOrigin !== undefined && origin !== '' && origin !== allowedOrigin) return json(403, { ok: false, code: 'origin', detail: origin })
+        let body = ''
+        req.on('data', (chunk) => {
+          if (typeof chunk === 'string') body += chunk
+          else if (chunk instanceof Uint8Array) body += Buffer.from(chunk).toString('utf8')
+          if (body.length > 4096) body = body.slice(0, 4096)
+        })
+        req.on('end', () => {
+          try {
+            const parsed = JSON.parse(body === '' ? '{}' : body) as Record<string, unknown>
+            const patch: { senderPerMinute?: number; senderPerDay?: number; autoSendFiles?: boolean; questionsEnabled?: boolean; approvalsEnabled?: boolean } = {}
+            const number = (key: 'senderPerMinute' | 'senderPerDay'): void => {
+              const value = parsed[key]
+              if (value === undefined) return
+              const numeric = Number(value)
+              if (!Number.isFinite(numeric) || numeric < 0 || numeric > 100_000) throw new Error(`${key} must be a number between 0 and 100000`)
+              patch[key] = Math.floor(numeric)
+            }
+            const flag = (key: 'autoSendFiles' | 'questionsEnabled' | 'approvalsEnabled'): void => {
+              const value = parsed[key]
+              if (value === undefined) return
+              if (typeof value !== 'boolean') throw new Error(`${key} must be a boolean`)
+              patch[key] = value
+            }
+            number('senderPerMinute')
+            number('senderPerDay')
+            flag('autoSendFiles')
+            flag('questionsEnabled')
+            flag('approvalsEnabled')
+            if (Object.keys(patch).length === 0) return json(400, { ok: false, code: 'empty', detail: 'nothing to change' })
+            runtime.updateSettings(patch)
+            saveConfigOverlay(root, patch, { warn: (line) => logger.warn(line) })
+            logger.info(`settings updated: ${Object.keys(patch).join(', ')}`)
+            json(200, { ok: true, settings: runtime.liveSettings() })
+          } catch (error) {
+            json(400, { ok: false, code: 'invalid', detail: String((error as Error)?.message ?? error) })
+          }
+        })
+      },
+    })
+    logger.info('settings route registered at POST /channels/settings')
+    return () => {
+      try {
+        off()
+      } catch {
+        // Unregistering cannot fail an unload.
+      }
+    }
+  } catch (error) {
+    logger.warn(`settings route not registered: ${String((error as Error)?.message ?? error)}`)
+    return () => {}
+  }
+}
+
 function registerStatusRoute({
   ctx,
   config,
@@ -540,6 +637,7 @@ function buildStatus(source: StatusSource): StatusPayload {
     outboxPending: source.outboxPending(),
     journal: source.journalTail(8),
     interactions: { pending: source.interactionsPending() },
+    settings: source.settings(),
   }
 }
 
@@ -574,6 +672,7 @@ function statusSource({
         .slice(-limit)
         .map((entry) => ({ at: Date.now(), kind: 'reply', state: entry.state, text: entry.text.slice(0, 160) })),
     interactionsPending: () => runtime.interactions.pendingCount() > 0,
+    settings: () => runtime.liveSettings(),
   }
 }
 

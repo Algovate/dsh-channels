@@ -27,6 +27,13 @@ export interface StatusPayload {
   outboxPending: number
   journal: Array<{ at: number; kind: string; state: string; text: string }>
   interactions: { pending: boolean }
+  settings: {
+    senderPerMinute: number
+    senderPerDay: number
+    autoSendFiles: boolean
+    questionsEnabled: boolean
+    approvalsEnabled: boolean
+  }
 }
 
 export interface StatusSource {
@@ -36,6 +43,7 @@ export interface StatusSource {
   outboxPending(): number
   journalTail(limit: number): Array<{ at: number; kind: string; state: string; text: string }>
   interactionsPending(): boolean
+  settings(): StatusPayload['settings']
 }
 
 /** The marker the gateway reads to expose methods; the decorator equivalent. */
@@ -85,6 +93,7 @@ export async function createChannelsRemote(ctx: unknown, source: StatusSource): 
         outboxPending: this.#source.outboxPending(),
         journal: this.#source.journalTail(8),
         interactions: { pending: this.#source.interactionsPending() },
+        settings: this.#source.settings(),
       }
     }
   }

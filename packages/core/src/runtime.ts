@@ -56,12 +56,25 @@ export class ChannelsRuntime {
   readonly #grouped = new Set<string>()
   /** conversation line → session line number chosen by `/new`. */
   readonly #lines = new Map<string, number>()
+  /** Built once: a limiter recreated per message would never accumulate. */
+  readonly #minute: GateContext['minute']
+  readonly #day: GateContext['day']
   readonly #stopTimers: Array<() => void> = []
 
   constructor(options: RuntimeOptions) {
     this.#options = options
     this.#outbox = new Outbox({ stateRoot: options.stateRoot, warn: options.logger.warn })
     this.#journal = new Journal({ stateRoot: options.stateRoot, warn: options.logger.warn })
+    const counters = options.counters
+    const config = options.config
+    this.#minute =
+      counters === undefined
+        ? createRateLimiter({ limit: () => config.senderPerMinute, windowMs: 60_000 })
+        : createDurableRateLimiter({ limit: () => config.senderPerMinute, windowMs: 60_000, prefix: 'minute', store: counters })
+    this.#day =
+      counters === undefined
+        ? createRateLimiter({ limit: () => config.senderPerDay, windowMs: 24 * 60 * 60_000 })
+        : createDurableRateLimiter({ limit: () => config.senderPerDay, windowMs: 24 * 60 * 60_000, prefix: 'day', store: counters })
     this.#interactions = new InteractionQueue({
       send: (target, outgoing) => this.send(target, outgoing),
       logger: options.logger,
@@ -152,6 +165,35 @@ export class ChannelsRuntime {
     return [...list]
   }
 
+  /**
+   * Change the settings that can take effect without a restart.
+   *
+   * The gates read `config` on every message, so a new limit applies to the next
+   * one; the caller also writes the overlay so it survives a restart. Anything
+   * that needs the adapter rebuilt (media, token, working directory) is NOT here
+   * — the card marks those as restart-required instead of pretending.
+   */
+  updateSettings(patch: { senderPerMinute?: number; senderPerDay?: number; autoSendFiles?: boolean; questionsEnabled?: boolean; approvalsEnabled?: boolean }): void {
+    const config = this.#options.config
+    if (patch.senderPerMinute !== undefined) config.senderPerMinute = patch.senderPerMinute
+    if (patch.senderPerDay !== undefined) config.senderPerDay = patch.senderPerDay
+    if (patch.autoSendFiles !== undefined) config.autoSendFiles = patch.autoSendFiles
+    if (patch.questionsEnabled !== undefined) config.questionsEnabled = patch.questionsEnabled
+    if (patch.approvalsEnabled !== undefined) config.approvalsEnabled = patch.approvalsEnabled
+  }
+
+  /** The live values the settings form shows. */
+  liveSettings(): { senderPerMinute: number; senderPerDay: number; autoSendFiles: boolean; questionsEnabled: boolean; approvalsEnabled: boolean } {
+    const config = this.#options.config
+    return {
+      senderPerMinute: config.senderPerMinute,
+      senderPerDay: config.senderPerDay,
+      autoSendFiles: config.autoSendFiles,
+      questionsEnabled: config.questionsEnabled,
+      approvalsEnabled: config.approvalsEnabled,
+    }
+  }
+
   /** Forget a conversation (tests, or after the adapter is removed). */
   forgetTarget(sessionId: string): void {
     this.#targets.delete(sessionId)
@@ -186,14 +228,8 @@ export class ChannelsRuntime {
       expiredAccounts: this.#expiredAccounts,
       allowlistFor: (accountId) => allowlistFor(config, accountId),
       allowedChats: config.allowedChats,
-      minute:
-        this.#options.counters === undefined
-          ? createRateLimiter({ limit: config.senderPerMinute, windowMs: 60_000, now: () => now() })
-          : createDurableRateLimiter({ limit: config.senderPerMinute, windowMs: 60_000, prefix: 'minute', store: this.#options.counters, now: () => now() }),
-      day:
-        this.#options.counters === undefined
-          ? createRateLimiter({ limit: config.senderPerDay, windowMs: 24 * 60 * 60_000, now: () => now() })
-          : createDurableRateLimiter({ limit: config.senderPerDay, windowMs: 24 * 60 * 60_000, prefix: 'day', store: this.#options.counters, now: () => now() }),
+      minute: this.#minute,
+      day: this.#day,
       keyOf: (message) => lineKey(message),
     }
   }
