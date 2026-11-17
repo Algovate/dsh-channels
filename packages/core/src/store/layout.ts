@@ -75,6 +75,13 @@ export const STATE_LAYOUT: Readonly<Record<string, LayoutEntry>> = Object.freeze
     reason: '二进制大对象，用户要能直接打开；不进域',
     contents: '<account>/…',
   },
+  asrModels: {
+    kind: 'dir',
+    relative: 'asr-models',
+    label: '可选的语音转写模型',
+    store: STORE.FILE,
+    reason: '语音转写桥直接读取本地模型文件',
+  },
   workspace: {
     kind: 'dir',
     relative: 'workspace',

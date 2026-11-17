@@ -5,6 +5,6 @@
     "outDir": "dist",
     "tsBuildInfoFile": "dist/.tsbuildinfo"
   },
-  "include": ["src/**/*.ts", "vendor/**/*.js"],
+  "include": ["src/**/*.ts", "vendor/**/*.js", "vendor/openclaw-weixin/package.json"],
   "references": [{ "path": "../core" }]
 }

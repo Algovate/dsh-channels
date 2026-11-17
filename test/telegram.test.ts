@@ -1,10 +1,25 @@
 import assert from 'node:assert/strict'
+import fs from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
+import { setTimeout as delay } from 'node:timers/promises'
 import test from 'node:test'
 
+import type { InboundMessage } from '@rodin/dsh-channels'
+import { createAdapter } from '../packages/adapter-telegram/src/index.js'
 import { mediaOf, normalizeInbound } from '../packages/adapter-telegram/src/normalize.js'
 import { TelegramTransport } from '../packages/adapter-telegram/src/transport.js'
+import { resolveConfig } from '../packages/core/src/config.js'
+import { ChannelsRuntime } from '../packages/core/src/runtime.js'
+import { FileCounterStore } from '../packages/core/src/store/counters.js'
 
 const silent = { info: () => {}, warn: () => {} }
+
+function deferred<T>() {
+  let resolve!: (value: T) => void
+  const promise = new Promise<T>((done) => { resolve = done })
+  return { promise, resolve }
+}
 
 const baseUpdate = {
   update_id: 10,
@@ -131,4 +146,276 @@ test('a thrown send is a value, not an exception', async () => {
   })
   const result = await transport.sendText('7', 'hi')
   assert.deepEqual(result, { ok: false, code: 'send-failed', detail: 'network down' })
+})
+
+test('stop aborts a long poll already waiting for its response body', async () => {
+  const started = deferred<void>()
+  const body = deferred<unknown>()
+  let signal: unknown
+  const adapter = await createAdapter({
+    config: { token: '123:secret', mediaEnabled: false, fetchImpl: async (_url, init) => {
+      signal = init?.signal
+      return { ok: true, status: 200, json: () => { started.resolve(); return body.promise } }
+    } },
+  })
+  await adapter.start()
+  await started.promise
+  const stopping = adapter.stop()
+  try {
+    assert.equal(await Promise.race([stopping.then(() => 'stopped'), delay(100, 'waiting')]), 'stopped')
+    assert.ok(signal instanceof AbortSignal && signal.aborted)
+  } finally {
+    body.resolve({ ok: true, result: [] })
+    await stopping
+  }
+})
+
+test('a stalled send has a deadline even after receiving its response headers', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  const started = deferred<void>()
+  const body = deferred<unknown>()
+  let signal: unknown
+  const transport = new TelegramTransport({
+    token: '123:secret', logger: silent, fetchImpl: async (_url, init) => {
+      signal = init?.signal
+      return { ok: true, status: 200, json: () => { started.resolve(); return body.promise } }
+    },
+  })
+  const result = transport.sendText('7', 'hi')
+  await started.promise
+  t.mock.timers.tick(120_000)
+  await new Promise<void>((resolve) => setImmediate(resolve))
+  try {
+    assert.ok(signal instanceof AbortSignal && signal.aborted, 'the request exceeded its deadline')
+    assert.equal((await result).ok, false)
+  } finally {
+    body.resolve({ ok: true, result: { message_id: 1 } })
+  }
+})
+
+test('downloads cancel a stream as soon as it exceeds the file cap', async (t) => {
+  const stateRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'telegram-download-'))
+  t.after(() => fs.rmSync(stateRoot, { recursive: true, force: true }))
+  let cancelled = false
+  let stream: ReadableStreamDefaultController<Uint8Array> | undefined
+  const nextPoll = deferred<Response>()
+  const delivered = deferred<number>()
+  let first = true
+  const adapter = await createAdapter({
+    stateRoot,
+    config: { token: '123:secret', maxInboundBytes: 5, fetchImpl: async (url) => {
+      if (url.endsWith('/getUpdates')) {
+        if (!first) return nextPoll.promise
+        first = false
+        return Response.json({ ok: true, result: [{ ...baseUpdate, message: { ...baseUpdate.message, document: { file_id: 'd' } } }] })
+      }
+      if (url.endsWith('/getFile')) return Response.json({ ok: true, result: { file_path: 'file' } })
+      return new Response(new ReadableStream<Uint8Array>({
+        start(controller) {
+          stream = controller
+          controller.enqueue(new Uint8Array([1, 2, 3]))
+          controller.enqueue(new Uint8Array([4, 5, 6]))
+        },
+        cancel() { cancelled = true },
+      }))
+    } },
+  })
+  adapter.onInbound((message) => delivered.resolve(message.media.length))
+  await adapter.start()
+  try {
+    assert.equal(await Promise.race([delivered.promise, delay(100, 'stalled')]), 0)
+    assert.equal(cancelled, true)
+  } finally {
+    const stopping = adapter.stop()
+    if (!cancelled) stream?.close()
+    nextPoll.resolve(Response.json({ ok: true, result: [] }))
+    await stopping
+  }
+})
+
+test('a failed update does not drop the next update in the same poll', async () => {
+  const delivered = deferred<string>()
+  const nextPoll = deferred<Response>()
+  let first = true
+  const adapter = await createAdapter({
+    config: { token: '123:secret', mediaEnabled: false, fetchImpl: async () => {
+      if (!first) return nextPoll.promise
+      first = false
+      return Response.json({ ok: true, result: [baseUpdate, { update_id: 11, message: { ...baseUpdate.message, text: 'later' } }] })
+    } },
+  })
+  adapter.onInbound((message) => {
+    if (message.text === baseUpdate.message.text) throw new Error('handler failed')
+    delivered.resolve(message.text)
+  })
+  await adapter.start()
+  try {
+    assert.equal(await Promise.race([delivered.promise, delay(100, 'not delivered')]), 'later')
+  } finally {
+    const stopping = adapter.stop()
+    nextPoll.resolve(Response.json({ ok: true, result: [] }))
+    await stopping
+  }
+})
+
+test('an ineligible inbound message never makes an attachment request', async (t) => {
+  const stateRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'telegram-media-'))
+  t.after(() => fs.rmSync(stateRoot, { recursive: true, force: true }))
+  const requests: string[] = []
+  const delivered = deferred<InboundMessage>()
+  const nextPoll = deferred<Response>()
+  let admitted: InboundMessage | undefined
+  let first = true
+  const runtime = {
+    logger: silent,
+    canReceive(message: InboundMessage, hasAttachments: boolean) {
+      if (message.senderId === '7') return false
+      assert.equal(hasAttachments, true)
+      admitted = message
+      return true
+    },
+  }
+  const adapter = await createAdapter({
+    runtime,
+    stateRoot,
+    config: { token: '123:secret', fetchImpl: async (url, init) => {
+      if (url.endsWith('/getFile')) {
+        const fileId = JSON.parse(String(init?.body)).file_id as string
+        requests.push(fileId)
+        return Response.json({ ok: true, result: { file_path: fileId } })
+      }
+      if (!url.endsWith('/getUpdates')) return new Response('contents')
+      if (!first) return nextPoll.promise
+      first = false
+      return Response.json({ ok: true, result: [
+        { ...baseUpdate, message: { ...baseUpdate.message, document: { file_id: 'denied' } } },
+        { update_id: 11, message: { ...baseUpdate.message, from: { id: 8 }, document: { file_id: 'allowed' } } },
+      ] })
+    } },
+  })
+  adapter.onInbound((message) => delivered.resolve(message))
+  await adapter.start()
+  try {
+    const message = await Promise.race([delivered.promise, delay(100)])
+    assert.ok(message)
+    assert.deepEqual(requests, ['allowed'])
+    assert.equal(message, admitted, 'enrichment preserves the message admission')
+    assert.ok(message.media[0])
+    assert.equal(fs.readFileSync(message.media[0].path, 'utf8'), 'contents')
+  } finally {
+    const stopping = adapter.stop()
+    nextPoll.resolve(Response.json({ ok: true, result: [] }))
+    await stopping
+  }
+})
+
+test('restarting mid-batch lets the interrupted Telegram update use the remaining quota', async (t) => {
+  const stateRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'telegram-replay-'))
+  t.after(() => fs.rmSync(stateRoot, { recursive: true, force: true }))
+  const updates = [
+    { ...baseUpdate, message: { ...baseUpdate.message, text: '/help' } },
+    { update_id: 11, message: { ...baseUpdate.message, message_id: 6, text: undefined, caption: '/whoami', document: { file_id: 'report' } } },
+  ]
+
+  async function runBatch(interrupt: boolean) {
+    const counters = new FileCounterStore({ stateRoot })
+    await counters.load()
+    const runtime = new ChannelsRuntime({
+      ctx: {}, config: resolveConfig({ allowedSenders: ['7'], senderPerDay: 2 }),
+      logger: silent, stateRoot, workingDirectory: stateRoot, counters,
+    })
+    const checkpoint = deferred<'downloading' | 'next poll'>()
+    const block = deferred<Response>()
+    const routed: Array<{ text: string; allowed: boolean; attachments: number }> = []
+    let firstPoll = true
+    const adapter = await createAdapter({
+      runtime, stateRoot, config: { token: '123:secret', fetchImpl: async (url) => {
+        if (url.endsWith('/getUpdates')) {
+          if (!firstPoll) {
+            checkpoint.resolve('next poll')
+            return block.promise
+          }
+          firstPoll = false
+          // Telegram can replay the whole batch if the previous adapter never sent an offset to confirm it.
+          return Response.json({ ok: true, result: updates })
+        }
+        if (url.endsWith('/getFile')) {
+          if (interrupt) {
+            checkpoint.resolve('downloading')
+            return block.promise
+          }
+          return Response.json({ ok: true, result: { file_path: 'report.txt' } })
+        }
+        return new Response('report contents')
+      } },
+    })
+    adapter.onInbound((message) => {
+      const decision = runtime.dispatch(message)
+      routed.push({ text: message.text, allowed: decision.allow, attachments: message.media.length })
+    })
+    await adapter.start()
+    try {
+      assert.equal(await Promise.race([checkpoint.promise, delay(1000, 'stalled', { ref: false })]), interrupt ? 'downloading' : 'next poll')
+      return routed
+    } finally {
+      const stopping = adapter.stop()
+      block.resolve(Response.json({ ok: true, result: [] }))
+      await stopping
+      runtime.dispose()
+    }
+  }
+
+  assert.deepEqual(await runBatch(true), [{ text: '/help', allowed: true, attachments: 0 }])
+  assert.deepEqual(await runBatch(false), [{ text: '/whoami', allowed: true, attachments: 1 }])
+})
+
+test('account identity follows the Telegram bot across token rotation, independently of its display label', async () => {
+  const [original, rotated, replacement] = await Promise.all(['123:old', '123:new', '456:new'].map((token) => createAdapter({
+    config: { token, botId: 'my_bot', mediaEnabled: false },
+  })))
+  assert.ok(original && rotated && replacement)
+  assert.deepEqual(await original.accounts.list(), [{ accountId: 'bot:123', label: 'my_bot', expired: false }])
+  assert.deepEqual(await rotated.accounts.list(), await original.accounts.list())
+  assert.deepEqual(await replacement.accounts.list(), [{ accountId: 'bot:456', label: 'my_bot', expired: false }])
+})
+
+test('a target for a different bot never uses the active token', async () => {
+  const calls: string[] = []
+  const adapter = await createAdapter({
+    config: { token: '123:secret', mediaEnabled: false, fetchImpl: async (url) => {
+      calls.push(url)
+      return Response.json({ ok: true, result: { message_id: 1 } })
+    } },
+  })
+  const stale = { channel: 'telegram', accountId: 'bot:456', conversationId: '7' }
+  assert.equal((await adapter.send(stale, { text: 'hi', kind: 'reply' })).ok, false)
+  await adapter.typing?.(stale)
+  assert.deepEqual(calls, [])
+  assert.equal((await adapter.send({ ...stale, accountId: 'bot:123' }, { text: 'hi', kind: 'reply' })).ok, true)
+})
+
+test('sending multiple files reports a failure even when a later file could succeed', async (t) => {
+  const stateRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'telegram-send-'))
+  t.after(() => fs.rmSync(stateRoot, { recursive: true, force: true }))
+  const present = path.join(stateRoot, 'present.txt')
+  fs.writeFileSync(present, 'file content')
+  const adapter = await createAdapter({
+    config: { token: '123:secret', mediaEnabled: false, fetchImpl: async () => Response.json({ ok: true, result: { message_id: 1 } }) },
+  })
+  const result = await adapter.send({ channel: 'telegram', accountId: 'bot:123', conversationId: '7' }, {
+    kind: 'reply',
+    media: [{ kind: 'file', path: path.join(stateRoot, 'missing.txt') }, { kind: 'file', path: present }],
+  })
+  assert.equal(result.ok, false)
+  assert.equal(result.code, 'send-media-failed')
+})
+
+test('custom Telegram servers cannot share a scope with a different backend issuing the same bot ID', async () => {
+  const [official, first, second] = await Promise.all([
+    createAdapter({ config: { token: '123:old' } }),
+    createAdapter({ config: { token: '123:old', apiBaseUrl: 'http://telegram-one.test' } }),
+    createAdapter({ config: { token: '123:old', apiBaseUrl: 'http://telegram-two.test' } }),
+  ])
+  const scopes = await Promise.all([official, first, second].map(async (adapter) => (await adapter.accounts.list())[0]?.accountId))
+  assert.equal(new Set(scopes).size, 3)
 })

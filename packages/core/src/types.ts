@@ -39,6 +39,8 @@ export interface InboundMessage extends Target {
   /** True when the platform says this conversation is a group, not a 1:1 chat. */
   group: boolean
   at: number
+  /** A stable provider ID, unique within this conversation when available. */
+  platformMessageId?: string
   /** Platform-private structure, for adapter diagnostics only. */
   raw?: unknown
 }
@@ -121,11 +123,21 @@ export interface ChannelAdapter {
   typing?(target: Target): Promise<void>
 }
 
+/** Core hooks available to an adapter before it delivers an inbound message. */
+export interface AdapterRuntime {
+  logger?: { info: (line: string) => void; warn: (line: string) => void }
+  markExpired?(accountId: string, expired?: boolean): void
+  /** Run before downloading attachments, then deliver the same message object. */
+  canReceive?(message: InboundMessage, hasAttachments: boolean, legacyAccountId?: string): boolean
+  /** Release a preflight reservation if the message never reaches core. Safe after delivery. */
+  cancelReceive?(message: InboundMessage): void
+}
+
 /** What an adapter package exports. */
 export interface AdapterModule {
   createAdapter(options: {
     ctx: unknown
-    runtime: unknown
+    runtime: AdapterRuntime
     stateRoot?: string
     config: Record<string, unknown>
   }): ChannelAdapter | Promise<ChannelAdapter>

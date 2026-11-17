@@ -91,3 +91,12 @@ test('a missing script means "unavailable" rather than a spawn attempt', async (
   assert.equal(asr.available(), false)
   assert.deepEqual(await asr.transcribe(wavFile()), { ok: false, reason: 'bridge unavailable' })
 })
+
+test('disposing the bridge stops deferred transcription from opening a process', async () => {
+  const { spawnImpl, children } = fakeSpawn(() => '{"ok":true,"text":"unexpected"}\n')
+  const asr = bridge(spawnImpl)
+  const pending = asr.transcribe(wavFile())
+  await asr.dispose()
+  assert.deepEqual(await pending, { ok: false, reason: 'bridge closed' })
+  assert.equal(children.length, 0)
+})

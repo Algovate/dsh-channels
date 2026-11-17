@@ -6,12 +6,17 @@
  * `ChannelAdapter`).
  */
 import fs from 'node:fs'
+import { randomUUID } from 'node:crypto'
 import os from 'node:os'
 import path from 'node:path'
 
 import { ChannelsRuntime } from '../packages/core/src/runtime.js'
 import { resolveConfig, type ChannelsConfig } from '../packages/core/src/config.js'
 import type { ChannelAdapter, InboundMessage, Outgoing, SendResult, Target } from '../packages/core/src/types.js'
+
+export function createFakeUserMessage(fields: Record<string, unknown>): Record<string, unknown> {
+  return { ...fields, id: randomUUID(), role: 'user' }
+}
 
 export interface FakeAdapterOptions {
   id?: string
@@ -89,8 +94,6 @@ export function createChannelsRuntime({
     logger: { info: () => {}, warn: () => {} },
     stateRoot: fs.mkdtempSync(path.join(os.tmpdir(), 'channels-test-')),
     workingDirectory: workingDirectory ?? fs.mkdtempSync(path.join(os.tmpdir(), 'channels-ws-')),
-    // A host without `@deepseek-ai/dsh-llm` still builds user messages in tests;
-    // the fields object is exactly what `createUserMessage` returns in the host.
-    createUserMessage: createUserMessage ?? ((fields: Record<string, unknown>) => fields),
+    createUserMessage: createUserMessage ?? createFakeUserMessage,
   })
 }

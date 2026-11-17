@@ -38,6 +38,7 @@ export class Outbox {
   readonly #max: number
   readonly #warn: (line: string) => void
   readonly #now: () => number
+  #draining = false
 
   constructor({ stateRoot, max = 50, warn = () => {}, now = Date.now }: { stateRoot: string; max?: number; warn?: (line: string) => void; now?: () => number }) {
     this.#file = path.join(stateRoot, 'outbox.json')
@@ -56,13 +57,13 @@ export class Outbox {
   }
 
   /** Append a failed send. Oldest entries are dropped once the bound is reached. */
-  add(target: OutboxEntry['target'], outgoing: OutboxEntry['outgoing'], result: { code?: string }): OutboxEntry | undefined {
+  add(target: OutboxEntry['target'], outgoing: OutboxEntry['outgoing'], result: { code?: string; id?: string }): OutboxEntry | undefined {
     const text = outgoing.text ?? ''
     if (text.trim() === '' || outgoing.kind !== 'reply') return undefined
     const items = this.#read()
     if (items.length >= this.#max) items.shift()
     const entry: OutboxEntry = {
-      id: `out-${this.#now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
+      id: result.id ?? `out-${this.#now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
       target,
       outgoing,
       attempts: 0,
@@ -88,23 +89,35 @@ export class Outbox {
 
   /** Retry every entry whose backoff elapsed. Returns how many were delivered. */
   async drain(send: (entry: OutboxEntry) => Promise<{ ok: boolean; code?: string }>): Promise<number> {
-    const items = this.#read()
-    let delivered = 0
-    let changed = false
-    for (const entry of items) {
-      if (entry.nextAt > this.#now()) continue
-      const result = await send(entry)
-      changed = true
-      if (result.ok) {
-        delivered += 1
-        items.splice(items.indexOf(entry), 1)
-        continue
+    if (this.#draining) return 0
+    this.#draining = true
+    try {
+      let delivered = 0
+      for (const candidate of this.#read()) {
+        if (candidate.nextAt > this.#now() || !this.#read().some((entry) => entry.id === candidate.id)) continue
+        let result: { ok: boolean; code?: string }
+        try {
+          result = await send(candidate)
+        } catch (error) {
+          this.#warn(`outbox retry failed: ${String(error)}`)
+          result = { ok: false, code: 'retry-threw' }
+        }
+        const items = this.#read()
+        const index = items.findIndex((entry) => entry.id === candidate.id)
+        if (result.ok) delivered += 1
+        if (index === -1) continue
+        if (result.ok) items.splice(index, 1)
+        else {
+          const entry = items[index]!
+          entry.attempts += 1
+          entry.nextAt = this.#now() + backoffMs(entry.attempts + 1)
+          if (result.code !== undefined) entry.lastCode = result.code
+        }
+        this.#write(items)
       }
-      entry.attempts += 1
-      entry.nextAt = this.#now() + backoffMs(entry.attempts + 1)
-      if (result.code !== undefined) entry.lastCode = result.code
+      return delivered
+    } finally {
+      this.#draining = false
     }
-    if (changed) this.#write(items)
-    return delivered
   }
 }

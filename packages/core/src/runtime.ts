@@ -8,15 +8,18 @@
  *
  * @module @rodin/dsh-channels/runtime
  */
+import fs from 'node:fs'
+import path from 'node:path'
+
 import { InteractionQueue } from './interaction/queue.js'
 import { ConversationQueue } from './inbound/queue.js'
-import { createDurableRateLimiter, createRateLimiter, gateMessage, type GateContext, type GateDecision } from './inbound/gates.js'
+import { authorizeMessage, createDurableRateLimiter, createRateLimiter, reserveMessage, type GateContext, type GateDecision, type Reservation } from './inbound/gates.js'
 import type { CounterStore } from './store/counters.js'
 import { allowlistFor, type ChannelsConfig } from './config.js'
-import { lineKey, sessionIdFor } from './ids.js'
+import { lineKey, sameTarget, sessionIdFor } from './ids.js'
 import { helpText, parseCommand } from './commands.js'
 import { Outbox } from './store/outbox.js'
-import { Journal } from './store/journal.js'
+import { Journal, receiptKey } from './store/journal.js'
 import { TurnDriver } from './turns.js'
 import { plainText, splitIntoBubbles } from './outbound.js'
 import { listProducedFiles } from './produced.js'
@@ -59,6 +62,9 @@ export class ChannelsRuntime {
   /** Built once: a limiter recreated per message would never accumulate. */
   readonly #minute: GateContext['minute']
   readonly #day: GateContext['day']
+  readonly #preflightReservations = new WeakMap<InboundMessage, Reservation>()
+  readonly #queuedReceipts = new Set<string>()
+  #disposed = false
   readonly #stopTimers: Array<() => void> = []
 
   constructor(options: RuntimeOptions) {
@@ -154,14 +160,12 @@ export class ChannelsRuntime {
    * takes effect for the next message without a restart; the caller persists the
    * overlay so it survives one.
    */
-  updateAllowlist(action: { add?: string; remove?: string }): string[] {
-    const list = this.#options.config.allowedSenders
-    if (typeof action.remove === 'string' && action.remove !== '') {
-      const index = list.indexOf(action.remove)
-      if (index >= 0) list.splice(index, 1)
-    }
+  updateAllowlist(action: { add?: string; remove?: string }, persist?: (list: string[]) => boolean): string[] | undefined {
+    const list = this.#options.config.allowedSenders.filter((sender) => sender !== action.remove)
     const add = typeof action.add === 'string' ? action.add.trim() : ''
     if (add !== '' && !list.includes(add)) list.push(add)
+    if (persist !== undefined && !persist(list)) return undefined
+    this.#options.config.allowedSenders = list
     return [...list]
   }
 
@@ -222,7 +226,7 @@ export class ChannelsRuntime {
     else this.#expiredAccounts.delete(accountId)
   }
 
-  gateContext(now = Date.now): GateContext {
+  gateContext(): GateContext {
     const config = this.#options.config
     return {
       expiredAccounts: this.#expiredAccounts,
@@ -230,20 +234,118 @@ export class ChannelsRuntime {
       allowedChats: config.allowedChats,
       minute: this.#minute,
       day: this.#day,
-      keyOf: (message) => lineKey(message),
+      keyOf: (message) => JSON.stringify([message.channel, message.accountId, message.senderId]),
     }
+  }
+
+  #refuse(message: InboundMessage, gate: Exclude<GateDecision, { allow: true }>): GateDecision {
+    this.#options.logger.info(`refused ${message.channel} message from ${message.senderId}: ${gate.reason}${gate.detail === undefined ? '' : ` (${gate.detail})`}`)
+    return gate
+  }
+
+  /** Reserve quota before downloads. The adapter must dispatch the same object after enrichment. */
+  canReceive(message: InboundMessage, hasAttachments = false, legacyAccountId?: string): boolean {
+    if (this.#disposed) return false
+    const context = this.gateContext()
+    const scoped = this.#options.config.allowlistPerAccount
+    if (legacyAccountId !== undefined && Object.hasOwn(scoped, legacyAccountId) && !Object.hasOwn(scoped, message.accountId)) {
+      // The old override may have been narrower than the global sender list.
+      context.allowlistFor = () => []
+    }
+    if (!this.#checkInbound(message, context).allow) return false
+    // Plain replies can settle an in-flight turn even if it consumed the last slot.
+    if (!hasAttachments && this.#interactions.busy(message)) return true
+    if (this.#preflightReservations.has(message)) return true
+    const quota = reserveMessage(message, context)
+    if (!quota.allow) return this.#refuse(message, quota).allow
+    this.#preflightReservations.set(message, quota.finish)
+    return true
+  }
+
+  /** Release preflight quota if an adapter could not dispatch this object. */
+  cancelReceive(message: InboundMessage): void {
+    this.#takeReservation(message)?.(false)
+  }
+
+  #takeReservation(message: InboundMessage): Reservation | undefined {
+    const reservation = this.#preflightReservations.get(message)
+    this.#preflightReservations.delete(message)
+    return reservation
+  }
+
+  #checkInbound(message: InboundMessage, context: GateContext): GateDecision {
+    const access = authorizeMessage(message, context)
+    if (!access.allow) return this.#refuse(message, access)
+    const id = message.platformMessageId
+    if (id !== undefined && (this.#queuedReceipts.has(receiptKey(message, id)) || this.#journal.received(message, id))) {
+      return { allow: false, reason: 'duplicate' }
+    }
+    return access
   }
 
   /** Run one inbound message through the gates and, if allowed, through a turn. */
   dispatch(message: InboundMessage): GateDecision {
-    const gate = gateMessage(message, this.gateContext())
-    if (gate.allow !== true) {
-      this.#options.logger.info(`refused ${message.channel} message from ${message.senderId}: ${gate.reason}${gate.detail === undefined ? '' : ` (${gate.detail})`}`)
-      return gate
+    if (this.#disposed) return { allow: false, reason: 'not-logged-in' }
+    const context = this.gateContext()
+    const access = this.#checkInbound(message, context)
+    if (!access.allow) {
+      this.cancelReceive(message)
+      return access
     }
-    // A reply to an open question or approval is consumed here, before the turn
-    // queue: queueing it behind the very turn that is asking deadlocks until the
-    // timeout. The gate above still applies — a stranger cannot answer for you.
+    const command = parseCommand(message.text)
+    // Answers must bypass the queue: the running turn is waiting for them.
+    const claim = command === null ? this.#interactions.claim(message, message.text) : { status: 'none' as const }
+    let reservation = this.#takeReservation(message)
+    if (claim.status === 'waiting' || claim.status === 'answered') {
+      reservation?.(false)
+      if (claim.status === 'answered') {
+        this.#acceptInbound(message)
+        this.#options.logger.info(`answered the pending interaction in ${lineKey(message)}`)
+      }
+      return access
+    }
+    if (reservation === undefined) {
+      const quota = reserveMessage(message, context)
+      if (!quota.allow) return this.#refuse(message, quota)
+      reservation = quota.finish
+    }
+    if (claim.status === 'invalid') {
+      this.#acceptInbound(message, reservation)
+      void this.send(message, { text: claim.hint, kind: 'notice' })
+    } else if (command !== null) {
+      this.#acceptInbound(message, reservation)
+      void this.#runCommand(message, command.name).catch((error: unknown) => {
+        this.#options.logger.warn(`command /${command.name} failed: ${String((error as Error)?.message ?? error)}`)
+      })
+    } else {
+      this.#enqueueTurn(message, reservation)
+    }
+    return access
+  }
+
+  #enqueueTurn(message: InboundMessage, reservation: Reservation): void {
+    const sessionId = this.#sessionIdFor(message)
+    const id = message.platformMessageId === undefined ? undefined : receiptKey(message, message.platformMessageId)
+    if (id !== undefined) this.#queuedReceipts.add(id)
+    let started = false
+    void this.#queue
+      .push(lineKey(message), async (signal) => {
+        started = true
+        if (id !== undefined) this.#queuedReceipts.delete(id)
+        this.#acceptInbound(message, reservation)
+        await this.#runTurn(message, sessionId, signal)
+      })
+      .catch((error: unknown) => {
+        if (!started) {
+          if (id !== undefined) this.#queuedReceipts.delete(id)
+          reservation(false)
+        }
+        this.#options.logger.warn(`turn failed for ${lineKey(message)}: ${String((error as Error)?.message ?? error)}`)
+      })
+  }
+
+  #acceptInbound(message: InboundMessage, reservation?: Reservation): void {
+    reservation?.(true)
     this.#journal.append({
       direction: 'in',
       phase: 'received',
@@ -252,31 +354,10 @@ export class ChannelsRuntime {
       accountId: message.accountId,
       conversationId: message.conversationId,
       kind: 'message',
+      ...(message.platformMessageId === undefined ? {} : { messageId: message.platformMessageId }),
       text: message.text.slice(0, 500),
       ...(message.media.length === 0 ? {} : { media: message.media.map((item) => item.path) }),
     })
-    const claim = this.#interactions.claim(message, message.text)
-    if (claim.status === 'answered') {
-      this.#options.logger.info(`answered the pending interaction in ${lineKey(message)}`)
-      return gate
-    }
-    if (claim.status === 'invalid') {
-      void this.send(message, { text: claim.hint, kind: 'notice' })
-      return gate
-    }
-    const command = parseCommand(message.text)
-    if (command !== null) {
-      void this.#runCommand(message, command.name).catch((error: unknown) => {
-        this.#options.logger.warn(`command /${command.name} failed: ${String((error as Error)?.message ?? error)}`)
-      })
-      return gate
-    }
-    void this.#queue
-      .push(lineKey(message), { run: (signal: AbortSignal) => this.#runTurn(message, signal) })
-      .catch((error: unknown) => {
-        this.#options.logger.warn(`turn failed for ${lineKey(message)}: ${String((error as Error)?.message ?? error)}`)
-      })
-    return gate
   }
 
   /**
@@ -319,10 +400,10 @@ export class ChannelsRuntime {
         `通道：${[...this.#adapters.keys()].join(', ') || '（没有）'}`,
         `状态目录：${this.#options.stateRoot}`,
         `允许的发送者：${config.allowedSenders.length}`,
-        `待重发：${this.#outbox.list().length}`,
-        `等待答复：${this.#interactions.pendingCount() > 0 ? '有' : '无'}`,
+        `待重发：${this.#outbox.list().filter((entry) => sameTarget(entry.target, message)).length}`,
+        `等待答复：${this.#interactions.busy(message) ? '有' : '无'}`,
       ]
-      const recent = this.#journal.outbound().slice(-3)
+      const recent = this.#journal.outbound(undefined, message).slice(-3)
       if (recent.length > 0) {
         lines.push('最近发出：')
         for (const entry of recent) lines.push(`· ${entry.state} ${entry.text.slice(0, 40)}`)
@@ -344,7 +425,8 @@ export class ChannelsRuntime {
     return this.#queue.runNow({ run: (signal: AbortSignal) => task(signal) })
   }
 
-  async #runTurn(message: InboundMessage, signal: AbortSignal): Promise<void> {
+  async #runTurn(message: InboundMessage, sessionId: string, signal: AbortSignal): Promise<void> {
+    if (signal.aborted || this.#disposed) return
     const adapter = this.#adapters.get(message.channel)
     if (adapter === undefined) {
       this.#options.logger.warn(`no adapter registered for channel '${message.channel}'`)
@@ -352,7 +434,9 @@ export class ChannelsRuntime {
     }
     if (typeof adapter.typing === 'function') void adapter.typing(message).catch(() => {})
     const startedAt = Date.now()
-    const reply = await this.#driver.run({ message, signal, sessionId: this.#sessionIdFor(message) })
+    const outputDir = this.#turnOutputDirectory()
+    const reply = await this.#driver.run({ message, signal, sessionId, outputDirectory: outputDir })
+    if (signal.aborted || this.#disposed) return
     this.#options.logger.info(`turn for ${lineKey(message)} settled in ${Date.now() - startedAt}ms (${reply.text.length} chars${reply.failed === true ? ', failed' : ''})`)
     if (reply.failed === true) {
       // The failure text is for the log, not for the person: it names host
@@ -362,22 +446,26 @@ export class ChannelsRuntime {
       return
     }
     if (reply.text.trim() !== '') await this.send(message, { text: reply.text, kind: 'reply' })
-    await this.#sendProducedFiles(message, startedAt)
+    if (outputDir !== undefined && !this.#disposed) await this.#sendProducedFiles(message, outputDir)
   }
 
   /** Send one outgoing message, split to the channel's capability, with outbox fallback. */
   async send(target: Target, outgoing: Outgoing): Promise<SendResult[]> {
+    if (this.#disposed) return [{ ok: false, code: 'stopped' }]
     const adapter = this.#adapters.get(target.channel)
     if (adapter === undefined) return [{ ok: false, code: 'unknown-channel', detail: target.channel }]
     const text = outgoing.text === undefined ? '' : plainText(outgoing.text)
     const limit = Number.isFinite(adapter.capabilities.maxTextChars) && adapter.capabilities.maxTextChars > 0 ? adapter.capabilities.maxTextChars : this.#options.config.maxTextChars
     const bubbles = splitIntoBubbles(text, limit)
     const results: SendResult[] = []
+    const base = { kind: outgoing.kind }
     for (const [index, bubble] of bubbles.entries()) {
       if (index > 0 && this.#options.config.bubbleGapMs > 0) await new Promise((resolve) => setTimeout(resolve, this.#options.config.bubbleGapMs))
-      results.push(await this.#deliver(adapter, target, { ...outgoing, text: bubble }, bubble))
+      if (this.#disposed) return [...results, { ok: false, code: 'stopped' }]
+      results.push(await this.#deliver(adapter, target, { ...base, text: bubble }, bubble))
     }
     for (const item of outgoing.media ?? []) {
+      if (this.#disposed) return [...results, { ok: false, code: 'stopped' }]
       // Media cannot be re-sent from the outbox (it holds text), so a failure
       // is reported and journalled, not queued.
       const result = await this.#deliver(adapter, target, { kind: outgoing.kind, text: '', media: [item] }, '')
@@ -386,17 +474,29 @@ export class ChannelsRuntime {
     return results
   }
 
+  #turnOutputDirectory(): string | undefined {
+    if (!this.#options.config.autoSendFiles) return undefined
+    try {
+      const workspace = path.resolve(this.#options.workingDirectory)
+      fs.mkdirSync(workspace, { recursive: true })
+      return fs.mkdtempSync(path.join(workspace, '.channel-output-'))
+    } catch (error) {
+      this.#options.logger.warn(`could not create a turn output directory: ${String(error)}`)
+      return undefined
+    }
+  }
+
   /**
    * Send what the turn wrote. The scan is bounded, and a file that cannot go
    * out costs a log line, never the reply that already went out.
    */
-  async #sendProducedFiles(message: InboundMessage, sinceMs: number): Promise<void> {
+  async #sendProducedFiles(message: InboundMessage, outputDir: string): Promise<void> {
     if (this.#options.config.autoSendFiles !== true) return
     let files
     try {
       files = await listProducedFiles({
-        dir: this.#options.workingDirectory,
-        sinceMs,
+        dir: outputDir,
+        sinceMs: 0,
         maxFiles: this.#options.config.maxProducedFiles,
         maxBytes: this.#options.config.maxProducedBytes,
       })
@@ -414,8 +514,8 @@ export class ChannelsRuntime {
   }
 
   /** One send, journalled in two phases. */
-  async #deliver(adapter: ChannelAdapter, target: Target, outgoing: Outgoing, text: string): Promise<SendResult> {
-    const id = `out-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
+  async #deliver(adapter: ChannelAdapter, target: Target, outgoing: Outgoing, text: string, retryId?: string): Promise<SendResult> {
+    const id = retryId ?? `out-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
     const media = (outgoing.media ?? []).map((item) => item.path)
     const base = {
       direction: 'out' as const,
@@ -439,11 +539,11 @@ export class ChannelsRuntime {
       phase: 'settled',
       delivery: result.ok === true ? (result.unconfirmed === true ? 'unconfirmed' : 'accepted') : 'failed',
       ...(result.ok === true && result.messageId !== undefined ? { messageId: result.messageId } : {}),
-      ...(result.ok === true ? {} : { code: result.code }),
+      ...(result.ok === true ? {} : { code: result.code, id }),
     })
-    if (result.ok !== true && text !== '') {
+    if (retryId === undefined && result.ok !== true && text !== '' && outgoing.kind === 'reply') {
       this.#options.logger.warn(`send failed on ${target.channel} (${result.code}); keeping the reply in the outbox`)
-      this.#outbox.add({ channel: target.channel, accountId: target.accountId, conversationId: target.conversationId }, { text, kind: outgoing.kind }, { code: result.code })
+      this.#outbox.add({ channel: target.channel, accountId: target.accountId, conversationId: target.conversationId }, { text, kind: outgoing.kind }, { code: result.code, id })
     }
     return result
   }
@@ -455,12 +555,14 @@ export class ChannelsRuntime {
         .drain(async (entry) => {
           const adapter = this.#adapters.get(entry.target.channel)
           if (adapter === undefined) return { ok: false as const, code: 'unknown-channel' }
-          try {
-            const result = await adapter.send(entry.target, { text: entry.outgoing.text ?? '', kind: entry.outgoing.kind })
-            return result.ok === true ? { ok: true as const } : { ok: false as const, code: result.code }
-          } catch (error) {
-            return { ok: false as const, code: 'adapter-threw' }
+          if (this.#disposed) return { ok: false as const, code: 'stopped' }
+          const accounts = await adapter.accounts.list()
+          if (!accounts.some((account) => account.accountId === entry.target.accountId && !account.expired)) {
+            return { ok: false as const, code: 'account-unavailable' }
           }
+          if (this.#disposed || this.#adapters.get(entry.target.channel) !== adapter) return { ok: false as const, code: 'stopped' }
+          const result = await this.#deliver(adapter, entry.target, entry.outgoing, entry.outgoing.text ?? '', entry.id)
+          return result.ok === true ? { ok: true as const } : { ok: false as const, code: result.code }
         })
         .catch((error: unknown) => this.#options.logger.warn(`outbox retry failed: ${String(error)}`))
     }, intervalMs)
@@ -472,6 +574,8 @@ export class ChannelsRuntime {
 
   /** Stop every timer this runtime started, and reject every pending interaction. */
   dispose(): void {
+    this.#disposed = true
+    this.#queue.dispose()
     for (const stop of this.#stopTimers.splice(0)) stop()
     this.#interactions.dispose()
     this.#targets.clear()

@@ -12,6 +12,7 @@ import type { InboundMessage } from '../types.js'
 
 export type GateReason =
   | 'not-logged-in'
+  | 'duplicate'
   | 'not-allowed'
   | 'chat-not-allowed'
   | 'rate-minute'
@@ -20,7 +21,11 @@ export type GateReason =
 export interface RateLimiter {
   /** Consume one slot; false when the window is exhausted. */
   take(key: string): boolean
+  /** Hold a slot in memory until delivery commits it or cancellation releases it. */
+  reserve(key: string): Reservation | undefined
 }
+
+export type Reservation = (commit: boolean) => void
 
 export interface GateContext {
   /** Per-account credential state, from the adapter. */
@@ -36,7 +41,7 @@ export interface GateContext {
 
 export type GateDecision = { allow: true } | { allow: false; reason: GateReason; detail?: string }
 
-export function gateMessage(message: InboundMessage, context: GateContext): GateDecision {
+export function authorizeMessage(message: InboundMessage, context: GateContext): GateDecision {
   if (context.expiredAccounts.has(message.accountId)) return { allow: false, reason: 'not-logged-in' }
 
   const allowed = context.allowlistFor(message.accountId)
@@ -48,10 +53,33 @@ export function gateMessage(message: InboundMessage, context: GateContext): Gate
     return { allow: false, reason: 'chat-not-allowed' }
   }
 
-  const key = context.keyOf(message)
-  if (!context.minute.take(key)) return { allow: false, reason: 'rate-minute' }
-  if (!context.day.take(key)) return { allow: false, reason: 'rate-day' }
   return { allow: true }
+}
+
+export function chargeMessage(message: InboundMessage, context: GateContext): GateDecision {
+  const admission = reserveMessage(message, context)
+  if (!admission.allow) return admission
+  admission.finish(true)
+  return { allow: true }
+}
+
+export function reserveMessage(message: InboundMessage, context: GateContext):
+  | { allow: true; finish: Reservation }
+  | Exclude<GateDecision, { allow: true }> {
+  const key = context.keyOf(message)
+  const minute = context.minute.reserve(key)
+  if (minute === undefined) return { allow: false, reason: 'rate-minute' }
+  const day = context.day.reserve(key)
+  if (day === undefined) {
+    minute(false)
+    return { allow: false, reason: 'rate-day' }
+  }
+  return { allow: true, finish: (commit) => { minute(commit); day(commit) } }
+}
+
+export function gateMessage(message: InboundMessage, context: GateContext): GateDecision {
+  const result = authorizeMessage(message, context)
+  return result.allow ? chargeMessage(message, context) : result
 }
 
 /** A limit is a number or a reader, so a settings change applies without a rebuild. */
@@ -61,24 +89,35 @@ function resolveLimit(limit: LimitSource): number {
   return typeof limit === 'function' ? limit() : limit
 }
 
-/** Fixed-window limiter. `limit <= 0` means unlimited. */
-export function createRateLimiter({ limit, windowMs, now = Date.now }: { limit: LimitSource; windowMs: number; now?: () => number }): RateLimiter {
-  const buckets = new Map<string, { startedAt: number; used: number }>()
+function withReservation(reserve: RateLimiter['reserve']): RateLimiter {
   return {
-    take(key: string): boolean {
-      const current = resolveLimit(limit)
-      if (!Number.isFinite(current) || current <= 0) return true
-      const at = now()
-      const bucket = buckets.get(key)
-      if (bucket === undefined || at - bucket.startedAt >= windowMs) {
-        buckets.set(key, { startedAt: at, used: 1 })
-        return true
-      }
-      if (bucket.used >= current) return false
-      bucket.used += 1
+    reserve,
+    take(key) {
+      const finish = reserve(key)
+      if (finish === undefined) return false
+      finish(true)
       return true
     },
   }
+}
+
+/** Fixed-window limiter. `limit <= 0` means unlimited. */
+export function createRateLimiter({ limit, windowMs, now = Date.now }: { limit: LimitSource; windowMs: number; now?: () => number }): RateLimiter {
+  const buckets = new Map<string, { startedAt: number; used: number }>()
+  return withReservation((key) => {
+    const current = resolveLimit(limit)
+    if (!Number.isFinite(current) || current <= 0) return () => {}
+    const at = now()
+    let bucket = buckets.get(key)
+    if (bucket === undefined || at - bucket.startedAt >= windowMs) {
+      bucket = { startedAt: at, used: 0 }
+      buckets.set(key, bucket)
+    }
+    if (bucket.used >= current) return undefined
+    bucket.used += 1
+    const reserved = bucket
+    return (commit) => { if (!commit) reserved.used -= 1 }
+  })
 }
 
 /**
@@ -101,17 +140,20 @@ export function createDurableRateLimiter({
   store: { get(key: string): number; set(key: string, value: number): void }
   now?: () => number
 }): RateLimiter {
-  return {
-    take(key: string): boolean {
-      const current = resolveLimit(limit)
-      if (!Number.isFinite(current) || current <= 0) return true
-      const at = now()
-      const windowStart = Math.floor(at / windowMs) * windowMs
-      const windowKey = `${prefix}:${key}:${windowStart}`
-      const used = store.get(windowKey)
-      if (used >= current) return false
-      store.set(windowKey, used + 1)
-      return true
-    },
-  }
+  const held = new Map<string, number>()
+  return withReservation((key) => {
+    const current = resolveLimit(limit)
+    if (!Number.isFinite(current) || current <= 0) return () => {}
+    const windowStart = Math.floor(now() / windowMs) * windowMs
+    const windowKey = `${prefix}:${key}:${windowStart}`
+    const pending = held.get(windowKey) ?? 0
+    if (store.get(windowKey) + pending >= current) return undefined
+    held.set(windowKey, pending + 1)
+    return (commit) => {
+      const remaining = (held.get(windowKey) ?? 1) - 1
+      if (remaining === 0) held.delete(windowKey)
+      else held.set(windowKey, remaining)
+      if (commit) store.set(windowKey, store.get(windowKey) + 1)
+    }
+  })
 }

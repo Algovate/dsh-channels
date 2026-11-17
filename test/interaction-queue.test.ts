@@ -26,6 +26,7 @@ function queue(options: { timeoutMs?: number } = {}) {
   const instance = new InteractionQueue({
     send: async (to, outgoing) => {
       sent.push({ target: to, outgoing })
+      return [{ ok: true, unconfirmed: true }]
     },
     logger: { info: () => {}, warn: () => {} },
     timeoutMs: options.timeoutMs ?? 10_000,
@@ -99,23 +100,28 @@ test('an aborted request withdraws the prompt without inventing an answer', asyn
   const answer = instance.ask(entry(), { signal: controller.signal })
   controller.abort()
   await assert.rejects(answer, /withdrawn/)
+  await tick()
   assert.equal(instance.busy(target), false)
 })
 
 test('retiring sends the "answered elsewhere" notice and resolves with the retire value', async () => {
   const { instance, sent } = queue()
-  const answer = instance.ask(entry())
+  const prompt = entry()
+  const answer = instance.ask(prompt)
   await tick(0)
-  instance.retire(target)
+  instance.retire(prompt)
   assert.equal(await answer, 'retired')
   assert.ok(sent.some((item) => item.outgoing.text === '在别处答了'))
 })
 
-test('dispose rejects every waiting interaction', async () => {
-  const { instance } = queue()
-  const answer = instance.ask(entry())
+test('dispose rejects every waiting interaction without presenting queued prompts', async () => {
+  const { instance, sent } = queue()
+  const first = assert.rejects(instance.ask(entry()), /disposed/)
+  const second = assert.rejects(instance.ask(entry()), /disposed/)
+  await tick()
   instance.dispose()
-  await assert.rejects(answer, /disposed/)
+  await Promise.all([first, second])
+  assert.equal(sent.length, 1)
 })
 
 test('a failed prompt delivery rejects instead of waiting out the timeout', async () => {
@@ -129,4 +135,73 @@ test('a failed prompt delivery rejects instead of waiting out the timeout', asyn
     timeoutMs: 10_000,
   })
   await assert.rejects(instance.ask(entry()), /could not deliver/)
+})
+
+test('a request with an already aborted signal rejects without sending a prompt', async () => {
+  const { instance, sent } = queue()
+  const answer = instance.ask(entry(), { signal: AbortSignal.abort() })
+  await Promise.race([assert.rejects(answer, /withdrawn/), tick(10).then(() => assert.fail('aborted request is still pending'))])
+  assert.deepEqual(sent, [])
+  assert.equal(instance.busy(target), false)
+})
+
+test('withdrawing a queued request does not send the active prompt again', async () => {
+  const { instance, sent } = queue()
+  const first = instance.ask(entry())
+  const controller = new AbortController()
+  const second = assert.rejects(instance.ask(entry(), { signal: controller.signal }), /withdrawn/)
+  controller.abort()
+  await second
+  assert.equal(sent.length, 1)
+  assert.equal(instance.claim(target, '1').status, 'answered')
+  assert.equal(await first, 'a')
+})
+
+test('a resolved delivery failure rejects an interaction without waiting for a reply', async () => {
+  const instance = new InteractionQueue({
+    send: async () => [{ ok: true, messageId: 'first-fragment' }, { ok: false, code: 'channel-down' }],
+    logger: { info: () => {}, warn: () => {} },
+  })
+  const answer = instance.ask(entry())
+  await Promise.race([assert.rejects(answer, /channel-down/), tick(10).then(() => assert.fail('undeliverable request is still pending'))])
+  assert.equal(instance.busy(target), false)
+})
+
+test('a retired prompt and its notice finish sending before the next prompt can take a reply', async () => {
+  let releaseFirst = () => {}
+  let releaseNotice = () => {}
+  const firstSend = new Promise<void>((resolve) => { releaseFirst = resolve })
+  const noticeSend = new Promise<void>((resolve) => { releaseNotice = resolve })
+  const started: string[] = []
+  const instance = new InteractionQueue({
+    send: async (_target, outgoing) => {
+      const title = outgoing.text?.split('\n')[0] ?? ''
+      started.push(title)
+      if (title === 'First question') await firstSend
+      if (outgoing.kind === 'notice') await noticeSend
+      return [{ ok: true, unconfirmed: true }]
+    },
+    logger: { info: () => {}, warn: () => {} },
+  })
+  const firstEntry = entry({ view: { title: 'First question', options: [] } })
+  const first = instance.ask(firstEntry)
+  const second = instance.ask(entry({ kind: 'approval', view: { title: 'Second approval', options: [] } }))
+  await tick()
+  assert.deepEqual(started, ['First question'])
+
+  instance.retire(firstEntry)
+  assert.equal(await first, 'retired')
+  assert.equal(instance.claim(target, '1').status, 'waiting', 'a reply to the first prompt cannot approve the second')
+  assert.deepEqual(started, ['First question'])
+
+  releaseFirst()
+  await tick()
+  assert.deepEqual(started, ['First question', '在别处答了'])
+  assert.equal(instance.claim(target, '1').status, 'waiting')
+
+  releaseNotice()
+  await tick()
+  assert.deepEqual(started, ['First question', '在别处答了', 'Second approval'])
+  assert.equal(instance.claim(target, '2').status, 'answered')
+  assert.equal(await second, 'b')
 })

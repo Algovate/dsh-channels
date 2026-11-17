@@ -22,6 +22,7 @@
  * @module @rodin/dsh-channels/turns
  */
 import type { InboundMessage, Target } from './types.js'
+import { setTimeout as delay } from 'node:timers/promises'
 import { sessionIdFor } from './ids.js'
 import { inboundTextWithMedia } from './media.js'
 import { extractDocumentText } from './documents.js'
@@ -63,6 +64,8 @@ export interface TurnRequest {
   system?: string
   /** Per-turn blocks, injected as one sourced snapshot before the message. */
   context?: TurnContextBlock[]
+  /** The private attachment directory for this particular user message. */
+  outputDirectory?: string
   signal?: AbortSignal
 }
 
@@ -252,16 +255,21 @@ export class TurnDriver {
     return attached
   }
 
-  /** Run one turn and return its reply once the session log carries it. */
+  /** Run one turn and return its reply after the matching turn ends. */
   async run(request: TurnRequest & { sessionId?: string }): Promise<TurnReply> {
-    const { message } = request
+    const { message, signal } = request
+    const sessionId = request.sessionId ?? sessionIdFor(message)
+    if (signal?.aborted) return { text: '', failed: true, sessionId }
     const attached = await this.attach(message, {
       ...(request.system === undefined ? {} : { system: request.system }),
-      ...(request.sessionId === undefined ? {} : { sessionId: request.sessionId }),
+      sessionId,
     })
     await this.#nameSession(attached, message)
     const factory = await this.#factory()
     const agent = attached.handle.agent
+    if (typeof agent.followup !== 'function') throw new Error('the agent cannot accept a followup message')
+    const enriched = await this.#enrichDocuments(message)
+    if (signal?.aborted) return { text: '', failed: true, sessionId }
 
     const blocks = (request.context ?? []).filter((block) => typeof block.text === 'string' && block.text.trim() !== '')
     if (blocks.length > 0 && typeof agent.inject === 'function') {
@@ -273,25 +281,32 @@ export class TurnDriver {
       )
     }
 
+    const input = factory({
+      // Attachments become text the model can act on ("saved here, open it
+      // with read_image"); the person's own words stay last.
+      content: [
+        ...(request.outputDirectory === undefined ? [] : [{
+          type: 'text',
+          text: `To attach a file to this chat reply, write it into this turn's output directory: ${request.outputDirectory}. Only put files for this chat in that directory.`,
+        }]),
+        { type: 'text', text: inboundTextWithMedia({ ...message, media: enriched }) },
+      ],
+      source: {
+        kind: message.channel,
+        form: 'message',
+        conversationId: message.conversationId,
+        group: message.group,
+        ...(request.outputDirectory === undefined ? {} : { hasOutputInstruction: true }),
+        ...(message.group ? { senderId: message.senderId } : {}),
+      },
+    })
+    const messageId = (input as { id?: unknown } | null)?.id
+    if (typeof messageId !== 'string' || messageId === '') throw new Error('the user message has no identity')
     const before = this.#lastSeq(agent)
-    if (typeof agent.followup !== 'function') throw new Error('the agent cannot accept a followup message')
-    const enriched = await this.#enrichDocuments(message)
-    agent.followup(
-      factory({
-        // Attachments become text the model can act on ("saved here, open it
-        // with read_image"); the person's own words stay last.
-        content: [{ type: 'text', text: inboundTextWithMedia({ ...message, media: enriched }) }],
-        source: {
-          kind: message.channel,
-          form: 'message',
-          conversationId: message.conversationId,
-          group: message.group,
-          ...(message.group ? { senderId: message.senderId } : {}),
-        },
-      }),
-    )
-    const reply = await this.#awaitReply(agent, before, request.signal)
-    return { ...reply, sessionId: attached.sessionId }
+    if (signal?.aborted) return { text: '', failed: true, sessionId }
+    agent.followup(input)
+    const reply = await this.#awaitReply(agent, before, messageId, signal)
+    return { ...reply, sessionId }
   }
 
   /**
@@ -346,31 +361,69 @@ export class TurnDriver {
   #lastSeq(agent: AgentHandle['agent']): number {
     const events = agent.session?.snapshotEvents?.() ?? []
     const last = events[events.length - 1]
-    return typeof last?.['seq'] === 'number' ? (last['seq'] as number) : 0
+    return typeof last?.['seq'] === 'number' ? (last['seq'] as number) : -1
   }
 
-  async #awaitReply(agent: AgentHandle['agent'], before: number, signal?: AbortSignal): Promise<{ text: string; failed?: boolean }> {
+  async #awaitReply(agent: AgentHandle['agent'], before: number, messageId: string, signal?: AbortSignal): Promise<{ text: string; failed?: boolean }> {
     const deadline = Date.now() + (this.#options.maxTurnWaitMs ?? 20 * 60_000)
     const pollMs = this.#options.pollMs ?? 120
     let lastSeq = before
+    let activeTurn: number | undefined
+    let matchingTurn: number | undefined
+    let inboxIndex: number | undefined
+    let text = ''
     while (Date.now() < deadline) {
-      if (signal?.aborted === true) return { text: '', failed: true }
+      if (signal?.aborted) return { text: '', failed: true }
       const events = agent.session?.snapshotEvents?.() ?? []
       for (const event of events) {
-        const seq = typeof event['seq'] === 'number' ? (event['seq'] as number) : 0
-        if (seq <= lastSeq) continue
+        const seq = event['seq']
+        if (typeof seq !== 'number' || seq <= lastSeq) continue
         lastSeq = seq
-        const text = assistantTextOf(event)
-        if (text !== undefined && text !== '') return { text }
-        if (event['type'] === 'turn/end') {
-          const reason = (event['data'] as Record<string, unknown> | undefined)?.['reason'] as Record<string, unknown> | undefined
-          if (reason?.['kind'] === 'error') {
-            const error = reason['error'] as Record<string, unknown> | undefined
-            return { text: typeof error?.['message'] === 'string' ? (error['message'] as string) : '回合失败', failed: true }
+        const data = event['data'] as Record<string, unknown> | undefined
+        const turn = data?.['turn']
+        switch (event['type']) {
+          case 'turn/start':
+            activeTurn = typeof turn === 'number' ? turn : undefined
+            break
+          case 'agent/inbox/spliced': {
+            // A failure before the first model step can consume the inbox entry without a user/message event.
+            const start = data?.['start']
+            const inserted = data?.['inserted']
+            if (data?.['target'] !== 'next-turn' || typeof start !== 'number' || !Array.isArray(inserted)) break
+            const index = inserted.findIndex((item: { id?: unknown } | null) => item?.id === messageId)
+            const removed = typeof data['removedCount'] === 'number' ? data['removedCount'] : 0
+            if (index >= 0) inboxIndex = start + index
+            else if (inboxIndex !== undefined && start <= inboxIndex) {
+              if (inboxIndex < start + removed) {
+                if (data['outcome'] === 'canceled') return { text: '', failed: true }
+                matchingTurn = activeTurn
+                inboxIndex = undefined
+              } else inboxIndex += inserted.length - removed
+            }
+            break
+          }
+          case 'user/message':
+            if (data?.['id'] === messageId) matchingTurn = activeTurn
+            break
+          case 'assistant/message':
+            if (matchingTurn !== undefined && turn === matchingTurn) text = assistantTextOf(event) ?? ''
+            break
+          case 'turn/end': {
+            if (turn === activeTurn) activeTurn = undefined
+            if (matchingTurn === undefined || turn !== matchingTurn) break
+            const reason = data?.['reason'] as { kind?: string; error?: { message?: unknown } } | undefined
+            if (reason?.kind === 'completed' || (reason?.kind === 'max-tokens' && text !== '')) return { text }
+            if (reason?.kind === 'aborted') return { text: '', failed: true }
+            const error = reason?.error?.message
+            return { text: typeof error === 'string' && error !== '' ? error : '回合失败', failed: true }
           }
         }
       }
-      await new Promise((resolve) => setTimeout(resolve, pollMs))
+      try {
+        await delay(Math.min(pollMs, deadline - Date.now()), undefined, { signal })
+      } catch {
+        return { text: '', failed: true }
+      }
     }
     this.#options.logger.warn('the turn did not settle before the timeout')
     return { text: '（这个回合超时了，没有拿到回复。）', failed: true }

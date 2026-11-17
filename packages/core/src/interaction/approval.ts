@@ -87,8 +87,9 @@ export async function answerApproval({
   logger?: { info: (line: string) => void; warn: (line: string) => void }
 }): Promise<unknown> {
   if (enabled !== true || target === undefined) return next()
+  const entry = approvalEntry({ target, request })
   const remote = queue
-    .ask(approvalEntry({ target, request }), { ...(request.signal === undefined ? {} : { signal: request.signal }) })
+    .ask(entry, { ...(request.signal === undefined ? {} : { signal: request.signal }) })
     .then((value) => ({ side: 'remote' as const, ok: true as const, value: value as ApprovalOutcome }), (error: unknown) => ({ side: 'remote' as const, ok: false as const, error }))
   const local = Promise.resolve()
     .then(() => next())
@@ -116,7 +117,7 @@ export async function answerApproval({
     }
   })
   if (decision !== undefined) {
-    if (decision.side === 'local') queue.retire(target)
+    if (decision.side === 'local') queue.retire(entry)
     return decision.value
   }
 

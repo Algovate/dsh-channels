@@ -25,6 +25,7 @@ import zlib from 'node:zlib'
 export const DEFAULT_DOCUMENT_CHARS = 4000
 
 const TEXT_EXTENSIONS = new Set(['.txt', '.md', '.markdown', '.csv', '.json', '.log', '.xml', '.yaml', '.yml', '.ini', '.conf'])
+const MAX_DOCUMENT_XML_BYTES = 8 * 1024 * 1024
 const PDF_HINT = 'pdf text extraction needs the optional pdfjs-dist package'
 
 export type DocumentResult =
@@ -52,8 +53,8 @@ function readZipEntry(buffer: Buffer, wanted: string): Buffer | undefined {
         const localExtraLength = buffer.readUInt16LE(localOffset + 28)
         const start = localOffset + 30 + localNameLength + localExtraLength
         const data = buffer.subarray(start, start + compressedSize)
-        if (method === 0) return data
-        if (method === 8) return zlib.inflateRawSync(data)
+        if (method === 0 && data.length <= MAX_DOCUMENT_XML_BYTES) return data
+        if (method === 8) return zlib.inflateRawSync(data, { maxOutputLength: MAX_DOCUMENT_XML_BYTES })
         return undefined
       }
       offset += 46 + nameLength + extraLength + commentLength
@@ -69,7 +70,7 @@ export function docxXmlToText(xml: string): string {
     .replace(/<w:tab\/>/g, '\t')
     .replace(/<w:br\/>/g, '\n')
     .replace(/<\/w:p>/g, '\n')
-    .replace(/<[^>]+>/g, '')
+    .replace(/<[^<>]+>/g, '')
     .replace(/&lt;/g, '<')
     .replace(/&gt;/g, '>')
     .replace(/&amp;/g, '&')
@@ -87,7 +88,7 @@ function truncate(text: string, maxChars: number): { text: string; truncated: bo
 
 /** PDF text through the optional parser; a missing parser is a reason, not a crash. */
 async function extractPdf(filePath: string): Promise<string> {
-  let pdfjs: { getDocument?: (options: { data: Uint8Array }) => { promise: Promise<any> } }
+  let pdfjs: { getDocument?: (options: { data: Uint8Array; isEvalSupported: boolean }) => { promise: Promise<any> } }
   try {
     const moduleName = 'pdfjs-dist/legacy/build/pdf.mjs'
     pdfjs = (await import(moduleName)) as typeof pdfjs
@@ -96,7 +97,7 @@ async function extractPdf(filePath: string): Promise<string> {
   }
   if (typeof pdfjs.getDocument !== 'function') throw new Error(PDF_HINT)
   const data = new Uint8Array(fs.readFileSync(filePath))
-  const document = await pdfjs.getDocument({ data }).promise
+  const document = await pdfjs.getDocument({ data, isEvalSupported: false }).promise
   const pages: string[] = []
   for (let page = 1; page <= document.numPages; page += 1) {
     const content = await (await document.getPage(page)).getTextContent()

@@ -1,56 +1,9 @@
 import crypto from "node:crypto";
-import fs from "node:fs";
-import path from "node:path";
-import { fileURLToPath } from "node:url";
+import pkg from "../package.json" with { type: "json" };
 import { loadConfigBotAgent, loadConfigRouteTag } from "../auth/accounts.js";
+import { readBoundedResponse } from "../util/bounded-response.js";
 import { logger } from "../util/logger.js";
 import { redactBody, redactUrl } from "../util/redact.js";
-/**
- * Identify whether a parsed package.json belongs to this plugin.
- *
- * The walk-up search may pass through unrelated `package.json` files
- * (e.g. nested `node_modules/<dep>/package.json`); only ours is accepted.
- */
-function isOwnPackageJson(parsed) {
-    if (parsed.ilink_appid !== undefined)
-        return true;
-    return typeof parsed.name === "string" && parsed.name.includes("openclaw-weixin");
-}
-/**
- * Walk up from `startDir` searching for the plugin's own `package.json`.
- *
- * Resilient to differing layouts between dev (TS source under `src/`) and
- * publish (compiled output under `dist/src/`) by not assuming a fixed depth.
- */
-export function readPackageJsonFromDir(startDir) {
-    try {
-        let dir = startDir;
-        const { root } = path.parse(dir);
-        while (dir && dir !== root) {
-            const candidate = path.join(dir, "package.json");
-            if (fs.existsSync(candidate)) {
-                try {
-                    const parsed = JSON.parse(fs.readFileSync(candidate, "utf-8"));
-                    if (isOwnPackageJson(parsed)) {
-                        return parsed;
-                    }
-                }
-                catch {
-                    // Malformed package.json — keep walking up.
-                }
-            }
-            dir = path.dirname(dir);
-        }
-    }
-    catch {
-        // Fall through to empty default.
-    }
-    return {};
-}
-function readPackageJson() {
-    return readPackageJsonFromDir(path.dirname(fileURLToPath(import.meta.url)));
-}
-const pkg = readPackageJson();
 const CHANNEL_VERSION = pkg.version ?? "unknown";
 /** iLink-App-Id: 直接读取 package.json 顶层 ilink_appid 字段。 */
 const ILINK_APP_ID = pkg.ilink_appid ?? "";
@@ -172,6 +125,7 @@ const DEFAULT_LONG_POLL_TIMEOUT_MS = 35_000;
 const DEFAULT_API_TIMEOUT_MS = 15_000;
 /** Default timeout for lightweight API requests (getConfig, sendTyping). */
 const DEFAULT_CONFIG_TIMEOUT_MS = 10_000;
+const MAX_API_RESPONSE_BYTES = 4 * 1024 * 1024;
 function ensureTrailingSlash(url) {
     return url.endsWith("/") ? url : `${url}/`;
 }
@@ -269,9 +223,7 @@ export async function apiGetFetch(params) {
             headers: hdrs,
             ...(controller ? { signal: controller.signal } : {}),
         });
-        if (t !== undefined)
-            clearTimeout(t);
-        const rawText = await res.text();
+        const rawText = (await readBoundedResponse(res, MAX_API_RESPONSE_BYTES)).toString("utf8");
         logger.debug(`${params.label} status=${res.status} raw=${redactBody(rawText)}`);
         if (!res.ok) {
             throw new Error(`${params.label} ${res.status}: ${rawText}`);
@@ -279,11 +231,13 @@ export async function apiGetFetch(params) {
         return rawText;
     }
     catch (err) {
-        if (t !== undefined)
-            clearTimeout(t);
         const classified = classifyFetchError(err);
         logger.error(`${params.label}: GET fetch failed url=${redactUrl(url.toString())} timeoutMs=${timeoutMs ?? "none"} type=${classified.type} description=${classified.description}${classified.code ? ` code=${classified.code}` : ""} error=${String(err)}`);
         throw err;
+    }
+    finally {
+        if (t !== undefined)
+            clearTimeout(t);
     }
 }
 /**
@@ -339,9 +293,7 @@ export async function apiPostFetch(params) {
             body: params.body,
             ...(signal ? { signal } : {}),
         });
-        if (t !== undefined)
-            clearTimeout(t);
-        const rawText = await res.text();
+        const rawText = (await readBoundedResponse(res, MAX_API_RESPONSE_BYTES)).toString("utf8");
         logger.debug(`${params.label} status=${res.status} raw=${redactBody(rawText)}`);
         if (!res.ok) {
             throw new Error(`${params.label} ${res.status}: ${rawText}`);
@@ -349,13 +301,13 @@ export async function apiPostFetch(params) {
         return rawText;
     }
     catch (err) {
-        if (t !== undefined)
-            clearTimeout(t);
         const classified = classifyFetchError(err);
         logger.error(`${params.label}: POST fetch failed url=${redactUrl(url.toString())} timeoutMs=${params.timeoutMs ?? "none"} type=${classified.type} description=${classified.description}${classified.code ? ` code=${classified.code}` : ""} error=${String(err)}`);
         throw err;
     }
     finally {
+        if (t !== undefined)
+            clearTimeout(t);
         cleanup();
     }
 }
@@ -499,6 +451,9 @@ export async function sendMessage(params) {
         label: "sendMessage",
     });
     const resp = parseWeixinApiJson(rawText);
+    if (resp.errcode && resp.errcode !== 0) {
+        throw new Error(`sendMessage errcode=${resp.errcode} errmsg=${resp.errmsg ?? "(none)"}`);
+    }
     if (resp.ret && resp.ret !== 0) {
         throw new Error(`sendMessage ret=${resp.ret} errmsg=${resp.errmsg ?? "(none)"}`);
     }

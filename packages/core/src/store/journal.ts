@@ -16,6 +16,8 @@
  */
 import fs from 'node:fs'
 import path from 'node:path'
+import { sameTarget } from '../ids.js'
+import type { Target } from '../types.js'
 
 export interface JournalLine {
   at: number
@@ -40,10 +42,15 @@ function dayStamp(at: number): string {
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`
 }
 
+export function receiptKey(target: Target, messageId: string): string {
+  return JSON.stringify([target.channel, target.accountId, target.conversationId, messageId])
+}
+
 export class Journal {
   readonly #root: string
   readonly #warn: (line: string) => void
   readonly #now: () => number
+  readonly #receipts = new Map<string, Set<string>>()
 
   constructor({ stateRoot, warn = () => {}, now = Date.now }: { stateRoot: string; warn?: (line: string) => void; now?: () => number }) {
     this.#root = path.join(stateRoot, 'journal')
@@ -57,6 +64,9 @@ export class Journal {
 
   append(line: Omit<JournalLine, 'at'> & { at?: number }): boolean {
     const at = line.at ?? this.#now()
+    if (line.direction === 'in' && line.phase === 'received' && line.messageId !== undefined) {
+      this.#receivedOn(at).add(receiptKey(line, line.messageId))
+    }
     try {
       fs.mkdirSync(this.#root, { recursive: true })
       fs.appendFileSync(this.file(at), `${JSON.stringify({ ...line, at })}\n`, { mode: 0o600 })
@@ -65,6 +75,39 @@ export class Journal {
       this.#warn(`journal write failed: ${String((error as Error)?.message ?? error)}`)
       return false
     }
+  }
+
+  /** Recently accepted provider deliveries, including a batch replayed after restart. */
+  received(target: Target, messageId: string | undefined): boolean {
+    if (messageId === undefined) return false
+    const day = new Date(this.#now())
+    const key = receiptKey(target, messageId)
+    const days = new Set<string>()
+    let found = false
+    for (let remaining = 3; remaining > 0; remaining -= 1) {
+      const at = day.getTime()
+      days.add(dayStamp(at))
+      if (this.#receivedOn(at).has(key)) found = true
+      day.setDate(day.getDate() - 1)
+    }
+    for (const cached of this.#receipts.keys()) {
+      if (!days.has(cached)) this.#receipts.delete(cached)
+    }
+    return found
+  }
+
+  #receivedOn(at: number): Set<string> {
+    const day = dayStamp(at)
+    const cached = this.#receipts.get(day)
+    if (cached !== undefined) return cached
+    const receipts = new Set<string>()
+    for (const line of this.read(at)) {
+      if (line?.direction === 'in' && line.phase === 'received' && typeof line.messageId === 'string') {
+        receipts.add(receiptKey(line, line.messageId))
+      }
+    }
+    this.#receipts.set(day, receipts)
+    return receipts
   }
 
   /** Every line of one day, oldest first. A malformed line is skipped, not fatal. */
@@ -92,11 +135,13 @@ export class Journal {
    * reported as `pending` — the only honest answer for a send that never
    * finished.
    */
-  outbound(at = this.#now()): Array<{ id: string; text: string; state: 'accepted' | 'unconfirmed' | 'failed' | 'pending'; code?: string }> {
+  outbound(at = this.#now(), target?: Target): Array<{ id: string; text: string; state: 'accepted' | 'unconfirmed' | 'failed' | 'pending'; code?: string }> {
     const byId = new Map<string, { id: string; text: string; state: 'accepted' | 'unconfirmed' | 'failed' | 'pending'; code?: string }>()
     for (const line of this.read(at)) {
       if (line.direction !== 'out') continue
+      if (target !== undefined && !sameTarget(line, target)) continue
       if (line.phase === 'sending') {
+        byId.delete(line.id)
         byId.set(line.id, { id: line.id, text: line.text ?? '', state: 'pending' })
         continue
       }

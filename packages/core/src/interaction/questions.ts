@@ -145,6 +145,7 @@ export function questionEntry({ target, questions, hint }: { target: Target; que
     kind: 'question',
     target,
     view: { title: formatQuestionPrompt(questions), options: [], ...(hint === undefined ? {} : { hint }) },
+    freeText: questions.every((question) => !Array.isArray(question?.options) || question.options.length === 0),
     parse(text: string) {
       const parsed = parseAnswers(text, questions)
       return parsed.ok === true ? { ok: true, value: JSON.stringify({ answers: parsed.answers }) } : { ok: false, hint: parsed.hint }
@@ -177,8 +178,9 @@ export async function answerUserQuestion({
   logger?: { info: (line: string) => void; warn: (line: string) => void }
 }): Promise<unknown> {
   if (enabled !== true || target === undefined) return next()
+  const entry = questionEntry({ target, questions })
   const remote = queue
-    .ask(questionEntry({ target, questions }), { ...(request.signal === undefined ? {} : { signal: request.signal }) })
+    .ask(entry, { ...(request.signal === undefined ? {} : { signal: request.signal }) })
     .then((value) => ({ side: 'remote' as const, ok: true as const, value: JSON.parse(value) as { answers: QuestionAnswer[] } }), (error: unknown) => ({ side: 'remote' as const, ok: false as const, error }))
   const local = Promise.resolve()
     .then(() => next())
@@ -186,12 +188,12 @@ export async function answerUserQuestion({
 
   const first = await Promise.race([remote, local])
   if (first.ok === true) {
-    if (first.side === 'local') queue.retire(target)
+    if (first.side === 'local') queue.retire(entry)
     return first.value
   }
   const other = first.side === 'remote' ? await local : await remote
   if (other.ok === true) {
-    if (other.side === 'local') queue.retire(target)
+    if (other.side === 'local') queue.retire(entry)
     return other.value
   }
   const error = first.side === 'local' ? first.error : other.error

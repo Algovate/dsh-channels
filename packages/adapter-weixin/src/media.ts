@@ -12,11 +12,12 @@
  *
  * @module @rodin/dsh-channels-weixin/media
  */
-import fs from 'node:fs'
+import { randomUUID } from 'node:crypto'
+import fs from 'node:fs/promises'
 import path from 'node:path'
 
 import { downloadMediaFromItem } from '../vendor/openclaw-weixin/media/media-download.js'
-import { getMimeFromFilename, getExtensionFromMime } from '../vendor/openclaw-weixin/media/mime.js'
+import { getMimeFromFilename } from '../vendor/openclaw-weixin/media/mime.js'
 import { MessageItemType } from '../vendor/openclaw-weixin/api/types.js'
 import type { InboundMedia } from '@rodin/dsh-channels'
 
@@ -29,7 +30,8 @@ const ITEM_KIND: Record<number, InboundMedia['kind'] | undefined> = {
 }
 
 function safeName(name: string): string {
-  return name.replace(/[^A-Za-z0-9._-]/g, '_').slice(0, 80) || 'attachment'
+  const safe = name.replace(/[^A-Za-z0-9._-]/g, '_').slice(0, 80)
+  return safe === '' || safe === '.' || safe === '..' ? 'attachment' : safe
 }
 
 /** MIME → extension, for the common kinds WeChat actually carries. */
@@ -89,6 +91,7 @@ export interface InboundMediaOptions {
   mediaRoot: string
   cdnBaseUrl: string
   messageId: string
+  signal?: AbortSignal
   logger: { info: (line: string) => void; warn: (line: string) => void }
 }
 
@@ -104,43 +107,42 @@ export async function saveInboundItem(
   if (kind === undefined) return { ok: false, kind: 'file', reason: 'unsupported-item' }
 
   const directory = path.join(options.mediaRoot, safeName(options.accountId))
-  fs.mkdirSync(directory, { recursive: true })
-  const stamp = `${options.messageId}-${Date.now().toString(36)}`
-  const saved: string[] = []
-  let savedMime = 'application/octet-stream'
+  const stamp = `${safeName(options.messageId)}-${randomUUID()}`
+  let media: InboundMedia | undefined
 
-  const saveMedia = async (buffer: Buffer, mime?: string, _subdir?: string, _maxBytes?: number, originalName?: string): Promise<{ path: string }> => {
+  const saveMedia = async (buffer: Buffer, mime?: string, _subdir?: string, maxBytes?: number, originalName?: string): Promise<{ path: string }> => {
+    options.signal?.throwIfAborted()
+    if (maxBytes !== undefined && buffer.length > maxBytes) throw new Error(`attachment exceeds ${maxBytes} bytes`)
     const declared = typeof mime === 'string' && mime !== '' && mime !== 'application/octet-stream' ? mime : undefined
     const type = declared ?? sniffMime(buffer) ?? getMimeFromFilename(originalName ?? kind)
-    savedMime = type
-    const extension = extensionFor({ ...(declared === undefined ? {} : { mime: type }), kind, ...(originalName === undefined ? {} : { originalName }) })
+    const extension = extensionFor({ mime: type, kind, originalName })
     const base = originalName === undefined ? `${stamp}-${kind}${extension}` : `${stamp}-${safeName(originalName)}`
     const file = path.join(directory, base)
-    await fs.promises.writeFile(file, buffer, { mode: 0o600 })
-    saved.push(file)
+    await fs.mkdir(directory, { recursive: true })
+    await fs.writeFile(file, buffer, { flag: 'wx', mode: 0o600 })
+    media = {
+      kind,
+      path: file,
+      mime: type,
+      bytes: buffer.length,
+      ...(originalName === undefined ? {} : { name: safeName(originalName) }),
+    }
     return { path: file }
   }
 
   try {
-    const result = (await downloadMediaFromItem(item, {
+    await downloadMediaFromItem(item, {
       cdnBaseUrl: options.cdnBaseUrl,
       saveMedia,
-      log: () => {},
-      errLog: (line: string) => options.logger.warn(String(line).slice(0, 300)),
+      errLog: (line: string) => {
+        if (options.signal?.aborted !== true) options.logger.warn(line.slice(0, 300))
+      },
       label: 'weixin',
       mediaSubdir: 'inbound',
-    })) as unknown
-    const file = saved[0]
-    if (file === undefined) return { ok: false, kind, reason: 'download-empty' }
-    const bytes = fs.statSync(file).size
-    const media: InboundMedia = {
-      kind,
-      path: file,
-      mime: savedMime,
-      bytes,
-      ...(typeof item.file_item?.file_name === 'string' ? { name: safeName(item.file_item.file_name) } : {}),
-    }
-    options.logger.info(`saved inbound ${kind} to ${file} (${bytes} bytes)`)
+      signal: options.signal,
+    })
+    if (media === undefined) return { ok: false, kind, reason: 'download-empty' }
+    options.logger.info(`saved inbound ${kind} to ${media.path} (${media.bytes} bytes)`)
     return { ok: true, media }
   } catch (error) {
     return { ok: false, kind, reason: String((error as Error)?.message ?? error) }

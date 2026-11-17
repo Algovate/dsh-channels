@@ -1,142 +1,156 @@
-# 运维
+# 运维指南
 
-## 1. 安装到一台机器
+## 安装
 
-前置：DSH ≥ `0.2.2-rc.3`（宿主版本必须与插件使用的宿主包同代）；Node ≥ 22.13。
+需要 Node.js 22.13 或更高版本。已验证的 DSH 版本见[验证状态](STATUS.md)。
+
+在仓库根目录构建并生成本地安装包：
 
 ```bash
-# 1) 构建 + 测试
-npm install && npm test
-
-# 2) 打包（dist 必须已构建；微信适配器还要带 vendor/ 与 bin/）
-tar czf /tmp/channels-core.tgz     -C packages/core            package.json cordis.patch.yml client.js bin dist
-tar czf /tmp/channels-weixin.tgz   -C packages/adapter-weixin  package.json vendor bin dist
-tar czf /tmp/channels-telegram.tgz -C packages/adapter-telegram package.json dist
-
-# 3) 目标机：解开、加 file: 依赖、加 bundle 行
-#    profile 的 package.json：
-#      dependencies: { "@rodin/dsh-channels": "file:…/core", "@rodin/dsh-channels-weixin": "file:…/adapter-weixin" }
-#      dsh.profile.bundles: [ …, "@rodin/dsh-channels" ]
-cd <profile> && pnpm install        # file: 是复制：换源码目录必须重装
+npm ci
+npm test
+package_dir="$(mktemp -d)"
+npm pack --workspaces --pack-destination "$package_dir"
+printf '%s\n' "$package_dir"
 ```
 
-**不要**把同一个微信账号同时挂两个通道插件：两边都会长轮询同一个账号，并争抢同一个游标。
-
-## 2. 状态目录
-
-默认 `~/.dsh/channels`，可用 `DSH_CHANNELS_STATE_DIR` 覆盖。表见
-[DESIGN §7](DESIGN.md#7-存储)，权威来源是 `packages/core/src/store/layout.ts`：
-
-```
-~/.dsh/channels/
-├── config.json              设置覆盖（0600），覆盖加载器配置
-├── counters.json            限流计数的回落文件（有存储域时不写）
-├── outbox.json              待重发（上限 50 条）
-├── journal/journal-*.jsonl  消息流水，两段式
-├── logs/channels-*.log      运行日志
-├── media/inbound/<账号>/    收到的附件
-├── workspace/               agent 工作目录（默认登记成 GUI 工作区「Channels」）
-└── openclaw-weixin/         微信凭证（0600，vendored 登录流程写）
-```
-
-`npm run build && npm run doctor -- --state` 打印每一行的用量与它为什么在那里；状态目录里有
-表外文件时会以非零退出码结束。
-
-## 3. 配置与优先级
-
-`config.json` **覆盖**加载器行里的同名键：patch 里的值是默认，操作者保存的才是决定。卡片上的
-白名单与限流编辑都写这个文件（原子的临时文件 + rename）。
+把需要的归档复制到目标机上的固定目录。在目标 DSH profile 的 `package.json` 中合并相应的依赖和 bundle 条目。下例同时启用两个包的安装；只使用一个通道时可省去另一个适配器。保留 profile 中已有的依赖和 bundle。
 
 ```json
 {
-  "allowedSenders": ["o9cq…@im.wechat"],
-  "adapters": ["@rodin/dsh-channels-weixin"],
-  "maxTurnWaitMs": 300000,
-  "adapterConfig": {
-    "@rodin/dsh-channels-weixin": {
-      "asrCommand": "/Users/you/dsh-plugin-pkgs/asr-venv/bin/python",
-      "asrModelDir": "/Users/you/.dsh/channels/asr-models"
+  "dependencies": {
+    "@rodin/dsh-channels": "file:/opt/dsh-packages/rodin-dsh-channels-0.1.0.tgz",
+    "@rodin/dsh-channels-weixin": "file:/opt/dsh-packages/rodin-dsh-channels-weixin-0.1.0.tgz",
+    "@rodin/dsh-channels-telegram": "file:/opt/dsh-packages/rodin-dsh-channels-telegram-0.1.0.tgz"
+  },
+  "dsh": {
+    "profile": {
+      "bundles": ["@rodin/dsh-channels"]
     }
   }
 }
 ```
 
-改完需要重启宿主（`apply` 期间读一次配置）；卡片能改的那几项是例外——它们同时改运行中的值。
+在 profile 目录运行 `pnpm install`。适配器是核心加载的库，只将核心登记为 bundle。升级本地构建时，给新归档不同的文件名、更新 `file:` 路径并重新安装，然后重启宿主。
 
-## 4. journal：回答"发出去没有"
+## 配置
 
-```bash
-tail -n 3 ~/.dsh/channels/journal/journal-2026-11-17.jsonl | jq -c '{id,phase,delivery,messageId,code}'
-```
+状态根目录默认是 `~/.dsh/channels`，可在宿主进程环境中设置 `DSH_CHANNELS_STATE_DIR`。同目录下的 `config.json` 按**顶层键**覆盖加载器配置：如果写了 `adapterConfig`，它会替换整个原值。未覆盖的键继续用加载器值或核心默认值。
 
-每条发出的消息写两次：`sending`（调用适配器之前）和 `settled`（之后，带
-`delivery: accepted|unconfirmed|failed` 与 `messageId`/`code`）。只有 `sending` 没有 `settled`
-的，就是"发到一半进程没了"——那才是 pending。
+创建含凭证的配置前先运行 `umask 077`；已有文件用 `chmod 600 "$state/config.json"` 收紧权限，其中 `state` 是实际状态目录。不要把包含 token 的配置加入版本库。下文的 JSON 是可合并的示例；替换占位值并保留已有设置。
 
-网页侧同一份数据在卡片上（最近 8 条）。
-
-## 5. 微信登录与账号
-
-微信适配器复用 vendored 登录流程写的凭证：`<state>/openclaw-weixin/accounts*.json`。
-从旧插件迁移时可以直接拷这个目录（本插件不读旧插件的其它状态）。
-
-选了哪个账号：`adapterConfig["@rodin/dsh-channels-weixin"].accountId`；不填就用索引里的第一个。
-日志里 `weixin adapter polling account <id>` 会说明实际在跑哪个。
-
-## 6. 语音转写（可选）
-
-没有引擎时语音只会被转成 WAV 落盘，提示里写"无法转写"——不是错误，是降级。
-
-```bash
-# Apple silicon：mlx-whisper；其它平台换 faster-whisper
-python3 -m venv ~/dsh-plugin-pkgs/asr-venv
-~/dsh-plugin-pkgs/asr-venv/bin/python -m pip install mlx-whisper
-
-# 模型下载到插件约定的目录名（桥按这个拼路径）
-HF_HUB_DISABLE_XET=1 ~/dsh-plugin-pkgs/asr-venv/bin/python - <<'PY'
-from huggingface_hub import snapshot_download
-snapshot_download("mlx-community/whisper-small-mlx", token=False,
-                  local_dir="/Users/<you>/.dsh/channels/asr-models/mlx-community__whisper-small-mlx")
-PY
-
-# 单独验证（不经过微信）
-say -v Tingting -o /tmp/a.aiff "明天下午三点提醒我开会"
-afconvert -f WAVE -d LEI16@16000 /tmp/a.aiff /tmp/a.wav
-printf '{"wav": "/tmp/a.wav"}\n' | DSH_WEIXIN_ASR_MODEL_DIR=~/.dsh/channels/asr-models \
-  ~/dsh-plugin-pkgs/asr-venv/bin/python packages/adapter-weixin/bin/asr-bridge.py
-```
-
-然后在 `adapterConfig` 里指向这个 venv 的 python 与模型目录。桥是**常驻子进程**：一行一个 JSON
-请求/响应，同一时刻只有一个请求，失败返回原因而不是抛异常，默认 60s 超时。
-
-## 7. GUI
-
-- **Chat 行**：通道消息显示成带徽标的气泡。
-- **工作区分组**：插件启动时把工作目录登记成「Channels」工作区，会话首次附着时
-  `attachSession()` 挂进去。没有这一步，会话会落在 "Ungrouped" 里（要展开才看得到）。
-- **状态卡片**（Plugins → `@rodin/dsh-channels`）：三个同源路由
-  `GET /channels/status`、`POST /channels/allowlist`、`POST /channels/settings`。
-  POST 必须带页面自己的 `Origin`，否则 403。
-
-## 8. 排障
-
-| 现象 | 先看 | 常见原因 |
+| 配置 | 核心默认值 | 作用 |
 |---|---|---|
-| 机器人不回 | `logs/` 里有没有 `refused … not-allowed` | 白名单空 / id 不对（用 `/whoami` 取） |
-| 回了但没收到 | journal 里该条是否有 `settled`、`delivery` 是什么 | `failed` → `outbox.json` 会重发；`pending` → 进程中途没了 |
-| 回合失败 | `logs/` 的 `turn failed for …` | 模型余额/网络；错误不会发给用户 |
-| 提问没出现 | `logs/` 的 `user-questions/request: target=…` | `target=none` 表示不是本通道的会话 |
-| 提问出现又消失 | 同一行附近 40ms 内的桌面应答 | 桌面 answerer 先答了空答案集（见 STATUS 已知行为） |
-| GUI 里找不到会话 | 侧栏是否展开「Channels」 | 工作区登记失败（日志有 `workspace registration failed`） |
-| 卡片显示"没有 channels 服务" | 宿主是否提供 `webServer` | 路由没注册成功（日志有 `status route not registered`） |
-| 语音没转写 | `transcribed voice note` / `voice note not transcribed` | 没有引擎、模型目录不对、超时 |
-| 装完没生效 | `pnpm install` 是否重跑过 | `file:` 依赖是复制，不重装跑的是旧代码 |
+| `enabled` | `true` | 为 `false` 时跳过插件启动 |
+| `adapters` / `adapterConfig` | `[]` / `{}` | 要加载的包名；适配器参数按包名索引。随包提供的 patch 默认列出微信 |
+| `allowedSenders` | `[]` | 全局发送者白名单；空列表拒绝所有人 |
+| `allowlistPerAccount` | `{}` | 账号键 → 发送者列表；显式空列表仍覆盖全局白名单 |
+| `allowedChats` | `[]` | 额外限制聊天 ID；空列表不限制聊天 |
+| `senderPerMinute` / `senderPerDay` | `6` / `60` | 按通道、账号和发送者计；设为 `0` 关闭对应限制 |
+| `maxTextChars` / `bubbleGapMs` | `600` / `400` | 默认单条文字长度及分条间隔；适配器可设自己的长度上限 |
+| `maxTurnWaitMs` / `turnPollMs` | `1200000` / `120` | 等待回合结束的上限及查看会话日志的间隔，单位毫秒 |
+| `questionsEnabled` / `approvalsEnabled` | `true` / `true` | 在聊天中接收提问及一次性审批 |
+| `interactionTimeoutMs` | `600000` | 已送达的交互提示等待回复的时长，单位毫秒 |
+| `autoSendFiles` | `true` | 回复后发送本回合输出目录中的附件 |
+| `maxProducedFiles` / `maxProducedBytes` | `3` / `20971520` | 每回合自动发送的文件数上限及单文件字节上限 |
+| `workingDirectory` | `<state>/workspace` | DSH 会话工作目录 |
 
-## 9. 版本与兼容
+手动编辑后需要重启。状态卡片可以实时保存全局白名单、两项配额、提问/审批和自动附件开关；账号级白名单、凭证和目录仍在文件里改。
 
-- 宿主包（`dsh-storage-domain`、`dsh-typert-protocol`）只能作为 **optional peer** 声明，代码里
-  必须能"没有它也跑"，并且用运行期动态 `import()`。把它们装成普通依赖会把宿主的行挤坏
-  （实测：宿主禁用了自己的 `storage-domain` 行）。
-- 读服务用 `ctx.inject([...], cb)`，不要用 `ctx.get(...)`：核心服务（`storageDomain`、
-  `workspaceRegistry`、`agentPresets`）用 `get` 拿到的是空。
-- 升级宿主后重跑 `npm test`；`docs/STATUS.md` 记录每个里程碑验证在哪个宿主版本上做的。
+## 微信
+
+本仓库没有独立的扫码命令。先用现有 iLink 登录工具取得账号凭证。将该工具写出的 `openclaw-weixin/accounts.json`（索引）和对应的 `openclaw-weixin/accounts/<accountId>.json`（凭证）复制到状态根目录下的同名位置。保留凭证文件的 `0600` 权限。如果手头只有旧版全局 `credentials.json`，请重新配对取得按账号保存的文件。
+
+```json
+{
+  "adapters": ["@rodin/dsh-channels-weixin"],
+  "adapterConfig": {
+    "@rodin/dsh-channels-weixin": {
+      "accountId": "REPLACE_WITH_INDEXED_ACCOUNT_ID"
+    }
+  }
+}
+```
+
+省略 `accountId` 会选择索引的第一项。启动日志里的 `weixin adapter polling account` 会显示实际账号。每个运行实例只选一个微信账号，同一账号只交给一个轮询进程。
+
+可选参数：`stateDir`（覆盖微信凭证、游标和入站媒体的根目录）、`longPollTimeoutMs`（默认 35000，可由服务端调整）、`cdnBaseUrl`、`mediaEnabled`（默认开启），以及下文的语音转写参数。
+
+## Telegram
+
+```json
+{
+  "adapters": ["@rodin/dsh-channels-telegram"],
+  "adapterConfig": {
+    "@rodin/dsh-channels-telegram": {
+      "token": "REPLACE_WITH_BOT_TOKEN",
+      "botId": "my_bot"
+    }
+  }
+}
+```
+
+`botId` 是可选的显示名称。官方 API 要求形如 `数字ID:密钥` 的 token；账号键是 `bot:<数字ID>`，为同一 bot 更新 token 时键保持不变。配置 `apiBaseUrl` 后，自建服务使用与端点绑定的 `custom:…` 键，以启动日志里的 `telegram adapter polling bot` 为准。可选参数还有 `pollTimeoutSeconds`（默认 25）、`mediaEnabled`（默认开启）和 `maxInboundBytes`（默认每个附件 20 MiB）。
+
+### 迁移旧账号键
+
+如果 `allowlistPerAccount` 使用旧 `botId` 或 `default`，把对应列表（包括显式空列表）迁移到新键，再重启。迁移之前，核心发现当前账号的旧覆盖项而缺少新键时会拒绝消息，避免退回更宽的全局白名单。旧会话和待重发仍保留原键，不会自动转移。
+
+## 语音转写
+
+微信可用可选的 `silk-wasm` 将 SILK 转成 WAV。转写另需 Python 和模型；转写不可用时保留已保存的音频，模型会收到无法读取音频的说明。
+
+在独立虚拟环境安装所用引擎。下例给出 Apple silicon 的 MLX 方案；CPU 方案将 `mlx-whisper` 换成 `faster-whisper`。检查时使用一个已存在的 WAV 文件：
+
+```bash
+state="${DSH_CHANNELS_STATE_DIR:-$HOME/.dsh/channels}"
+python3 -m venv "$HOME/.venvs/dsh-asr"
+"$HOME/.venvs/dsh-asr/bin/python" -m pip install mlx-whisper
+printf '{"wav":"/absolute/path/to/sample.wav"}\n' |
+  DSH_WEIXIN_ASR_MODEL_DIR="$state/asr-models" \
+  "$HOME/.venvs/dsh-asr/bin/python" packages/adapter-weixin/bin/asr-bridge.py
+```
+
+成功时输出 `{"ok":true,"text":"…"}`。首次转写可能需要下载模型。若要离线运行，先把 MLX 的 small 模型放到模型根目录的 `mlx-community__whisper-small-mlx/`，或把 faster-whisper 的 small 模型放到 `Systran__faster-whisper-small/`。两种引擎需要不同权重；也可用环境变量 `DSH_WEIXIN_ASR_MODEL_PATH` 指定模型路径。
+
+在微信的 `adapterConfig` 里把 `asrCommand` 设为上述 Python 的绝对路径。可选 `asrModelDir`（默认微信状态根目录下的 `asr-models/`）、`asrLanguage`（默认由引擎识别）及 `asrEnabled`（默认开启）。
+
+## 状态和重试
+
+| 路径（相对状态根目录） | 内容 |
+|---|---|
+| `config.json` | 操作者的配置覆盖 |
+| `counters.json` | 无宿主 `channels` 存储域时，保存配额计数和会话线号 |
+| `outbox.json` | 失败的普通文本回复，最多 50 条，满时淘汰最旧条目 |
+| `journal/journal-*.jsonl` | 接收与发送流水 |
+| `logs/channels-*.log` | 运行、拒绝和错误日志 |
+| `media/inbound/` / `asr-models/` | 收到的附件和可选语音模型 |
+| `workspace/` | 默认工作目录，含每轮自动附件的 `.channel-output-*` 子目录 |
+| `openclaw-weixin/` | 微信索引、凭证和按账号保存的 `.sync.json` 游标 |
+
+从源码运行 `npm run build && npm run doctor -- --state`，或在已安装的 profile 中运行 `pnpm exec dsh-channels-doctor --state`。发现表外路径时退出码为 1。旧的空 `memory/` 会被忽略；若有文件，先确认内容再移走。状态目录包含聊天内容和凭证，备份时按敏感数据处理。
+
+发送流水先写 `sending`，适配器返回后写 `settled`。状态含义：
+
+| 状态 | 含义 |
+|---|---|
+| `accepted` | 平台接受并返回了消息 ID |
+| `unconfirmed` | 平台接受但没返回 ID；不会自动重发 |
+| `failed` | 发送失败；普通文本回复可入待重发队列 |
+| `pending` | 只有 `sending` 记录，结果未知，不能据此判断手机是否收到 |
+
+重试保留原投递 ID，只尝试原通道、账号和聊天。附件、交互提示和命令回复不进待重发队列。可在状态卡片查看最近发送状态，或按 ID 搜索 `journal/` 中的所有尝试。
+
+重启时两种平台都可能重放未确认的入站消息。微信只把游标保存到连续处理完的批次。核心用当天和前两天的流水过滤有平台消息 ID 的重复投递；普通消息到回合开始才写接收流水并扣除配额。已被平台确认的入站消息及中断的回合不会由插件自动恢复。
+
+## 排障
+
+| 现象 | 检查 |
+|---|---|
+| 机器人不回 | 看 `logs/` 的 `refused` 原因，检查账号覆盖、发送者、聊天白名单和配额。通过后用 `/whoami` 核对 ID |
+| 发送失败或结果未知 | 按上一节检查流水和待重发；`accepted` 不是已读回执 |
+| 回合出错 | 查 `turn failed for`。手机只显示简短提示；当前没有 `/diag` 命令 |
+| 提问被桌面提前结束 | 见[已知限制](STATUS.md#已知限制) |
+| 找不到桌面会话 | 展开 **Channels** 或 **Ungrouped**，检查工作区登记日志 |
+| 卡片无法读写 | 检查宿主是否提供 `webServer`。写入路由要求请求 `Origin` 与宿主一致；不要把这些管理路由暴露到不可信网络 |
+| 部署后仍是旧行为 | 检查 profile 归档路径、安装结果和宿主是否已重启 |

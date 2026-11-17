@@ -9,10 +9,11 @@
  */
 import fs from 'node:fs'
 import path from 'node:path'
+import { fileURLToPath } from 'node:url'
 
-import { listIndexedWeixinAccountIds } from '../vendor/openclaw-weixin/auth/accounts.js'
-import type { AccountInfo, ChannelAdapter, InboundMessage, InteractionReply, InteractionView, Outgoing, SendResult, Target } from '@rodin/dsh-channels'
-import { mediaItemsOf, normalizeInbound, type RawMediaItem, type RawMessage } from './normalize.js'
+import { CDN_BASE_URL, listIndexedWeixinAccountIds } from '../vendor/openclaw-weixin/auth/accounts.js'
+import type { AccountInfo, AdapterRuntime, ChannelAdapter, InboundMessage, InteractionReply, InteractionView, Outgoing, SendResult, Target } from '@rodin/dsh-channels'
+import { mediaItemsOf, normalizeInbound, type NormalizedInbound, type RawMediaItem, type RawMessage } from './normalize.js'
 import { MAX_INBOUND_MEDIA, saveInboundItem } from './media.js'
 import { AsrBridge } from './asr.js'
 import { WeixinTransport, readAccount } from './transport.js'
@@ -37,7 +38,7 @@ export function packageRoot(from: string): string {
 
 export interface WeixinAdapterOptions {
   ctx?: unknown
-  runtime?: { logger?: { info: (line: string) => void; warn: (line: string) => void }; markExpired?: (accountId: string, expired?: boolean) => void }
+  runtime?: AdapterRuntime
   stateRoot?: string
   config?: {
     accountId?: string
@@ -68,12 +69,18 @@ export async function createAdapter({ runtime, config = {}, stateRoot }: WeixinA
 
   const expired = new Set<string>()
   const handlers = new Set<(message: InboundMessage) => void>()
+  const inbox = new Map<string, Promise<void>>()
+  const cdnBaseUrl = (config.cdnBaseUrl ?? CDN_BASE_URL).replace(/\/+$/, '')
+  let inbound: AbortController | undefined
+  let asr: AsrBridge | undefined
+  let stopping: Promise<void> | undefined
   const transport = new WeixinTransport({
     accountId,
     baseUrl: account.baseUrl,
     token: account.token,
     logger,
     longPollTimeoutMs: config.longPollTimeoutMs,
+    cdnBaseUrl,
     onSessionRejected: (isExpired) => {
       if (!isExpired) return
       expired.add(accountId)
@@ -81,16 +88,28 @@ export async function createAdapter({ runtime, config = {}, stateRoot }: WeixinA
       logger.warn(`account ${accountId} was rejected by the server; log in again`)
     },
     onMessage: (raw: RawMessage) => {
+      const signal = inbound?.signal
+      if (signal === undefined || signal.aborted) return
       const message = normalizeInbound(raw, accountId)
       if (message === null) return
-      if (message.contextToken !== '') transport.rememberContextToken(message.conversationId, message.contextToken)
-      // The download is async; the poll loop must not wait on it (a 20MB video
-      // would stall every other conversation), so the handlers run after it.
-      void attachMedia(message)
-        .catch((error: unknown) => logger.warn(`inbound media failed: ${String((error as Error)?.message ?? error)}`))
-        .then(() => {
+      const items = mediaItemsOf(message)
+      const { conversationId, contextToken } = message
+      // Slow attachments must not make later messages pass earlier ones in the same chat.
+      const queued = (inbox.get(conversationId) ?? Promise.resolve()).then(async () => {
+        if (signal.aborted || runtime?.canReceive?.(message, items.length > 0) === false) return
+        try {
+          await attachMedia(message, items, signal)
+          if (signal.aborted) return
+          transport.rememberContextToken(conversationId, contextToken)
           for (const handler of handlers) handler(message)
-        })
+        } finally {
+          runtime?.cancelReceive?.(message)
+        }
+      }).catch((error: unknown) => logger.warn(`inbound processing failed: ${String((error as Error)?.message ?? error)}`))
+      inbox.set(conversationId, queued)
+      return queued.then(() => {
+        if (inbox.get(conversationId) === queued) inbox.delete(conversationId)
+      })
     },
   })
 
@@ -105,37 +124,28 @@ export async function createAdapter({ runtime, config = {}, stateRoot }: WeixinA
   // otherwise the WAV path travels and the note says it could not be listened
   // to. The bridge is optional on purpose (python3 + whisper is not something a
   // channel plugin may require).
-  const asr =
+  const createAsr = () =>
     (config.asrEnabled ?? true) && stateRootUsed !== ''
       ? new AsrBridge({
           // `import.meta.url` is `dist/src/index.js` in the published package and
           // `src/index.ts` in a checkout, so the package root is found by walking
           // up to the manifest instead of guessing `..` twice.
-          scriptPath: path.join(packageRoot(path.dirname(new URL(import.meta.url).pathname)), 'bin', 'asr-bridge.py'),
+          scriptPath: path.join(packageRoot(path.dirname(fileURLToPath(import.meta.url))), 'bin', 'asr-bridge.py'),
           modelDir: config.asrModelDir ?? path.join(stateRootUsed, 'asr-models'),
           ...(config.asrCommand === undefined ? {} : { command: config.asrCommand }),
           ...(config.asrLanguage === undefined ? {} : { language: config.asrLanguage }),
           logger,
         })
       : undefined
-  if (asr !== undefined && !asr.available()) logger.warn('asr bridge not found: voice notes will be sent as files')
-  const cdnBaseUrl = config.cdnBaseUrl ?? 'https://novac2c.cdn.weixin.qq.com/c2c'
-
   /** Fetch the attachments of one message, in parallel, without failing the message. */
-  const attachMedia = async (message: ReturnType<typeof normalizeInbound>): Promise<void> => {
-    if (message === null || mediaEnabled !== true) return
-    const items: RawMediaItem[] = mediaItemsOf(message).slice(0, MAX_INBOUND_MEDIA)
-    if (items.length === 0) return
+  const attachMedia = async (message: NormalizedInbound, items: RawMediaItem[], signal: AbortSignal): Promise<void> => {
+    if (!mediaEnabled || items.length === 0) return
     const saved = await Promise.all(
-      items.map((item) =>
-        saveInboundItem(item, { accountId, mediaRoot, cdnBaseUrl, messageId: message.at.toString(36), logger }).catch((error: unknown) => ({
-          ok: false as const,
-          kind: 'file' as const,
-          reason: String((error as Error)?.message ?? error),
-        })),
-      ),
+      items.slice(0, MAX_INBOUND_MEDIA).map((item) =>
+        saveInboundItem(item, { accountId, mediaRoot, cdnBaseUrl, messageId: message.at.toString(36), logger, signal })),
     )
     for (const result of saved) {
+      if (signal.aborted) return
       if (!result.ok) {
         logger.warn(`inbound ${result.kind} not saved: ${result.reason}`)
         continue
@@ -202,12 +212,23 @@ export async function createAdapter({ runtime, config = {}, stateRoot }: WeixinA
       },
     },
     async start(): Promise<void> {
+      if (inbound !== undefined) return
+      inbound = new AbortController()
+      asr = createAsr()
+      if (asr !== undefined && !asr.available()) logger.warn('asr bridge not found: voice notes will be sent as files')
       transport.start()
       logger.info(`weixin adapter polling account ${accountId}`)
     },
     async stop(): Promise<void> {
-      await transport.stop()
-      await asr?.dispose()
+      if (inbound === undefined) return
+      if (stopping !== undefined) return stopping
+      inbound.abort()
+      stopping = Promise.all([transport.stop(), asr?.dispose()]).then(() => {
+        inbound = undefined
+        asr = undefined
+        stopping = undefined
+      })
+      return stopping
     },
     onInbound(handler: (message: InboundMessage) => void): () => void {
       handlers.add(handler)
@@ -216,6 +237,7 @@ export async function createAdapter({ runtime, config = {}, stateRoot }: WeixinA
       }
     },
     async send(target: Target, outgoing: Outgoing): Promise<SendResult> {
+      if (target.channel !== CHANNEL_ID || target.accountId !== accountId) return { ok: false, code: 'account-mismatch' }
       const media = outgoing.media ?? []
       if (media.length > 0) {
         // One call per attachment; the caption rides on the first one, which is
@@ -223,6 +245,7 @@ export async function createAdapter({ runtime, config = {}, stateRoot }: WeixinA
         let last: SendResult = { ok: false, code: 'empty' }
         for (const [index, item] of media.entries()) {
           last = await transport.sendMedia(target.conversationId, item.path, index === 0 ? outgoing.text ?? '' : '')
+          if (!last.ok) return last
         }
         return last
       }

@@ -1,27 +1,20 @@
 import { decryptAesEcb } from "./aes-ecb.js";
 import { buildCdnDownloadUrl, ENABLE_CDN_URL_FALLBACK } from "./cdn-url.js";
 import { logger } from "../util/logger.js";
-/**
- * Download raw bytes from the CDN (no decryption).
- */
-async function fetchCdnBytes(url, label) {
-    let res;
-    try {
-        res = await fetch(url);
-    }
-    catch (err) {
-        const cause = err.cause ?? err.code ?? "(no cause)";
-        logger.error(`${label}: fetch network error url=${url} err=${String(err)} cause=${String(cause)}`);
-        throw err;
-    }
-    logger.debug(`${label}: response status=${res.status} ok=${res.ok}`);
+import { readBoundedResponse } from "../util/bounded-response.js";
+const CDN_TIMEOUT_MS = 30_000;
+
+// A complete encrypted file can be one AES block larger than its plaintext.
+const MAX_CDN_BYTES = 100 * 1024 * 1024 + 16;
+
+async function fetchCdnBytes(url, label, signal) {
+    const timeout = AbortSignal.timeout(CDN_TIMEOUT_MS);
+    const res = await fetch(url, { signal: signal ? AbortSignal.any([signal, timeout]) : timeout });
     if (!res.ok) {
-        const body = await res.text().catch(() => "(unreadable)");
-        const msg = `${label}: CDN download ${res.status} ${res.statusText} body=${body}`;
-        logger.error(msg);
-        throw new Error(msg);
+        void res.body?.cancel().catch(() => {});
+        throw new Error(`${label}: CDN download ${res.status} ${res.statusText}`);
     }
-    return Buffer.from(await res.arrayBuffer());
+    return readBoundedResponse(res, MAX_CDN_BYTES);
 }
 /**
  * Parse CDNMedia.aes_key into a raw 16-byte AES key.
@@ -42,7 +35,7 @@ function parseAesKey(aesKeyBase64, label) {
         // hex-encoded key: base64 → hex string → raw bytes
         return Buffer.from(decoded.toString("ascii"), "hex");
     }
-    const msg = `${label}: aes_key must decode to 16 raw bytes or 32-char hex string, got ${decoded.length} bytes (base64="${aesKeyBase64}")`;
+    const msg = `${label}: aes_key must decode to 16 raw bytes or 32-char hex string, got ${decoded.length} bytes`;
     logger.error(msg);
     throw new Error(msg);
 }
@@ -50,7 +43,7 @@ function parseAesKey(aesKeyBase64, label) {
  * Download and AES-128-ECB decrypt a CDN media file. Returns plaintext Buffer.
  * aesKeyBase64: CDNMedia.aes_key JSON field (see parseAesKey for supported formats).
  */
-export async function downloadAndDecryptBuffer(encryptedQueryParam, aesKeyBase64, cdnBaseUrl, label, fullUrl) {
+export async function downloadAndDecryptBuffer(encryptedQueryParam, aesKeyBase64, cdnBaseUrl, label, fullUrl, signal) {
     const key = parseAesKey(aesKeyBase64, label);
     let url;
     if (fullUrl) {
@@ -62,8 +55,7 @@ export async function downloadAndDecryptBuffer(encryptedQueryParam, aesKeyBase64
     else {
         throw new Error(`${label}: fullUrl is required (CDN URL fallback is disabled)`);
     }
-    logger.debug(`${label}: fetching url=${url}`);
-    const encrypted = await fetchCdnBytes(url, label);
+    const encrypted = await fetchCdnBytes(url, label, signal);
     logger.debug(`${label}: downloaded ${encrypted.byteLength} bytes, decrypting`);
     const decrypted = decryptAesEcb(encrypted, key);
     logger.debug(`${label}: decrypted ${decrypted.length} bytes`);
@@ -72,7 +64,7 @@ export async function downloadAndDecryptBuffer(encryptedQueryParam, aesKeyBase64
 /**
  * Download plain (unencrypted) bytes from the CDN. Returns the raw Buffer.
  */
-export async function downloadPlainCdnBuffer(encryptedQueryParam, cdnBaseUrl, label, fullUrl) {
+export async function downloadPlainCdnBuffer(encryptedQueryParam, cdnBaseUrl, label, fullUrl, signal) {
     let url;
     if (fullUrl) {
         url = fullUrl;
@@ -83,6 +75,5 @@ export async function downloadPlainCdnBuffer(encryptedQueryParam, cdnBaseUrl, la
     else {
         throw new Error(`${label}: fullUrl is required (CDN URL fallback is disabled)`);
     }
-    logger.debug(`${label}: fetching url=${url}`);
-    return fetchCdnBytes(url, label);
+    return fetchCdnBytes(url, label, signal);
 }

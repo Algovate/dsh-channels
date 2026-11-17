@@ -98,22 +98,6 @@ function resolveAccountsDir() {
 function resolveAccountPath(accountId) {
     return path.join(resolveAccountsDir(), `${accountId}.json`);
 }
-/**
- * Legacy single-file token: `credentials/openclaw-weixin/credentials.json` (pre per-account files).
- */
-function loadLegacyToken() {
-    const legacyPath = path.join(resolveStateDir(), "credentials", "openclaw-weixin", "credentials.json");
-    try {
-        if (!fs.existsSync(legacyPath))
-            return undefined;
-        const raw = fs.readFileSync(legacyPath, "utf-8");
-        const parsed = JSON.parse(raw);
-        return typeof parsed.token === "string" ? parsed.token : undefined;
-    }
-    catch {
-        return undefined;
-    }
-}
 function readAccountFile(filePath) {
     try {
         if (fs.existsSync(filePath)) {
@@ -139,10 +123,6 @@ export function loadWeixinAccount(accountId) {
         if (compat)
             return compat;
     }
-    // Legacy fallback: read token from old single-account credentials file.
-    const token = loadLegacyToken();
-    if (token)
-        return { token };
     return null;
 }
 /**

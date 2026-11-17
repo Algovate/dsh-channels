@@ -59,14 +59,15 @@ window.__ModuleLoader__.load({
      * event renders as an empty row instead of blanking the transcript.
      */
     function rowData(message) {
-      const content = Array.isArray(message?.content) ? message.content : []
+      const source = message?.source ?? {}
+      const blocks = Array.isArray(message?.content) ? message.content : []
+      const content = source.hasOutputInstruction === true ? blocks.slice(1) : blocks
       const texts = []
       let others = 0
       for (const block of content) {
         if (block?.type === 'text' && typeof block.text === 'string') texts.push(block.text)
         else if (block !== null && block !== undefined) others += 1
       }
-      const source = message?.source ?? {}
       return {
         text: texts.join('\n').trim(),
         others,

@@ -1,50 +1,21 @@
 #!/usr/bin/env python3
-"""ASR bridge for dsh-plugin-weixin: turn WAV files into text.
+"""Transcribe WAV files for the dsh-channels Weixin adapter.
 
-The plugin spawns this script once, keeps it alive, and speaks a trivial
-line protocol (see `src/media/asr.js`):
+The adapter keeps this bridge running and sends a JSON request per line:
+  stdin:  {"wav": "/abs/path/file.wav"}\n
+  stdout: {"ok": true, "text": "..."}\n or {"ok": false, "error": "..."}\n
+Diagnostic messages go to stderr.
 
-  stdin : {"wav": "/abs/path/file.wav"}\n
-  stdout: {"ok": true, "text": "..."}\n   or   {"ok": false, "error": "..."}\n
+Configure asrCommand, asrModelDir, and asrLanguage under the Weixin adapter
+in the channels config. The adapter passes the model directory and language
+as DSH_WEIXIN_ASR_MODEL_DIR and DSH_WEIXIN_ASR_LANGUAGE. See
+docs/OPERATIONS.md for setup and offline model paths.
 
-Non-JSON lines on stdout are tolerated by the plugin (treated as diagnostics),
-but this script keeps them on stderr anyway to leave stdout pure.
-
-Engine: `mlx-whisper` when it is importable (the usual setup on Apple silicon —
-Apple's GPU stack is much faster there), otherwise `faster-whisper`
-(CTranslate2), which is one `pip install` away on Linux, macOS and Windows and
-runs on CPU. The model is cached under `$DSH_WEIXIN_ASR_MODEL_DIR` (default
-`~/.dsh/weixin/asr-models`), so the plugin's own directory stays clean. Progress
-goes to stderr — the first transcription warms the model, later ones answer in a
-few hundred milliseconds.
-
-Model downloads honour `HF_ENDPOINT` (set it to `https://hf-mirror.com` where
-huggingface.co is unreachable); `HF_HUB_DISABLE_XET=1` is set by default because
-the Xet/CAS transport fails behind that mirror.
-
-Wire the plugin to it (`~/.dsh/weixin/config.json`):
-
-    {
-      "asr": {
-        "enabled": true,
-        "command": "python3",
-        "args": ["bin/asr-bridge.py"],
-        "env": { "DSH_WEIXIN_ASR_LANGUAGE": "zh" }
-      }
-    }
-
-A relative `args` path resolves against the plugin package directory, so this
-line works unchanged wherever the plugin was installed.
-
-Environment knobs (all optional):
-  DSH_WEIXIN_ASR_MODEL       whisper size (tiny|base|small|medium|large-v3), or a
-                             model root directory — the plugin's settings UI writes
-                             the directory here, while a hand-written config writes
-                             the size. An existing directory wins. (default: small)
-  DSH_WEIXIN_ASR_LANGUAGE    ISO code forced as the spoken language (default: auto-detect)
-  DSH_WEIXIN_ASR_MODEL_DIR   where models live (default ~/.dsh/weixin/asr-models)
-  DSH_WEIXIN_ASR_MODEL_PATH  an explicit model directory or repo id (wins over both above)
-  HF_ENDPOINT                set to https://hf-mirror.com where huggingface.co is slow/blocked
+The bridge tries mlx-whisper first, then faster-whisper on CPU.
+DSH_WEIXIN_ASR_MODEL chooses a model size (default: small) or an existing
+model root. DSH_WEIXIN_ASR_MODEL_PATH overrides model discovery. When run
+directly without DSH_WEIXIN_ASR_MODEL_DIR, the bridge keeps the legacy
+~/.dsh/weixin/asr-models fallback; the adapter normally supplies its own root.
 """
 
 from __future__ import annotations

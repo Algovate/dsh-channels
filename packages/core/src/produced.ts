@@ -51,6 +51,11 @@ export async function listProducedFiles({
   ignoreExtensions = [],
 }: ScanOptions): Promise<ProducedFile[]> {
   const root = path.resolve(dir)
+  try {
+    if (!fs.lstatSync(root).isDirectory()) return []
+  } catch {
+    return []
+  }
   const ignoredDirs = new Set([...DEFAULT_IGNORE_DIRS, ...ignoreDirs])
   const ignoredExt = new Set([...DEFAULT_IGNORE_EXT, ...ignoreExtensions])
   const found: ProducedFile[] = []
@@ -81,7 +86,7 @@ export async function listProducedFiles({
         continue
       }
       // A one-second grace absorbs filesystem timestamp granularity.
-      if (stat.mtimeMs < sinceMs - 1000) continue
+      if (!stat.isFile() || stat.mtimeMs < sinceMs - 1000) continue
       if (stat.size === 0 || stat.size > maxBytes) continue
       if (!isInside(root, full)) continue
       found.push({ path: full, name: entry.name, bytes: stat.size, mtimeMs: stat.mtimeMs })

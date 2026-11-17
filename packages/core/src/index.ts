@@ -48,7 +48,7 @@ export interface ChannelPlugin {
 }
 
 function ensureDirectories(root: string): void {
-  for (const directory of ['logs', 'workspace', 'memory', 'media/inbound', 'journal']) {
+  for (const directory of ['logs', 'workspace', 'media/inbound', 'journal']) {
     try {
       fs.mkdirSync(path.join(root, directory), { recursive: true })
     } catch {
@@ -147,14 +147,15 @@ export async function startChannels({ ctx, config }: { ctx: PluginContext; confi
       remote?.dispose?.()
       offSeams()
       stopOutbox()
-      runtime.dispose()
-      for (const { adapter } of loaded) {
+      const stopping = loaded.map(async ({ adapter }) => {
         try {
           await adapter.stop()
         } catch (error) {
           logger.warn(`adapter '${adapter.id}' did not stop cleanly: ${String((error as Error)?.message ?? error)}`)
         }
-      }
+      })
+      runtime.dispose()
+      await Promise.all(stopping)
       for (const { disposer } of loaded) disposer()
     },
   }
@@ -252,6 +253,30 @@ function registerInteractionSeams({
   }
 }
 
+async function optionalService<T>(ctx: PluginContext, name: string): Promise<T | undefined> {
+  const direct = ctx.get?.(name) as T | undefined
+  if (direct !== undefined && direct !== null) return direct
+  const injectService = (ctx as {
+    inject?: (services: string[], callback: (scope: Record<string, unknown>) => void) => unknown
+  }).inject
+  if (injectService === undefined) return undefined
+  return new Promise((resolve) => {
+    let settled = false
+    const finish = (value?: T): void => {
+      if (settled) return
+      settled = true
+      clearImmediate(fallback)
+      resolve(value)
+    }
+    const fallback = setImmediate(() => finish())
+    try {
+      injectService.call(ctx, [name], (scope) => finish(scope[name] as T | undefined))
+    } catch {
+      finish()
+    }
+  })
+}
+
 /**
  * Put the channel's working directory in the GUI's project list.
  *
@@ -287,24 +312,7 @@ async function registerWorkspace({
       return undefined
     }
   }
-  // `ctx.inject` is the documented way to reach an optional service: the
-  // callback runs only when the host provides it. `ctx.get` is the fallback for
-  // a bare context (tests, a headless host).
-  const inject = (ctx as { inject?: (services: string[], callback: (scope: { workspaceRegistry?: Registry }) => unknown) => unknown }).inject
-  if (typeof inject === 'function') {
-    try {
-      // The callback runs asynchronously once the service exists; the handle is
-      // awaited through a promise so startup still returns after registration.
-      return await new Promise<WorkspaceHandle | undefined>((resolve) => {
-        inject.call(ctx, ['workspaceRegistry'], (scope) => {
-          void register(scope.workspaceRegistry).then(resolve, () => resolve(undefined))
-        })
-      })
-    } catch {
-      // Fall through to `get`.
-    }
-  }
-  return register(ctx.get?.('workspaceRegistry') as Registry | undefined)
+  return register(await optionalService<Registry>(ctx, 'workspaceRegistry'))
 }
 
 /**
@@ -350,7 +358,7 @@ async function registerRemote({
  * Where the rate counters live: the host's `channels` storage domain when it is
  * mounted, the plugin's own file otherwise.
  *
- * The domain gives atomic, validated, multi-process-safe records; the file keeps
+ * The domain gives atomic records; limits apply within one runtime. The file keeps
  * a headless or test host working exactly the same way. Both satisfy the same
  * synchronous read the gate needs, because a gate cannot await.
  */
@@ -365,22 +373,8 @@ async function openCounters({
 }): Promise<CounterStore> {
   const fileStore = new FileCounterStore({ stateRoot: root, warn: (line) => logger.warn(line) })
   await fileStore.load()
-  // `ctx.get` does not reach a service this plugin never injected (it answered
-  // undefined for the workspace registry too); `inject` runs the callback only
-  // when the service exists.
   type Facet = { open?: (spec: unknown) => Promise<unknown> }
-  const storageDomain = await new Promise<Facet | undefined>((resolve) => {
-    const inject = (ctx as { inject?: (services: string[], callback: (scope: { storageDomain?: Facet }) => unknown) => unknown }).inject
-    if (typeof inject !== 'function') {
-      resolve(undefined)
-      return
-    }
-    try {
-      inject.call(ctx, ['storageDomain'], (scope) => resolve(scope.storageDomain))
-    } catch {
-      resolve(undefined)
-    }
-  })
+  const storageDomain = await optionalService<Facet>(ctx, 'storageDomain')
   if (typeof storageDomain?.open !== 'function') {
     logger.info('rate counters: plugin file (no storage domain on this host)')
     return fileStore
@@ -440,7 +434,7 @@ function registerAllowlistRoute({
         // A grant must come from the page itself: browsers send Origin on POST,
         // and a cross-site form post must not be able to widen the allowlist.
         const origin = typeof req.headers['origin'] === 'string' ? req.headers['origin'] : ''
-        if (allowedOrigin !== undefined && origin !== '' && origin !== allowedOrigin) {
+        if (origin === '' || origin !== allowedOrigin) {
           return json(403, { ok: false, code: 'origin', detail: origin })
         }
         let body = ''
@@ -462,8 +456,8 @@ function registerAllowlistRoute({
             const allowlist = runtime.updateAllowlist({
               ...(add === undefined ? {} : { add }),
               ...(remove === undefined ? {} : { remove }),
-            })
-            saveConfigOverlay(root, { allowedSenders: allowlist }, { warn: (line) => logger.warn(line) })
+            }, (senders) => saveConfigOverlay(root, { allowedSenders: senders }, { warn: (line) => logger.warn(line) }))
+            if (allowlist === undefined) return json(500, { ok: false, code: 'persist', detail: 'could not save the allowlist' })
             logger.info(`allowlist updated: ${allowlist.length} sender(s)`)
             json(200, { ok: true, allowlist })
           } catch (error) {
@@ -527,7 +521,7 @@ function registerSettingsRoute({
         }
         if (req.method !== 'POST') return json(405, { ok: false, code: 'method', detail: 'POST only' })
         const origin = typeof req.headers['origin'] === 'string' ? req.headers['origin'] : ''
-        if (allowedOrigin !== undefined && origin !== '' && origin !== allowedOrigin) return json(403, { ok: false, code: 'origin', detail: origin })
+        if (origin === '' || origin !== allowedOrigin) return json(403, { ok: false, code: 'origin', detail: origin })
         let body = ''
         req.on('data', (chunk) => {
           if (typeof chunk === 'string') body += chunk
@@ -541,9 +535,10 @@ function registerSettingsRoute({
             const number = (key: 'senderPerMinute' | 'senderPerDay'): void => {
               const value = parsed[key]
               if (value === undefined) return
-              const numeric = Number(value)
-              if (!Number.isFinite(numeric) || numeric < 0 || numeric > 100_000) throw new Error(`${key} must be a number between 0 and 100000`)
-              patch[key] = Math.floor(numeric)
+              if (typeof value !== 'number' || !Number.isInteger(value) || value < 0 || value > 100_000) {
+                throw new Error(`${key} must be an integer between 0 and 100000`)
+              }
+              patch[key] = value
             }
             const flag = (key: 'autoSendFiles' | 'questionsEnabled' | 'approvalsEnabled'): void => {
               const value = parsed[key]
@@ -557,8 +552,10 @@ function registerSettingsRoute({
             flag('questionsEnabled')
             flag('approvalsEnabled')
             if (Object.keys(patch).length === 0) return json(400, { ok: false, code: 'empty', detail: 'nothing to change' })
+            if (!saveConfigOverlay(root, patch, { warn: (line) => logger.warn(line) })) {
+              return json(500, { ok: false, code: 'persist', detail: 'could not save settings' })
+            }
             runtime.updateSettings(patch)
-            saveConfigOverlay(root, patch, { warn: (line) => logger.warn(line) })
             logger.info(`settings updated: ${Object.keys(patch).join(', ')}`)
             json(200, { ok: true, settings: runtime.liveSettings() })
           } catch (error) {

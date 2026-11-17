@@ -3,21 +3,22 @@ import test from 'node:test'
 
 import { answerApproval, formatApprovalPrompt, parseApprovalOutcome } from '../packages/core/src/interaction/approval.js'
 import { answerUserQuestion, formatQuestionPrompt, parseAnswers, parseOneQuestion } from '../packages/core/src/interaction/questions.js'
-import { InteractionQueue } from '../packages/core/src/interaction/queue.js'
+import { InteractionQueue, type InteractionEntry } from '../packages/core/src/interaction/queue.js'
 import type { Outgoing, Target } from '../packages/core/src/types.js'
 
 const target: Target = { channel: 'fake', accountId: 'acct', conversationId: 'conv' }
 const tick = (ms = 0) => new Promise((resolve) => setTimeout(resolve, ms))
 const silent = { info: () => {}, warn: () => {} }
 
-function queue() {
+function queue(timeoutMs = 10_000) {
   const sent: Outgoing[] = []
   const instance = new InteractionQueue({
     send: async (_target, outgoing) => {
       sent.push(outgoing)
+      return [{ ok: true, unconfirmed: true }]
     },
     logger: silent,
-    timeoutMs: 10_000,
+    timeoutMs,
   })
   return { instance, sent }
 }
@@ -87,7 +88,7 @@ test('the approval prompt names the tool and the decision numbers', () => {
   assert.match(prompt, /安装依赖/)
 
   const { instance, sent } = queue()
-  const pending = instance.ask({
+  const entry: InteractionEntry = {
     kind: 'approval',
     target,
     view: { title: prompt, options: [{ id: 'allowed-once', label: '允许（只这一次）' }, { id: 'rejected', label: '拒绝' }] },
@@ -98,11 +99,12 @@ test('the approval prompt names the tool and the decision numbers', () => {
     expiredNotice: '',
     retiredNotice: '',
     retireValue: 'unavailable',
-  })
+  }
+  const pending = instance.ask(entry)
   void pending
   void sent
-  instance.retire(target)
-  assert.equal(instance.busy(target), false)
+  instance.retire(entry)
+  assert.equal(instance.active(target), undefined)
 })
 
 test('approval words map to the seam outcomes', () => {
@@ -148,7 +150,8 @@ test('when the desktop answers first, the chat prompt is retired', async () => {
     logger: silent,
   })
   assert.deepEqual(await answer, { answers: [{ id: 'q', selected: ['1'] }] })
-  assert.equal(instance.busy(target), false)
+  assert.equal(instance.active(target), undefined)
+  await tick()
   assert.ok(sent.some((outgoing) => outgoing.kind === 'notice'), 'the person is told it was answered elsewhere')
 })
 
@@ -165,9 +168,57 @@ test('a question outside this channel falls through to the next answerer', async
   assert.equal(answer, 'desktop-only')
 })
 
+test('a desktop answer retires only its own queued question', async () => {
+  const { instance, sent } = queue()
+  const first = answerApproval({
+    queue: instance,
+    target,
+    request: { toolName: 'first-tool' },
+    next: async () => 'unavailable',
+    logger: silent,
+  })
+  const second = await answerUserQuestion({
+    queue: instance,
+    target,
+    questions: [{ id: 'other', question: 'Already answered' }],
+    request: {},
+    next: async () => ({ answers: [{ id: 'other', selected: [], custom: 'desktop reply' }] }),
+    logger: silent,
+  })
+  assert.deepEqual(second, { answers: [{ id: 'other', selected: [], custom: 'desktop reply' }] })
+  assert.equal(instance.active(target), 'approval')
+  assert.equal(sent.length, 1)
+  assert.equal(instance.claim(target, '1').status, 'answered')
+  assert.equal(await first, 'allowed-once')
+})
+
+test('a desktop approval does not retire the question ahead of it', async () => {
+  const { instance, sent } = queue()
+  const first = answerUserQuestion({
+    queue: instance,
+    target,
+    questions: [{ id: 'first', question: 'First question' }],
+    request: {},
+    next: async () => new Promise(() => {}),
+    logger: silent,
+  })
+  const second = await answerApproval({
+    queue: instance,
+    target,
+    request: { toolName: 'second-tool' },
+    next: async () => 'rejected',
+    logger: silent,
+  })
+  assert.equal(second, 'rejected')
+  assert.equal(instance.active(target), 'question')
+  assert.equal(sent.length, 1)
+  assert.equal(instance.claim(target, 'chat reply').status, 'answered')
+  assert.deepEqual(await first, { answers: [{ id: 'first', selected: [], custom: 'chat reply' }] })
+})
+
 test('both question surfaces failing throws the seam\'s own error', async () => {
   const instance = new InteractionQueue({
-    send: async () => {},
+    send: async () => [{ ok: true, unconfirmed: true }],
     logger: silent,
     timeoutMs: 10,
   })
@@ -203,7 +254,7 @@ test('an approval decided in the chat wins, and the desktop may still say unavai
 })
 
 test('nobody deciding yields unavailable, not a fabricated rejection', async () => {
-  const { instance } = queue()
+  const { instance } = queue(10)
   const answer = await answerApproval({
     queue: instance,
     target,

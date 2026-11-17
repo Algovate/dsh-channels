@@ -20,25 +20,32 @@ export type QueueWork<T = unknown> = QueueTask<T> | ((signal: AbortSignal) => Pr
 interface Tail {
   /** Resolves when the tail of this conversation's queue settles. */
   promise: Promise<void>
-  controller: AbortController
 }
 
 export class ConversationQueue {
+  readonly #controllers = new Map<AbortController, string>()
+  #disposed = false
   #tails = new Map<string, Tail>()
 
   /** Append a task; resolves with its result once everything before it settled. */
   push<T>(key: string, work: QueueWork<T>): Promise<T> {
     const task: QueueTask<T> = typeof work === 'function' ? { run: work } : work
+    if (this.#disposed) return Promise.reject(new Error('the conversation queue is disposed'))
     const previous = this.#tails.get(key)
     const controller = new AbortController()
-    const start = (previous?.promise ?? Promise.resolve()).then(() => task.run(controller.signal))
+    this.#controllers.set(controller, key)
+    const start = (previous?.promise ?? Promise.resolve()).then(() => {
+      controller.signal.throwIfAborted()
+      return task.run(controller.signal)
+    })
     const settled = start.then(
       () => undefined,
       () => undefined,
     )
-    const tail: Tail = { promise: settled, controller }
+    const tail: Tail = { promise: settled }
     this.#tails.set(key, tail)
     void settled.then(() => {
+      this.#controllers.delete(controller)
       if (this.#tails.get(key) === tail) this.#tails.delete(key)
     })
     return start
@@ -52,9 +59,16 @@ export class ConversationQueue {
 
   /** Abort the queued work of one conversation (the running task sees the signal). */
   abort(key: string, reason = 'aborted'): void {
-    const tail = this.#tails.get(key)
-    if (tail === undefined) return
-    tail.controller.abort(reason)
+    for (const [controller, conversation] of this.#controllers) {
+      if (conversation === key) controller.abort(reason)
+    }
+  }
+
+  dispose(): void {
+    this.#disposed = true
+    for (const controller of this.#controllers.keys()) controller.abort('disposed')
+    this.#controllers.clear()
+    this.#tails.clear()
   }
 
   /** Number of conversations with queued or running work. */

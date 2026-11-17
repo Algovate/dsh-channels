@@ -3,7 +3,7 @@
  * `createUserMessage`. Everything that needs the real host is out of scope for
  * a unit test — this harness is what keeps the rest of the suite fast.
  */
-import { createChannelsRuntime } from './runtime-helper.js'
+import { createChannelsRuntime, createFakeUserMessage } from './runtime-helper.js'
 
 export interface FakeEvent {
   seq: number
@@ -40,6 +40,7 @@ export function createHarness(options: HarnessOptions = {}) {
   const followedUp: Array<{ message: unknown }> = []
   const sections: Array<Record<string, unknown>> = []
   const agents = new Map<string, FakeAgent>()
+  let turnNumber = 0
 
   const makeAgent = (sessionId: string): FakeAgent => ({
     session: { id: sessionId, snapshotEvents: () => events },
@@ -51,16 +52,18 @@ export function createHarness(options: HarnessOptions = {}) {
     followup: (message) => {
       followedUp.push({ message })
       options.onFollowup?.()
-      events.push({ seq: events.length + 1, type: 'user/message', data: { message } })
       if (options.silent === true) return
       // The host settles the turn asynchronously; the driver polls until it sees this.
       Promise.resolve().then(() => {
+        const turn = ++turnNumber
+        events.push({ seq: events.length + 1, type: 'turn/start', data: { turn } })
+        events.push({ seq: events.length + 1, type: 'user/message', data: message as Record<string, unknown> })
         events.push({
           seq: events.length + 1,
           type: 'assistant/message',
-          data: { message: { content: [{ type: 'text', text: options.reply ?? '好的' }] } },
+          data: { turn, message: { content: [{ type: 'text', text: options.reply ?? '好的' }] } },
         })
-        events.push({ seq: events.length + 1, type: 'turn/end', data: { reason: { kind: 'completed' } } })
+        events.push({ seq: events.length + 1, type: 'turn/end', data: { turn, reason: { kind: 'completed' } } })
       })
     },
   })
@@ -95,8 +98,6 @@ export function createHarness(options: HarnessOptions = {}) {
   }
 
   const ctx = { get: (name: string) => (name === 'agents' ? agentsService : undefined) }
-  const createUserMessage = (fields: Record<string, unknown>): Record<string, unknown> => fields
-
   return {
     ctx,
     events,
@@ -106,14 +107,14 @@ export function createHarness(options: HarnessOptions = {}) {
     sections,
     agents,
     agentsService,
-    createUserMessage,
+    createUserMessage: createFakeUserMessage,
     makeRuntime: (config: Record<string, unknown> = {}) =>
       createChannelsRuntime({
         ctx,
         config,
         ...(options.maxTurnWaitMs === undefined ? {} : { maxTurnWaitMs: options.maxTurnWaitMs }),
         ...(options.pollMs === undefined ? {} : { pollMs: options.pollMs }),
-        createUserMessage,
+        createUserMessage: createFakeUserMessage,
       }),
   }
 }

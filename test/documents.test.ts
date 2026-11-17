@@ -87,3 +87,11 @@ test('an unknown extension says it is unsupported', async () => {
   assert.deepEqual(result.ok, false)
   assert.equal(result.ok === false ? result.kind : '', 'unsupported')
 })
+
+test('a small DOCX archive cannot expand its document XML without a bound', async () => {
+  const file = path.join(dir(), 'oversized.docx')
+  writeDocx(file, 'x'.repeat(9 * 1024 * 1024))
+  assert.ok(fs.statSync(file).size < 16 * 1024)
+  const result = await extractDocumentText(file)
+  assert.equal(result.ok, false)
+})

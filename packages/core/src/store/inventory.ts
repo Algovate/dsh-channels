@@ -97,18 +97,34 @@ export function stateInventory(root: string): Inventory {
     })
   }
 
-  const declaredTop = new Set(Object.values(STATE_LAYOUT).map((entry) => entry.relative.split('/')[0]))
+  const declared = Object.values(STATE_LAYOUT)
   const unlisted: Inventory['unlisted'] = []
-  let dirents: fs.Dirent[] = []
-  try {
-    dirents = fs.readdirSync(base, { withFileTypes: true })
-  } catch {
-    // An unreadable root is the caller's own check.
+  const findUnlisted = (directory: string): void => {
+    let dirents: fs.Dirent[]
+    try {
+      dirents = fs.readdirSync(path.join(base, directory), { withFileTypes: true })
+    } catch {
+      return
+    }
+    for (const dirent of dirents) {
+      const relative = directory === '' ? dirent.name : `${directory}/${dirent.name}`
+      const kind = dirent.isDirectory() ? 'dir' : 'file'
+      if (declared.some((entry) => entry.relative === relative)) continue
+      // Previous versions created this unused directory. Ignore it only when empty.
+      if (relative === 'memory' && kind === 'dir') {
+        try {
+          if (fs.readdirSync(path.join(base, relative)).length === 0) continue
+        } catch {}
+      }
+      if (kind === 'dir' && declared.some((entry) => entry.relative.startsWith(`${relative}/`))) {
+        findUnlisted(relative)
+        continue
+      }
+      unlisted.push({ relative, kind, ...usageOf(path.join(base, relative)) })
+    }
   }
-  for (const dirent of dirents.sort((a, b) => a.name.localeCompare(b.name))) {
-    if (declaredTop.has(dirent.name)) continue
-    unlisted.push({ relative: dirent.name, kind: dirent.isDirectory() ? 'dir' : 'file', ...usageOf(path.join(base, dirent.name)) })
-  }
+  findUnlisted('')
+  unlisted.sort((a, b) => a.relative.localeCompare(b.relative))
 
   const rootUsage = usageOf(base)
   const totals = {

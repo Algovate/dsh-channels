@@ -9,7 +9,7 @@ const WEIXIN_MEDIA_MAX_BYTES = 100 * 1024 * 1024;
  * Returns the populated WeixinInboundMediaOpts fields; empty object on unsupported type or failure.
  */
 export async function downloadMediaFromItem(item, deps) {
-    const { cdnBaseUrl, saveMedia, log, errLog, label } = deps;
+    const { cdnBaseUrl, saveMedia, errLog, label, signal } = deps;
     const mediaSubdir = deps.mediaSubdir ?? "inbound";
     const result = {};
     if (item.type === MessageItemType.IMAGE) {
@@ -19,11 +19,11 @@ export async function downloadMediaFromItem(item, deps) {
         const aesKeyBase64 = img.aeskey
             ? Buffer.from(img.aeskey, "hex").toString("base64")
             : img.media.aes_key;
-        logger.debug(`${label} image: encrypt_query_param=${(img.media.encrypt_query_param ?? "").slice(0, 40)}... hasAesKey=${Boolean(aesKeyBase64)} aeskeySource=${img.aeskey ? "image_item.aeskey" : "media.aes_key"} full_url=${Boolean(img.media.full_url)}`);
+        logger.debug(`${label} image: hasAesKey=${Boolean(aesKeyBase64)} aeskeySource=${img.aeskey ? "image_item.aeskey" : "media.aes_key"} full_url=${Boolean(img.media.full_url)}`);
         try {
             const buf = aesKeyBase64
-                ? await downloadAndDecryptBuffer(img.media.encrypt_query_param ?? "", aesKeyBase64, cdnBaseUrl, `${label} image`, img.media.full_url)
-                : await downloadPlainCdnBuffer(img.media.encrypt_query_param ?? "", cdnBaseUrl, `${label} image-plain`, img.media.full_url);
+                ? await downloadAndDecryptBuffer(img.media.encrypt_query_param ?? "", aesKeyBase64, cdnBaseUrl, `${label} image`, img.media.full_url, signal)
+                : await downloadPlainCdnBuffer(img.media.encrypt_query_param ?? "", cdnBaseUrl, `${label} image-plain`, img.media.full_url, signal);
             const saved = await saveMedia(buf, undefined, mediaSubdir, WEIXIN_MEDIA_MAX_BYTES);
             result.decryptedPicPath = saved.path;
             logger.debug(`${label} image saved: ${saved.path}`);
@@ -38,7 +38,7 @@ export async function downloadMediaFromItem(item, deps) {
         if ((!voice?.media?.encrypt_query_param && !voice?.media?.full_url) || !voice?.media?.aes_key)
             return result;
         try {
-            const silkBuf = await downloadAndDecryptBuffer(voice.media.encrypt_query_param ?? "", voice.media.aes_key, cdnBaseUrl, `${label} voice`, voice.media.full_url);
+            const silkBuf = await downloadAndDecryptBuffer(voice.media.encrypt_query_param ?? "", voice.media.aes_key, cdnBaseUrl, `${label} voice`, voice.media.full_url, signal);
             logger.debug(`${label} voice: decrypted ${silkBuf.length} bytes, attempting silk transcode`);
             const wavBuf = await silkToWav(silkBuf);
             if (wavBuf) {
@@ -65,7 +65,7 @@ export async function downloadMediaFromItem(item, deps) {
             !fileItem?.media?.aes_key)
             return result;
         try {
-            const buf = await downloadAndDecryptBuffer(fileItem.media.encrypt_query_param ?? "", fileItem.media.aes_key, cdnBaseUrl, `${label} file`, fileItem.media.full_url);
+            const buf = await downloadAndDecryptBuffer(fileItem.media.encrypt_query_param ?? "", fileItem.media.aes_key, cdnBaseUrl, `${label} file`, fileItem.media.full_url, signal);
             const mime = getMimeFromFilename(fileItem.file_name ?? "file.bin");
             const saved = await saveMedia(buf, mime, mediaSubdir, WEIXIN_MEDIA_MAX_BYTES, fileItem.file_name ?? undefined);
             result.decryptedFilePath = saved.path;
@@ -83,7 +83,7 @@ export async function downloadMediaFromItem(item, deps) {
             !videoItem?.media?.aes_key)
             return result;
         try {
-            const buf = await downloadAndDecryptBuffer(videoItem.media.encrypt_query_param ?? "", videoItem.media.aes_key, cdnBaseUrl, `${label} video`, videoItem.media.full_url);
+            const buf = await downloadAndDecryptBuffer(videoItem.media.encrypt_query_param ?? "", videoItem.media.aes_key, cdnBaseUrl, `${label} video`, videoItem.media.full_url, signal);
             const saved = await saveMedia(buf, "video/mp4", mediaSubdir, WEIXIN_MEDIA_MAX_BYTES);
             result.decryptedVideoPath = saved.path;
             logger.debug(`${label} video: saved to ${saved.path}`);

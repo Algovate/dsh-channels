@@ -16,6 +16,11 @@ export function lineKey(target: Target): string {
   return `${target.channel}|${target.accountId}|${target.conversationId}`
 }
 
+/** Compare addresses without relying on their serialized form. */
+export function sameTarget(left: Target, right: Target): boolean {
+  return left.channel === right.channel && left.accountId === right.accountId && left.conversationId === right.conversationId
+}
+
 /** The DSH session id for one conversation. Deterministic and collision-resistant. */
 export function sessionIdFor(target: Pick<Target, 'channel' | 'accountId' | 'conversationId'>): string {
   const digest = createHash('sha1').update(lineKey({ channel: target.channel, accountId: target.accountId, conversationId: target.conversationId })).digest('hex').slice(0, 16)

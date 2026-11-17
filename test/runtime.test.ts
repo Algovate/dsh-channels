@@ -4,6 +4,8 @@ import test from 'node:test'
 import { createFakeAdapter, createChannelsRuntime } from './runtime-helper.js'
 import { resolveConfig as resolveConfigForTest } from '../packages/core/src/config.js'
 import { sessionIdFor } from '../packages/core/src/ids.js'
+import { approvalEntry } from '../packages/core/src/interaction/approval.js'
+import { questionEntry } from '../packages/core/src/interaction/questions.js'
 import { createHarness, inbound } from './harness.js'
 
 const tick = (ms = 0) => new Promise((resolve) => setTimeout(resolve, ms))
@@ -112,6 +114,43 @@ test('a reply to a pending question is consumed instead of starting a turn', asy
   runtime.dispose()
 })
 
+test('while prompts change, ordinary messages and commands still get through', async (t) => {
+  const h = createHarness()
+  const runtime = h.makeRuntime({ autoSendFiles: false })
+  t.after(() => runtime.dispose())
+  const adapter = createFakeAdapter()
+  const originalSend = adapter.send.bind(adapter)
+  let releasePrompt = () => {}
+  const sending = new Promise<void>((resolve) => { releasePrompt = resolve })
+  t.after(() => releasePrompt())
+  adapter.send = async (target, outgoing) => {
+    if (outgoing.kind === 'question') await sending
+    return originalSend(target, outgoing)
+  }
+  runtime.register(adapter)
+  const target = { channel: 'fake', accountId: 'acct', conversationId: 'conv' }
+  const approval = approvalEntry({ target, request: { toolName: 'test' } })
+  const first = runtime.interactions.ask(approval)
+  await tick()
+  runtime.interactions.retire(approval)
+  assert.equal(await first, 'unavailable')
+  const question = questionEntry({ target, questions: [{ question: 'Free text' }] })
+  const second = runtime.interactions.ask(question)
+  void second.catch(() => {})
+
+  runtime.dispatch(inbound({ text: '允许' }))
+  runtime.dispatch(inbound({ text: '/new' }))
+  runtime.dispatch(inbound({ text: '明天几点开会？' }))
+  await tick(30)
+  assert.ok(adapter.sent.some(({ outgoing }) => outgoing.kind === 'notice' && outgoing.text?.includes('第 1 条')))
+  assert.deepEqual(
+    h.followedUp.map(({ message }) => (message as { content: Array<{ text: string }> }).content[0]?.text),
+    ['明天几点开会？'],
+  )
+  runtime.interactions.retire(question)
+  await second
+})
+
 test('a non-answer keeps the question open and sends a hint', async () => {
   const h = createHarness()
   const runtime = h.makeRuntime()
@@ -176,7 +215,11 @@ test('files the turn wrote are sent as attachments after the reply', async () =>
   const h = createHarness({
     reply: '做好了',
     // The fake agent "uses a tool" during the turn.
-    onFollowup: () => fs.writeFileSync(path.join(workspaceDir, 'out.txt'), 'done'),
+    onFollowup: () => {
+      const output = fs.readdirSync(workspaceDir).find((entry) => entry.startsWith('.channel-output-'))
+      assert.ok(output)
+      fs.writeFileSync(path.join(workspaceDir, output, 'out.txt'), 'done')
+    },
   })
   const runtime = createChannelsRuntime({ ctx: h.ctx, config: { autoSendFiles: true }, workingDirectory: workspaceDir })
   const adapter = createFakeAdapter()

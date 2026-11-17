@@ -15,12 +15,13 @@
  *
  * @module @rodin/dsh-channels-weixin/transport
  */
+import { setTimeout as delay } from 'node:timers/promises'
+
 import { getUpdates } from '../vendor/openclaw-weixin/api/api.js'
-import { DEFAULT_BASE_URL, loadWeixinAccount } from '../vendor/openclaw-weixin/auth/accounts.js'
+import { CDN_BASE_URL as DEFAULT_CDN_BASE_URL, DEFAULT_BASE_URL, loadWeixinAccount } from '../vendor/openclaw-weixin/auth/accounts.js'
 import { MessageItemType } from '../vendor/openclaw-weixin/api/types.js'
 import { sendMessageItemWeixin } from '../vendor/openclaw-weixin/messaging/send.js'
 import { sendWeixinMediaFile } from '../vendor/openclaw-weixin/messaging/send-media.js'
-import { CDN_BASE_URL as DEFAULT_CDN_BASE_URL } from '../vendor/openclaw-weixin/auth/accounts.js'
 import { getSyncBufFilePath, loadGetUpdatesBuf, saveGetUpdatesBuf } from '../vendor/openclaw-weixin/storage/sync-buf.js'
 import type { SendResult } from '@rodin/dsh-channels'
 import type { RawMessage } from './normalize.js'
@@ -29,7 +30,11 @@ export const SESSION_EXPIRED_ERRCODE = -14
 const RETRY_DELAY_MS = 2_000
 const BACKOFF_DELAY_MS = 30_000
 const MAX_CONSECUTIVE_FAILURES = 3
-const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms))
+const MAX_PENDING_BATCHES = 4
+const MAX_LONG_POLL_TIMEOUT_MS = 120_000
+const validPollTimeout = (value: unknown): value is number =>
+  typeof value === 'number' && Number.isInteger(value) && value > 0 && value <= MAX_LONG_POLL_TIMEOUT_MS
+const isSessionRejected = (message: string): boolean => /errcode=-14\b|session|token|unauthor/i.test(message)
 
 export class SessionRejectedError extends Error {
   readonly errcode: number
@@ -61,7 +66,7 @@ export interface TransportOptions {
   baseUrl: string
   token: string
   logger: TransportLogger
-  onMessage: (raw: RawMessage) => void
+  onMessage: (raw: RawMessage) => void | Promise<void>
   onSessionRejected: (expired: boolean) => void
   longPollTimeoutMs?: number
   /** Injected in tests: the real iLink poll. */
@@ -79,13 +84,22 @@ export interface TransportOptions {
   cdnBaseUrl?: string
 }
 
+interface PollBatch {
+  buffer: string
+  delivered: boolean
+  completion: Promise<void>
+}
+
 export class WeixinTransport {
   readonly #options: TransportOptions
   #running = false
   #abort = new AbortController()
   #loop: Promise<void> | undefined
   #longPollTimeoutMs: number
-  #buffer: string | undefined
+  #fetchBuffer: string | undefined
+  #completedBuffer: string | undefined
+  #savedBuffer: string | undefined
+  readonly #batches: PollBatch[] = []
   #bufferPath: string
   #contextTokens = new Map<string, string>()
   readonly #pacer: SendPacer
@@ -93,7 +107,7 @@ export class WeixinTransport {
 
   constructor(options: TransportOptions) {
     this.#options = options
-    this.#longPollTimeoutMs = options.longPollTimeoutMs ?? 35_000
+    this.#longPollTimeoutMs = validPollTimeout(options.longPollTimeoutMs) ? options.longPollTimeoutMs : 35_000
     this.#bufferPath = getSyncBufFilePath(options.accountId)
     this.#pacer = new SendPacer({ minIntervalMs: options.sendIntervalMs, cooldownMs: options.sendCooldownMs })
     this.#cdnBaseUrl = options.cdnBaseUrl ?? DEFAULT_CDN_BASE_URL
@@ -109,19 +123,21 @@ export class WeixinTransport {
   }
 
   start(): void {
-    if (this.#running) return
+    if (this.#loop !== undefined) return
+    this.#abort = new AbortController()
     this.#running = true
     this.#loop = this.#poll().catch((error: unknown) => {
       this.#options.logger.warn(`the inbound loop stopped: ${String((error as Error)?.message ?? error)}`)
+    }).finally(() => {
+      this.#running = false
+      this.#loop = undefined
     })
   }
 
   async stop(): Promise<void> {
-    if (!this.#running) return
-    this.#running = false
+    if (this.#loop === undefined) return
     this.#abort.abort()
-    await this.#loop?.catch(() => {})
-    this.#loop = undefined
+    await this.#loop
   }
 
   /**
@@ -132,31 +148,32 @@ export class WeixinTransport {
    * includes the empty round a long poll returns on its own timeout.
    */
   async pollOnce(): Promise<'ok' | 'retry' | 'rejected' | 'stopped'> {
-    // No `running` guard here: the loop owns the lifecycle, and a test steps
-    // this method directly without ever starting a background loop.
-    if (this.#buffer === undefined) this.#buffer = loadGetUpdatesBuf(this.#bufferPath) ?? ''
-    const deadline = setTimeout(() => this.#abort.abort(), this.#longPollTimeoutMs * 2 + 10_000)
-    deadline.unref?.()
+    return this.#fetchBatch(true)
+  }
+
+  async #fetchBatch(waitForDelivery = false): Promise<'ok' | 'retry' | 'rejected' | 'stopped'> {
+    const requestedBuffer = this.#fetchBuffer ??
+      (this.#savedBuffer = this.#completedBuffer = this.#fetchBuffer = loadGetUpdatesBuf(this.#bufferPath) ?? '')
+    const stopSignal = this.#abort.signal
+    const deadline = AbortSignal.timeout(this.#longPollTimeoutMs * 2 + 10_000)
     let polled: Record<string, unknown>
     try {
       polled = (await (this.#options.getUpdatesImpl ?? (getUpdates as unknown as (params: Record<string, unknown>) => Promise<Record<string, unknown>>))({
         baseUrl: this.#options.baseUrl,
         token: this.#options.token,
-        get_updates_buf: this.#buffer,
+        get_updates_buf: requestedBuffer,
         timeoutMs: this.#longPollTimeoutMs,
-        abortSignal: this.#abort.signal,
+        abortSignal: AbortSignal.any([stopSignal, deadline]),
       })) as Record<string, unknown>
     } catch (error) {
+      if (stopSignal.aborted) return 'stopped'
       this.#options.logger.warn(`getUpdates failed (${String((error as Error)?.message ?? error)})`)
-      this.#abort = new AbortController()
       return 'retry'
-    } finally {
-      clearTimeout(deadline)
     }
-    if (this.#abort.signal.aborted) {
+    if (stopSignal.aborted) return 'stopped'
+    if (deadline.aborted) {
       // A watchdog abort lands here: the vendor treats it as a normal exit.
       this.#options.logger.warn('getUpdates watchdog: one poll round overran its deadline')
-      this.#abort = new AbortController()
       return 'retry'
     }
     const errcode = typeof polled['errcode'] === 'number' ? (polled['errcode'] as number) : 0
@@ -171,39 +188,79 @@ export class WeixinTransport {
       this.#options.logger.warn(`getUpdates ret=${ret} errmsg=${String(polled['errmsg'] ?? '(none)')}`)
       return 'retry'
     }
-    const nextBuffer = polled['get_updates_buf']
-    if (typeof nextBuffer === 'string' && nextBuffer !== this.#buffer) {
-      this.#buffer = nextBuffer
-      saveGetUpdatesBuf(this.#bufferPath, nextBuffer)
-    }
     const timeout = polled['longpolling_timeout_ms']
-    if (typeof timeout === 'number' && timeout > 0) this.#longPollTimeoutMs = timeout
+    if (validPollTimeout(timeout)) this.#longPollTimeoutMs = timeout
+    const nextBuffer = typeof polled['get_updates_buf'] === 'string' ? polled['get_updates_buf'] : requestedBuffer
+    this.#fetchBuffer = nextBuffer
     const messages = Array.isArray(polled['msgs']) ? (polled['msgs'] as RawMessage[]) : []
-    for (const raw of messages) {
+    if (messages.length === 0 && nextBuffer === requestedBuffer) {
+      this.#checkpoint()
+      return 'ok'
+    }
+    const batch: PollBatch = {
+      buffer: nextBuffer,
+      delivered: false,
+      completion: Promise.all(messages.map(async (raw) => {
+        try {
+          await this.#options.onMessage(raw)
+        } catch (error) {
+          this.#options.logger.warn(`dropped one inbound message: ${String((error as Error)?.message ?? error)}`)
+        }
+      })).then(() => {
+        if (stopSignal.aborted) return
+        batch.delivered = true
+        this.#checkpoint()
+      }),
+    }
+    this.#batches.push(batch)
+    if (waitForDelivery) await batch.completion
+    return stopSignal.aborted ? 'stopped' : 'ok'
+  }
+
+  #checkpoint(): void {
+    // A later chat can finish first, but its cursor still covers older messages.
+    for (let first = this.#batches[0]; first?.delivered === true; first = this.#batches[0]) {
+      this.#completedBuffer = first.buffer
+      this.#batches.shift()
+    }
+    if (this.#completedBuffer !== undefined && this.#completedBuffer !== this.#savedBuffer) {
       try {
-        this.#options.onMessage(raw)
+        saveGetUpdatesBuf(this.#bufferPath, this.#completedBuffer)
+        this.#savedBuffer = this.#completedBuffer
       } catch (error) {
-        this.#options.logger.warn(`dropped one inbound message: ${String((error as Error)?.message ?? error)}`)
+        this.#options.logger.warn(`could not save the Weixin sync cursor: ${String((error as Error)?.message ?? error)}`)
       }
     }
-    return 'ok'
   }
 
   async #poll(): Promise<void> {
     let consecutiveFailures = 0
-    while (this.#running) {
-      const outcome = await this.pollOnce()
-      if (outcome === 'stopped' || outcome === 'rejected') break
-      if (outcome === 'ok') {
-        consecutiveFailures = 0
-        continue
+    try {
+      while (!this.#abort.signal.aborted) {
+        if (this.#batches.length >= MAX_PENDING_BATCHES) {
+          await this.#batches[0]?.completion
+          continue
+        }
+        const outcome = await this.#fetchBatch()
+        if (outcome === 'stopped' || outcome === 'rejected') break
+        if (outcome === 'ok') {
+          consecutiveFailures = 0
+          continue
+        }
+        consecutiveFailures += 1
+        const wait = consecutiveFailures >= MAX_CONSECUTIVE_FAILURES
+          ? (this.#options.backoffDelayMs ?? BACKOFF_DELAY_MS)
+          : (this.#options.retryDelayMs ?? RETRY_DELAY_MS)
+        if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) consecutiveFailures = 0
+        await delay(wait, undefined, { signal: this.#abort.signal }).catch((error: unknown) => {
+          if (!this.#abort.signal.aborted) throw error
+        })
       }
-      consecutiveFailures += 1
-      const wait = consecutiveFailures >= MAX_CONSECUTIVE_FAILURES
-        ? (this.#options.backoffDelayMs ?? BACKOFF_DELAY_MS)
-        : (this.#options.retryDelayMs ?? RETRY_DELAY_MS)
-      if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) consecutiveFailures = 0
-      await sleep(wait)
+    } finally {
+      await Promise.all(this.#batches.map((batch) => batch.completion))
+      this.#batches.length = 0
+      // Restart may replay part of an interrupted batch so queued messages aren't lost.
+      this.#fetchBuffer = this.#completedBuffer
     }
   }
 
@@ -229,7 +286,7 @@ export class WeixinTransport {
     } catch (error) {
       this.#pacer.noteFailure()
       const message = String((error as Error)?.message ?? error)
-      return { ok: false, code: /session|token|unauthor/i.test(message) ? 'session-rejected' : 'send-failed', detail: message }
+      return { ok: false, code: isSessionRejected(message) ? 'session-rejected' : 'send-failed', detail: message }
     }
   }
 
@@ -263,7 +320,7 @@ export class WeixinTransport {
     } catch (error) {
       this.#pacer.noteFailure()
       const message = String((error as Error)?.message ?? error)
-      return { ok: false, code: 'send-media-failed', detail: message }
+      return { ok: false, code: isSessionRejected(message) ? 'session-rejected' : 'send-media-failed', detail: message }
     }
   }
 }

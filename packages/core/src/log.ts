@@ -23,9 +23,12 @@ const SECRET_PATTERNS: Array<[RegExp, string]> = [
 ]
 
 export function redact(line: string): string {
-  let out = String(line)
+  // Operators need the actual WeChat sender ID to bootstrap the deny-by-default allowlist.
+  const source = String(line)
+  const refusal = /^(refused weixin message from [A-Za-z0-9_-]{1,200}@im\.wechat: )(.*)$/.exec(source)
+  let out = refusal?.[2] ?? source
   for (const [pattern, replacement] of SECRET_PATTERNS) out = out.replace(pattern, replacement)
-  return out
+  return (refusal?.[1] ?? '') + out
 }
 
 export interface LoggerOptions {

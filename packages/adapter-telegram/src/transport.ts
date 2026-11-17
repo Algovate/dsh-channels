@@ -22,7 +22,13 @@ export const DEFAULT_API_BASE = 'https://api.telegram.org'
 /** Telegram's own limit for one message is 4096 characters. */
 export const MAX_TEXT_CHARS = 4000
 
-type FetchLike = (url: string, init?: Record<string, unknown>) => Promise<{ ok: boolean; status: number; json: () => Promise<unknown>; arrayBuffer?: () => Promise<ArrayBuffer> }>
+const REQUEST_TIMEOUT_MS = 15_000
+export type FetchLike = (url: string, init?: Record<string, unknown>) => Promise<{
+  ok: boolean
+  status: number
+  json: () => Promise<unknown>
+  body?: ReadableStream<Uint8Array> | null
+}>
 
 export interface TransportLogger {
   info: (line: string) => void
@@ -48,15 +54,14 @@ interface TelegramAnswer<T> {
 
 export class TelegramTransport {
   readonly #options: TransportOptions
-  readonly #logger: TransportLogger
   readonly #fetch: FetchLike
   readonly #apiBase: string
+  readonly #lifecycle = new AbortController()
+  readonly signal: AbortSignal = this.#lifecycle.signal
   #offset = 0
-  #stopped = false
 
   constructor(options: TransportOptions) {
     this.#options = options
-    this.#logger = options.logger
     this.#fetch = options.fetchImpl ?? (globalThis.fetch as unknown as FetchLike)
     this.#apiBase = (options.apiBaseUrl ?? DEFAULT_API_BASE).replace(/\/$/, '')
   }
@@ -65,36 +70,70 @@ export class TelegramTransport {
     return `${this.#apiBase}/bot${this.#options.token}/${method}`
   }
 
-  async #call<T>(method: string, body?: Record<string, unknown>): Promise<TelegramAnswer<T>> {
-    const response = await this.#fetch(this.#url(method), {
+  async #request<T>(
+    url: string,
+    init: Record<string, unknown>,
+    read: (response: Awaited<ReturnType<FetchLike>>, signal: AbortSignal) => Promise<T>,
+    timeoutMs = REQUEST_TIMEOUT_MS,
+  ): Promise<T> {
+    const deadline = new AbortController()
+    const signal = AbortSignal.any([this.signal, deadline.signal])
+    signal.throwIfAborted()
+    const timer = setTimeout(() => deadline.abort(new Error('Telegram request timed out')), timeoutMs)
+    let onAbort!: () => void
+    const aborted = new Promise<never>((_resolve, reject) => {
+      onAbort = () => reject(signal.reason)
+      signal.addEventListener('abort', onAbort, { once: true })
+    })
+    try {
+      const response = Promise.resolve().then(async () => {
+        signal.throwIfAborted()
+        const received = await this.#fetch(url, { ...init, signal })
+        signal.throwIfAborted()
+        return read(received, signal)
+      })
+      return await Promise.race([response, aborted])
+    } finally {
+      clearTimeout(timer)
+      signal.removeEventListener('abort', onAbort)
+    }
+  }
+
+  #answer<T>(method: string, init: Record<string, unknown>, timeoutMs?: number): Promise<TelegramAnswer<T>> {
+    return this.#request(this.#url(method), init, async (response) =>
+      (await response.json().catch(() => ({}))) as TelegramAnswer<T>, timeoutMs)
+  }
+
+  #call<T>(method: string, body?: Record<string, unknown>, timeoutMs?: number): Promise<TelegramAnswer<T>> {
+    return this.#answer<T>(method, {
       method: body === undefined ? 'GET' : 'POST',
       headers: { 'content-type': 'application/json' },
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-    })
-    const answer = (await response.json().catch(() => ({}))) as TelegramAnswer<T>
-    return answer
+    }, timeoutMs)
   }
 
   /**
    * One long poll. Returns the updates it got (empty on a timeout, which is
-   * normal) and advances the offset past them, so a restart does not replay.
+   * normal). The next poll confirms the previous batch with its offset.
    */
   async pollOnce(): Promise<TelegramUpdate[]> {
-    if (this.#stopped) return []
-    const timeout = this.#options.pollTimeoutSeconds ?? 25
+    if (this.signal.aborted) return []
+    const configuredTimeout = this.#options.pollTimeoutSeconds ?? 25
+    const timeout = Number.isFinite(configuredTimeout) ? Math.max(0, Math.min(50, Math.floor(configuredTimeout))) : 25
     const answer = await this.#call<TelegramUpdate[]>('getUpdates', {
       offset: this.#offset === 0 ? undefined : this.#offset,
       timeout,
       allowed_updates: ['message'],
       limit: 50,
-    })
+    }, timeout * 1000 + REQUEST_TIMEOUT_MS)
     if (answer.ok !== true || !Array.isArray(answer.result)) {
       const retry = answer.parameters?.retry_after
       throw new Error(`getUpdates failed: ${answer.description ?? 'no description'}${retry === undefined ? '' : ` (retry after ${retry}s)`}`)
     }
     const updates = answer.result
     for (const update of updates) {
-      if (typeof update.update_id === 'number') this.#offset = Math.max(this.#offset, update.update_id + 1)
+      const id = update?.update_id
+      if (id !== undefined && Number.isSafeInteger(id)) this.#offset = Math.max(this.#offset, id + 1)
     }
     return updates
   }
@@ -139,8 +178,7 @@ export class TelegramTransport {
       form.set('chat_id', chatId)
       if (caption !== '') form.set('caption', caption.slice(0, 1000))
       form.set(field, new Blob([file]), path.basename(filePath))
-      const response = await this.#fetch(this.#url(method), { method: 'POST', body: form })
-      const answer = (await response.json().catch(() => ({}))) as TelegramAnswer<{ message_id?: number }>
+      const answer = await this.#answer<{ message_id?: number }>(method, { method: 'POST', body: form })
       if (answer.ok !== true) return { ok: false, code: 'send-media-failed', detail: answer.description ?? 'no description' }
       const messageId = answer.result?.message_id
       return typeof messageId === 'number' ? { ok: true, messageId: String(messageId) } : { ok: true, unconfirmed: true }
@@ -150,19 +188,44 @@ export class TelegramTransport {
   }
 
   /** Resolve a file id to a download URL, then fetch the bytes. */
-  async downloadFile(fileId: string): Promise<{ bytes: Buffer; filePath: string } | { error: string }> {
+  async downloadFile(fileId: string, maxBytes: number): Promise<{ bytes: Buffer; filePath: string } | { error: string }> {
     try {
-      const answer = await this.#call<{ file_path?: string }>('getFile', { file_id: fileId })
+      const answer = await this.#call<{ file_path?: string; file_size?: number }>('getFile', { file_id: fileId })
       const filePath = answer.result?.file_path
       if (answer.ok !== true || typeof filePath !== 'string' || filePath === '') {
         return { error: answer.description ?? 'getFile returned no path' }
       }
+      const overCap = `file exceeds ${maxBytes} bytes`
+      if (typeof answer.result?.file_size === 'number' && answer.result.file_size > maxBytes) return { error: overCap }
       const url = `${this.#apiBase}/file/bot${this.#options.token}/${filePath}`
-      const response = await this.#fetch(url)
-      if (response.ok !== true || typeof response.arrayBuffer !== 'function') {
-        return { error: `download failed with HTTP ${response.status}` }
-      }
-      return { bytes: Buffer.from(await response.arrayBuffer()), filePath }
+      const bytes = await this.#request(url, {}, async (response, signal) => {
+        if (!response.ok || response.body == null) {
+          void response.body?.cancel().catch(() => {})
+          throw new Error(`download failed with HTTP ${response.status}`)
+        }
+        const reader = response.body.getReader()
+        const cancel = (): void => { void reader.cancel().catch(() => {}) }
+        signal.addEventListener('abort', cancel, { once: true })
+        try {
+          const chunks: Uint8Array[] = []
+          let size = 0
+          while (true) {
+            const chunk = await reader.read()
+            signal.throwIfAborted()
+            if (chunk.done) return Buffer.concat(chunks, size)
+            size += chunk.value.byteLength
+            if (size > maxBytes) {
+              cancel()
+              throw new Error(overCap)
+            }
+            chunks.push(chunk.value)
+          }
+        } finally {
+          signal.removeEventListener('abort', cancel)
+          reader.releaseLock()
+        }
+      })
+      return { bytes, filePath }
     } catch (error) {
       return { error: String((error as Error)?.message ?? error) }
     }
@@ -178,6 +241,6 @@ export class TelegramTransport {
   }
 
   stop(): void {
-    this.#stopped = true
+    this.#lifecycle.abort(new Error('Telegram transport stopped'))
   }
 }

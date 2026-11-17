@@ -89,6 +89,7 @@ export class AsrBridge {
     if (this.#closed) return Promise.resolve({ ok: false, reason: 'bridge closed' })
     if (!this.available()) return Promise.resolve({ ok: false, reason: 'bridge unavailable' })
     const run = async (): Promise<Transcription> => {
+      if (this.#closed) return { ok: false, reason: 'bridge closed' }
       const child = this.#spawn()
       if (child === undefined) return { ok: false, reason: 'bridge unavailable' }
       return new Promise<Transcription>((resolve) => {

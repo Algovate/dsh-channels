@@ -148,12 +148,13 @@ test('the renderer shows the channel badge, the sender and the words', async () 
 
   const weixinDefinition = definitions.find((definition) => definition.kind === 'weixin-user')
   const start = weixinDefinition?.start as (context: unknown, match: unknown) => Record<string, any>
-  const data = start({}, { event: { data: { content: [{ type: 'text', text: '你好' }], source: { kind: 'weixin', senderId: 'abcdefghijklmnop@im.wechat', group: false } } } })
+  const data = start({}, { event: { data: { content: [{ type: 'text', text: 'internal output instruction' }, { type: 'text', text: '你好' }], source: { kind: 'weixin', senderId: 'abcdefghijklmnop@im.wechat', group: false, hasOutputInstruction: true } } } })
   const node = renderer({ node: { data } })
   const text = JSON.stringify(node)
   assert.match(text, /微信/)
   assert.match(text, /abcdefghijkl/, 'the short sender id is shown')
   assert.match(text, /你好/)
+  assert.doesNotMatch(text, /internal output instruction/)
   })
 })
 

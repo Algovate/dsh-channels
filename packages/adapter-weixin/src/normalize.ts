@@ -5,9 +5,8 @@
  * rather than throwing, and the plugin's own echoes are dropped first — a bot
  * that answers itself is the classic infinite loop.
  *
- * Text only in 0.1.0: an image/file/voice message has no text and is dropped
- * with a log line. Media lands in the next milestone, where the core learns
- * `InboundMedia` and the adapter learns upload/download.
+ * Attachment descriptors are retained here so the adapter can authorize the
+ * sender before downloading media.
  *
  * @module @rodin/dsh-channels-weixin/normalize
  */
@@ -75,6 +74,11 @@ export function normalizeInbound(raw: RawMessage, accountId: string): Normalized
   // A media-only message is still a message: the attachment is the message.
   if (text === '' && media.length === 0) return null
 
+  const id = raw.message_id
+  const validServerId = typeof id === 'number' ? Number.isSafeInteger(id) && id > 0 : typeof id === 'string' && id.length <= 256 && id !== '' && id !== '0'
+  const clientId = blankToUndefined(raw.client_id)
+  const platformMessageId = validServerId ? `message:${id}` : clientId !== undefined && clientId.length <= 256 ? `client:${clientId}` : undefined
+
   return {
     channel: 'weixin',
     accountId,
@@ -84,6 +88,7 @@ export function normalizeInbound(raw: RawMessage, accountId: string): Normalized
     media: [],
     group,
     at: typeof raw.create_time_ms === 'number' ? raw.create_time_ms : Date.now(),
+    ...(platformMessageId === undefined ? {} : { platformMessageId }),
     contextToken: typeof raw.context_token === 'string' ? raw.context_token : '',
     ...(media.length === 0 ? {} : { raw: { mediaItems: media } }),
   }

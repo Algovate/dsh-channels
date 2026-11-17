@@ -101,6 +101,90 @@ test('a turn that never settles reports a timeout instead of hanging', async () 
   assert.match(reply.text, /超时/)
 })
 
+test('only the final answer from the submitted turn is returned after it completes', async () => {
+  const h = createHarness({ silent: true })
+  const driver = new TurnDriver({ ctx: h.ctx, logger: { info: () => {}, warn: () => {} }, workingDirectory: '/tmp', pollMs: 1, maxTurnWaitMs: 1000, createUserMessage: h.createUserMessage })
+  const append = (type: string, data: Record<string, unknown>) => h.events.push({ seq: h.events.length + 1, type, data })
+  const assistant = (turn: number, text: string) => append('assistant/message', { turn, message: { content: [{ type: 'text', text }] } })
+  append('turn/start', { turn: 1 })
+  let settled = false
+  const pending = driver.run({ message: inbound() }).then((result) => {
+    settled = true
+    return result
+  })
+  await new Promise((resolve) => setImmediate(resolve))
+  assistant(1, 'desktop answer')
+  append('turn/end', { turn: 1, reason: { kind: 'completed' } })
+  append('turn/start', { turn: 2 })
+  append('user/message', h.followedUp[0]?.message as Record<string, unknown>)
+  assistant(2, 'I will check')
+  await new Promise((resolve) => setTimeout(resolve, 10))
+  assert.equal(settled, false)
+  assistant(2, 'Final answer')
+  append('turn/end', { turn: 2, reason: { kind: 'completed' } })
+  assert.equal((await pending).text, 'Final answer')
+})
+
+test('a completed turn without final text returns an empty reply', async () => {
+  const h = createHarness({ silent: true })
+  const driver = new TurnDriver({ ctx: h.ctx, logger: { info: () => {}, warn: () => {} }, workingDirectory: '/tmp', pollMs: 1, maxTurnWaitMs: 150, createUserMessage: h.createUserMessage })
+  const pending = driver.run({ message: inbound() })
+  await new Promise((resolve) => setImmediate(resolve))
+  h.events.push(
+    { seq: 1, type: 'turn/start', data: { turn: 1 } },
+    { seq: 2, type: 'user/message', data: h.followedUp[0]?.message as Record<string, unknown> },
+    { seq: 3, type: 'assistant/message', data: { turn: 1, message: { content: [{ type: 'reasoning', text: 'not an answer' }] } } },
+    { seq: 4, type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } },
+  )
+  const reply = await pending
+  assert.equal(reply.text, '')
+  assert.equal(reply.failed, undefined)
+})
+
+test('a failure after an interim assistant message takes precedence over its text', async () => {
+  const h = createHarness({ silent: true })
+  const driver = new TurnDriver({ ctx: h.ctx, logger: { info: () => {}, warn: () => {} }, workingDirectory: '/tmp', pollMs: 1, maxTurnWaitMs: 150, createUserMessage: h.createUserMessage })
+  const pending = driver.run({ message: inbound() })
+  await new Promise((resolve) => setImmediate(resolve))
+  h.events.push(
+    { seq: 1, type: 'turn/start', data: { turn: 1 } },
+    { seq: 2, type: 'user/message', data: h.followedUp[0]?.message as Record<string, unknown> },
+    { seq: 3, type: 'assistant/message', data: { turn: 1, message: { content: [{ type: 'text', text: 'Working on it' }] } } },
+    { seq: 4, type: 'turn/end', data: { turn: 1, reason: { kind: 'error', error: { message: 'provider disconnected' } } } },
+  )
+  const reply = await pending
+  assert.equal(reply.text, 'provider disconnected')
+  assert.equal(reply.failed, true)
+})
+
+test('a failure before the first model step is attributed to the claimed inbox message', async () => {
+  const h = createHarness({ silent: true })
+  const driver = new TurnDriver({ ctx: h.ctx, logger: { info: () => {}, warn: () => {} }, workingDirectory: '/tmp', pollMs: 1, maxTurnWaitMs: 150, createUserMessage: h.createUserMessage })
+  const pending = driver.run({ message: inbound() })
+  await new Promise((resolve) => setImmediate(resolve))
+  h.events.push(
+    { seq: 1, type: 'agent/inbox/spliced', data: { target: 'next-turn', start: 1, inserted: [h.followedUp[0]?.message] } },
+    { seq: 2, type: 'turn/start', data: { turn: 1 } },
+    { seq: 3, type: 'agent/inbox/spliced', data: { target: 'next-turn', start: 0, removedCount: 1, inserted: [] } },
+    { seq: 4, type: 'turn/end', data: { turn: 1, reason: { kind: 'error', error: { message: 'desktop failure' } } } },
+    { seq: 5, type: 'turn/start', data: { turn: 2 } },
+    { seq: 6, type: 'agent/inbox/spliced', data: { target: 'next-turn', start: 0, removedCount: 1, inserted: [] } },
+    { seq: 7, type: 'turn/end', data: { turn: 2, reason: { kind: 'error', error: { message: 'missing provider' } } } },
+  )
+  const reply = await pending
+  assert.equal(reply.text, 'missing provider')
+  assert.equal(reply.failed, true)
+})
+
+test('an aborted request is not submitted to the host', async () => {
+  const h = createHarness({ silent: true })
+  const driver = new TurnDriver({ ctx: h.ctx, logger: { info: () => {}, warn: () => {} }, workingDirectory: '/tmp', pollMs: 1, maxTurnWaitMs: 150, createUserMessage: h.createUserMessage })
+  const reply = await driver.run({ message: inbound(), signal: AbortSignal.abort(), context: [{ name: 'context', text: 'do not inject' }] })
+  assert.equal(reply.failed, true)
+  assert.equal(h.followedUp.length, 0)
+  assert.equal(h.injected.length, 0)
+})
+
 test('a session is created with the host\'s default model route', async () => {
   const h = createHarness({ reply: '在' })
   const ctx = {
@@ -174,4 +258,29 @@ test('a new session is named once so the GUI lists it', async () => {
   assert.equal(renamed.length, 1)
   assert.match(renamed[0]?.title ?? '', /^sender: 明天几点开会$/)
   assert.match(renamed[0]?.sessionId ?? '', /^chan-fake-[0-9a-f]{16}$/, 'a live session object is passed')
+})
+
+test('the output instruction travels on the identified followup, not the active desktop turn', async () => {
+  const h = createHarness()
+  const driver = new TurnDriver({ ctx: h.ctx, logger: { info() {}, warn() {} }, workingDirectory: '/tmp', pollMs: 5, createUserMessage: h.createUserMessage })
+  await driver.run({ message: inbound({ text: 'make a file' }), outputDirectory: '/tmp/chat-unique' })
+  const message = h.followedUp[0]?.message as { content: Array<{ text: string }>; source: Record<string, unknown> }
+  assert.equal(h.injected.length, 0)
+  assert.match(message.content[0]?.text ?? '', /\/tmp\/chat-unique/)
+  assert.equal(message.content[1]?.text, 'make a file')
+  assert.equal(message.source['hasOutputInstruction'], true)
+})
+
+test('a length-limited turn still returns the text the model produced', async () => {
+  const h = createHarness({ silent: true })
+  const driver = new TurnDriver({ ctx: h.ctx, logger: { info() {}, warn() {} }, workingDirectory: '/tmp', pollMs: 1, maxTurnWaitMs: 150, createUserMessage: h.createUserMessage })
+  const pending = driver.run({ message: inbound() })
+  await new Promise((resolve) => setImmediate(resolve))
+  h.events.push(
+    { seq: 1, type: 'turn/start', data: { turn: 1 } },
+    { seq: 2, type: 'user/message', data: h.followedUp[0]?.message as Record<string, unknown> },
+    { seq: 3, type: 'assistant/message', data: { turn: 1, message: { content: [{ type: 'text', text: 'Available answer' }] } } },
+    { seq: 4, type: 'turn/end', data: { turn: 1, reason: { kind: 'max-tokens' } } },
+  )
+  assert.equal((await pending).text, 'Available answer')
 })

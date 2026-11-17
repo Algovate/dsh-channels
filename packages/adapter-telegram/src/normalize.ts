@@ -151,6 +151,9 @@ export function normalizeInbound(update: TelegramUpdate, accountId: string, now 
   const group = message.chat?.type === 'group' || message.chat?.type === 'supergroup'
   const name = displayName(message.from, message.chat)
   const seconds = typeof message.date === 'number' ? message.date * 1000 : now
+  const platformMessageId = typeof message.message_id === 'number' && Number.isSafeInteger(message.message_id) && message.message_id > 0
+    ? `message:${message.message_id}`
+    : Number.isSafeInteger(update.update_id) ? `update:${update.update_id}` : undefined
   return {
     channel: CHANNEL_ID,
     accountId,
@@ -160,6 +163,7 @@ export function normalizeInbound(update: TelegramUpdate, accountId: string, now 
     media: [],
     group,
     at: seconds,
+    ...(platformMessageId === undefined ? {} : { platformMessageId }),
     ...(name === '' ? {} : { raw: { senderName: name } }),
     ...(mediaItems.length === 0 ? {} : { mediaItems }),
   }

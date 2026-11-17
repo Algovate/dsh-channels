@@ -14,7 +14,7 @@
  *
  * @module @rodin/dsh-channels/interaction/queue
  */
-import type { Outgoing, Target } from '../types.js'
+import type { Outgoing, SendResult, Target } from '../types.js'
 
 export const DEFAULT_INTERACTION_TIMEOUT_MS = 10 * 60_000
 
@@ -31,6 +31,8 @@ export interface InteractionEntry {
   }
   /** Parse one reply text; `null` means "not an answer, ask again". */
   parse(text: string): { ok: true; value: string } | { ok: false; hint: string } | null
+  /** A free-text prompt cannot distinguish its answer from ordinary chat before delivery. */
+  freeText?: boolean
   /** Sent when the wait runs out. */
   expiredNotice: string
   /** Sent when another surface answered first. */
@@ -41,15 +43,21 @@ export interface InteractionEntry {
 
 interface Pending {
   entry: InteractionEntry
+  started: boolean
   resolve(value: string): void
   reject(error: Error): void
   timer: ReturnType<typeof setTimeout> | undefined
   offAbort: () => void
 }
 
+interface Transmission {
+  done: Promise<unknown>
+  retired: InteractionEntry[]
+}
+
 export interface InteractionQueueOptions {
   /** Send one rendered prompt (the runtime's normal send path). */
-  send(target: Target, outgoing: Outgoing): Promise<unknown>
+  send(target: Target, outgoing: Outgoing): Promise<readonly SendResult[]>
   logger: { info: (line: string) => void; warn: (line: string) => void }
   timeoutMs?: number | (() => number)
 }
@@ -74,6 +82,7 @@ export class InteractionQueue {
   readonly #options: InteractionQueueOptions
   /** conversation key → the entries waiting, head first. */
   readonly #queues = new Map<string, Pending[]>()
+  readonly #transmissions = new Map<string, Transmission>()
   #disposed = false
 
   constructor(options: InteractionQueueOptions) {
@@ -90,21 +99,22 @@ export class InteractionQueue {
     return this.#queues.get(keyOf(target))?.[0]?.entry.kind
   }
 
-  /** How many conversations currently have a prompt on screen. */
+  /** How many conversations have an active interaction. */
   pendingCount(): number {
     let total = 0
     for (const list of this.#queues.values()) total += list.length > 0 ? 1 : 0
     return total
   }
 
-  /** True when a prompt is on screen for this conversation. */
+  /** True while an interaction or its prompt transmission is active. */
   busy(target: Target): boolean {
-    return this.active(target) !== undefined
+    return this.active(target) !== undefined || this.#transmissions.has(keyOf(target))
   }
 
   /** Queue one interaction and resolve with the answer the person gave. */
   ask(entry: InteractionEntry, { signal }: { signal?: AbortSignal } = {}): Promise<string> {
     if (this.#disposed) return Promise.reject(new Error('the interaction queue is disposed'))
+    if (signal?.aborted === true) return Promise.reject(withdrawnError(entry.kind))
     const key = keyOf(entry.target)
     const list = this.#queues.get(key) ?? []
     this.#queues.set(key, list)
@@ -112,6 +122,7 @@ export class InteractionQueue {
     return new Promise<string>((resolve, reject) => {
       const pending: Pending = {
         entry,
+        started: false,
         resolve,
         reject,
         timer: undefined,
@@ -119,40 +130,52 @@ export class InteractionQueue {
       }
       if (signal !== undefined) {
         const onAbort = (): void => {
-          this.#remove(pending, withdrawnError(entry.kind))
-        }
-        if (signal.aborted) {
-          queueMicrotask(onAbort)
-          return
+          this.#settle(pending, undefined, withdrawnError(entry.kind))
         }
         signal.addEventListener('abort', onAbort, { once: true })
         pending.offAbort = () => signal.removeEventListener('abort', onAbort)
       }
       list.push(pending)
-      if (list.length === 1) void this.#present(pending)
+      if (list.length === 1) this.#present(pending)
+    })
+  }
+
+  #sendInOrder(target: Target, send: () => Promise<unknown>): void {
+    const key = keyOf(target)
+    // Retirement settles the request immediately, but a newer prompt must not overtake its delivery.
+    const previous = this.#transmissions.get(key)
+    const done = (previous?.done ?? Promise.resolve()).then(() => this.#disposed ? undefined : send()).catch(() => {})
+    const current = { done, retired: previous?.retired ?? [] }
+    this.#transmissions.set(key, current)
+    void done.then(() => {
+      if (this.#transmissions.get(key) === current) this.#transmissions.delete(key)
     })
   }
 
   /** Send the head entry's prompt and arm its timer. */
-  async #present(pending: Pending): Promise<void> {
+  #present(pending: Pending): void {
     const { entry } = pending
-    const outgoing: Outgoing = {
-      text: this.#renderText(entry),
-      kind: 'question',
-    }
-    try {
-      await this.#options.send(entry.target, outgoing)
-    } catch (error) {
-      // A prompt that never reached the person cannot be answered; fail fast
-      // so the seam can fall back to another surface instead of waiting 10m.
-      this.#settle(pending, undefined, new Error(`could not deliver the ${entry.kind}: ${String((error as Error)?.message ?? error)}`))
-      return
-    }
-    if (pending.timer !== undefined || !this.#isHead(pending)) return
-    pending.timer = setTimeout(() => {
-      this.#settle(pending, undefined, timedOutError(entry.kind), entry.expiredNotice)
-    }, this.#timeoutMs())
-    pending.timer.unref?.()
+    this.#sendInOrder(entry.target, async () => {
+      if (!this.#isHead(pending)) return
+      pending.started = true
+      try {
+        const results = await this.#options.send(entry.target, { text: this.#renderText(entry), kind: 'question' })
+        const failed = results.find((result) => result.ok === false)
+        if (failed !== undefined) throw new Error(failed.detail ?? failed.code)
+        if (results.length === 0) throw new Error('nothing was sent')
+      } catch (error) {
+        // Fail fast so another surface can answer a prompt the chat could not deliver.
+        this.#settle(pending, undefined, new Error(`could not deliver the ${entry.kind}: ${String((error as Error)?.message ?? error)}`))
+        return
+      }
+      if (!this.#isHead(pending)) return
+      const transmission = this.#transmissions.get(keyOf(entry.target))
+      if (transmission !== undefined) transmission.retired.length = 0
+      pending.timer = setTimeout(() => {
+        this.#settle(pending, undefined, timedOutError(entry.kind), entry.expiredNotice)
+      }, this.#timeoutMs())
+      pending.timer.unref?.()
+    })
   }
 
   /**
@@ -180,12 +203,18 @@ export class InteractionQueue {
    * Try to read one inbound message as the answer to the active interaction.
    *
    * Returns 'none' when nothing is being asked; the caller then starts a turn.
+   * 'waiting' discards replies to numbered prompts during delivery.
    * An unparsable reply does NOT consume the interaction: the person gets a hint
    * and can try again.
    */
-  claim(target: Target, text: string): { status: 'none' } | { status: 'answered' } | { status: 'invalid'; hint: string } {
-    const head = this.#queues.get(keyOf(target))?.[0]
-    if (head === undefined) return { status: 'none' }
+  claim(target: Target, text: string): { status: 'none' | 'waiting' | 'answered' } | { status: 'invalid'; hint: string } {
+    const key = keyOf(target)
+    const head = this.#queues.get(key)?.[0]
+    if (head?.timer === undefined) {
+      const isAnswer = (entry: InteractionEntry) => entry.freeText !== true && entry.parse(text)?.ok === true
+      const stale = this.#transmissions.get(key)?.retired
+      return { status: (head !== undefined && isAnswer(head.entry)) || stale?.some(isAnswer) ? 'waiting' : 'none' }
+    }
     const parsed = head.entry.parse(text)
     if (parsed === null) return { status: 'none' }
     if (parsed.ok !== true) return { status: 'invalid', hint: parsed.hint }
@@ -194,29 +223,27 @@ export class InteractionQueue {
   }
 
   /** Another surface answered first: tell the person and resolve. */
-  retire(target: Target): void {
-    const head = this.#queues.get(keyOf(target))?.[0]
-    if (head === undefined) return
-    this.#settle(head, head.entry.retireValue, undefined, head.entry.retiredNotice)
-  }
-
-  #remove(pending: Pending, error: Error): void {
-    this.#settle(pending, undefined, error)
+  retire(entry: InteractionEntry): void {
+    const pending = this.#queues.get(keyOf(entry.target))?.find((item) => item.entry === entry)
+    if (pending !== undefined) this.#settle(pending, entry.retireValue, undefined, entry.retiredNotice)
   }
 
   #settle(pending: Pending, value?: string, error?: Error, notice?: string): void {
-    const list = this.#queues.get(keyOf(pending.entry.target))
+    const key = keyOf(pending.entry.target)
+    const list = this.#queues.get(key)
     if (list === undefined) return
     const index = list.indexOf(pending)
     if (index === -1) return
     list.splice(index, 1)
     if (pending.timer !== undefined) clearTimeout(pending.timer)
     pending.offAbort()
-    if (list.length === 0) this.#queues.delete(keyOf(pending.entry.target))
-    else void this.#present(list[0] as Pending)
-    if (notice !== undefined && notice !== '') {
-      void this.#options.send(pending.entry.target, { text: notice, kind: 'notice' }).catch(() => {})
+    if (list.length === 0) this.#queues.delete(key)
+    if (pending.started && notice !== undefined && notice !== '') {
+      this.#sendInOrder(pending.entry.target, () => this.#options.send(pending.entry.target, { text: notice, kind: 'notice' }))
     }
+    const next = list[0]
+    if (index === 0 && next !== undefined && !this.#disposed) this.#present(next)
+    if (pending.started) this.#transmissions.get(key)?.retired.push(pending.entry)
     if (error !== undefined) pending.reject(error)
     else pending.resolve(value ?? pending.entry.retireValue)
   }
@@ -228,5 +255,6 @@ export class InteractionQueue {
       for (const pending of [...list]) this.#settle(pending, undefined, new Error('the interaction queue is disposed'))
     }
     this.#queues.clear()
+    this.#transmissions.clear()
   }
 }

@@ -17,7 +17,7 @@ test('the Telegram adapter satisfies the same contract the core registers', asyn
   const adapter = await createTelegram({
     stateRoot: fs.mkdtempSync(path.join(os.tmpdir(), 'channels-tg-')),
     config: {
-      token: 'test-token',
+      token: '123:test-token',
       fetchImpl: async () => ({ ok: true, status: 200, json: async () => ({ ok: true, result: [] }) }),
     },
   })

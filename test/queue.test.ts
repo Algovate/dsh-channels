@@ -71,7 +71,10 @@ test('abort reaches the running task through its signal', async () => {
     await tick(20)
     seen = signal.aborted ? 'aborted' : 'live'
   })
+  await tick(1) // let the first task start before cancelling it
+  const queued = queue.push('a', async () => assert.fail('cancelled work ran'))
   queue.abort('a', 'stop')
+  await assert.rejects(queued, (reason) => reason === 'stop')
   await running
   assert.equal(seen, 'aborted')
 })
