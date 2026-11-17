@@ -28,6 +28,7 @@ export const Config = z.object({
   autoSendFiles: z.boolean().default(true).description('Send files the agent wrote in its working directory during a turn as chat attachments.'),
   maxProducedFiles: z.number().default(3).description('How many produced files one turn may send.'),
   maxProducedBytes: z.number().default(20971520).description('Largest produced file that is sent (bytes).'),
+  workingDirectory: z.string().default('').description('Where channel sessions run and where produced files are looked for. Empty means the plugin state root workspace.'),
 })
 
 export interface ChannelsConfig {
@@ -49,6 +50,7 @@ export interface ChannelsConfig {
   autoSendFiles: boolean
   maxProducedFiles: number
   maxProducedBytes: number
+  workingDirectory: string
 }
 
 const DEFAULTS: ChannelsConfig = {
@@ -70,6 +72,7 @@ const DEFAULTS: ChannelsConfig = {
   autoSendFiles: true,
   maxProducedFiles: 3,
   maxProducedBytes: 20 * 1024 * 1024,
+  workingDirectory: '',
 }
 
 /** Fill missing fields; tolerate a config object from an older version. */
@@ -94,6 +97,7 @@ export function resolveConfig(raw: Partial<ChannelsConfig> | undefined): Channel
     autoSendFiles: input.autoSendFiles ?? DEFAULTS.autoSendFiles,
     maxProducedFiles: Number.isFinite(input.maxProducedFiles) ? Number(input.maxProducedFiles) : DEFAULTS.maxProducedFiles,
     maxProducedBytes: Number.isFinite(input.maxProducedBytes) ? Number(input.maxProducedBytes) : DEFAULTS.maxProducedBytes,
+    workingDirectory: typeof input.workingDirectory === 'string' ? input.workingDirectory.trim() : DEFAULTS.workingDirectory,
   }
 }
 

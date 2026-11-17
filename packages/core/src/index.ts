@@ -63,12 +63,29 @@ export async function startChannels({ ctx, config }: { ctx: PluginContext; confi
   const root = stateRoot()
   ensureDirectories(root)
   const logger = createLogger({ stateRoot: root, ...(ctx === undefined ? {} : { ctx }) })
+  // The operator's `workingDirectory` wins; the state root's own `workspace` is
+  // the default, so a channel can never write into a directory the user did not
+  // choose for it.
+  const workingDirectory = config.workingDirectory !== '' ? config.workingDirectory : path.join(root, 'workspace')
+  const workspace = await registerWorkspace({ ctx, workingDirectory, logger })
   const runtime = new ChannelsRuntime({
     ctx,
     config,
     logger,
     stateRoot: root,
-    workingDirectory: path.join(root, 'workspace'),
+    workingDirectory,
+    ...(workspace === undefined
+      ? {}
+      : {
+          attachToWorkspace: (sessionId: string) => {
+            // Cosmetic grouping: the session already exists by now, and
+            // `attachSession` validates the header cwd against the workspace
+            // path. A rejection costs the row's placement, nothing else.
+            void workspace.attachSession?.(sessionId as never).catch((error: unknown) => {
+              logger.info(`session ${sessionId} not grouped under the channel workspace: ${String((error as Error)?.message ?? error)}`)
+            })
+          },
+        }),
   })
   const adapters: ChannelAdapter[] = []
   const loaded: Array<{ adapter: ChannelAdapter; disposer: () => void }> = []
@@ -219,6 +236,61 @@ function registerInteractionSeams({
       }
     }
   }
+}
+
+/**
+ * Put the channel's working directory in the GUI's project list.
+ *
+ * The GUI groups sessions under workspace records; without a record, a channel
+ * session lands in "Ungrouped" and the person has to know to expand that bucket
+ * to find their conversation (seen on the device). `create` is idempotent for a
+ * directory that already has a project, and it never touches files.
+ */
+async function registerWorkspace({
+  ctx,
+  workingDirectory,
+  logger,
+}: {
+  ctx: PluginContext
+  workingDirectory: string
+  logger: { info: (line: string) => void; warn: (line: string) => void }
+}): Promise<{ attachSession?: (sessionId: string) => Promise<void> } | undefined> {
+  type WorkspaceHandle = { id?: string; attachSession?: (sessionId: string) => Promise<void> }
+  type Registry = { create?: (dir: string, title?: string) => Promise<unknown> }
+  const register = async (registry: Registry | undefined): Promise<WorkspaceHandle | undefined> => {
+    if (typeof registry?.create !== 'function') {
+      logger.info('workspace registry not available on this host: channel sessions stay ungrouped')
+      return undefined
+    }
+    try {
+      const created = (await registry.create(workingDirectory, 'Channels')) as WorkspaceHandle | undefined
+      logger.info(`workspace registered for ${workingDirectory}`)
+      return created
+    } catch (error) {
+      // A directory that vanished or a rejected record costs the grouping,
+      // never the channel.
+      logger.warn(`workspace registration failed for ${workingDirectory}: ${String((error as Error)?.message ?? error)}`)
+      return undefined
+    }
+  }
+  // `ctx.inject` is the documented way to reach an optional service: the
+  // callback runs only when the host provides it. `ctx.get` is the fallback for
+  // a bare context (tests, a headless host).
+  const inject = (ctx as { inject?: (services: string[], callback: (scope: { workspaceRegistry?: Registry }) => unknown) => unknown }).inject
+  if (typeof inject === 'function') {
+    try {
+      // The callback runs asynchronously once the service exists; the handle is
+      // awaited through a promise so startup still returns after registration.
+      return await new Promise<WorkspaceHandle | undefined>((resolve) => {
+        inject.call(ctx, ['workspaceRegistry'], (scope) => {
+          void register(scope.workspaceRegistry).then(resolve, () => resolve(undefined))
+        })
+      })
+    } catch {
+      // Fall through to `get`.
+    }
+  }
+  return register(ctx.get?.('workspaceRegistry') as Registry | undefined)
 }
 
 export async function apply(ctx: PluginContext, raw: Partial<ChannelsConfig> = {}): Promise<() => Promise<void>> {

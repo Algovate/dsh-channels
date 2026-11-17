@@ -33,6 +33,8 @@ export interface RuntimeOptions {
   workingDirectory: string
   createUserMessage?: (fields: Record<string, unknown>) => unknown
   now?: () => number
+  /** Put a channel session in the host's workspace grouping (once per session). */
+  attachToWorkspace?: (sessionId: string) => void
 }
 
 export class ChannelsRuntime {
@@ -46,6 +48,8 @@ export class ChannelsRuntime {
   readonly #interactions: InteractionQueue
   /** session id → the conversation it answers for; the interaction seams need it. */
   readonly #targets = new Map<string, Target>()
+  /** Sessions already reported to the host's workspace grouping. */
+  readonly #grouped = new Set<string>()
   readonly #stopTimers: Array<() => void> = []
 
   constructor(options: RuntimeOptions) {
@@ -73,6 +77,14 @@ export class ChannelsRuntime {
         return `${who.slice(0, 12)}: ${words}`
       },
       onAttach: (target, sessionId) => {
+        if (!this.#grouped.has(sessionId)) {
+          this.#grouped.add(sessionId)
+          try {
+            this.#options.attachToWorkspace?.(sessionId)
+          } catch {
+            // Grouping is cosmetic; a callback cannot fail a turn.
+          }
+        }
         // Keep only the addressing fields: a Target is what the seams need, and
         // holding the whole message would keep its text (and media paths) alive.
         this.#targets.set(sessionId, {

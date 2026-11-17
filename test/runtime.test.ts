@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 
 import { createFakeAdapter, createChannelsRuntime } from './runtime-helper.js'
+import { resolveConfig as resolveConfigForTest } from '../packages/core/src/config.js'
 import { sessionIdFor } from '../packages/core/src/ids.js'
 import { createHarness, inbound } from './harness.js'
 
@@ -204,4 +205,75 @@ test('autoSendFiles:false keeps the turn text-only', async () => {
   await tick(200)
   assert.equal(adapter.sent.some((entry) => (entry.outgoing.media ?? []).length > 0), false)
   runtime.dispose()
+})
+
+test('the channel working directory is registered as a workspace when the host has one', async () => {
+  const created: Array<{ dir: string; title?: string }> = []
+  const h = createHarness({ reply: '在' })
+  const ctx = {
+    get: (name: string) => {
+      if (name === 'agents') return h.agentsService
+      if (name === 'workspaceRegistry') {
+        return {
+          create: async (dir: string, title?: string) => {
+            created.push({ dir, ...(title === undefined ? {} : { title }) })
+            return { id: 'w1' }
+          },
+        }
+      }
+      return undefined
+    },
+  }
+  const { startChannels } = await import('../packages/core/src/index.js')
+  const plugin = await startChannels({ ctx, config: resolveConfigForTest({ adapters: [] }) })
+  assert.equal(created.length, 1)
+  assert.match(created[0]?.dir ?? '', /workspace$/)
+  assert.equal(created[0]?.title, 'Channels')
+  await plugin.dispose()
+})
+
+test('a workspace registry that throws costs the grouping, not the plugin', async () => {
+  const h = createHarness({ reply: '在' })
+  const ctx = {
+    get: (name: string) => {
+      if (name === 'agents') return h.agentsService
+      if (name === 'workspaceRegistry') {
+        return {
+          create: async () => {
+            throw new Error('not permitted')
+          },
+        }
+      }
+      return undefined
+    },
+  }
+  const { startChannels } = await import('../packages/core/src/index.js')
+  const plugin = await startChannels({ ctx, config: resolveConfigForTest({ adapters: [] }) })
+  assert.ok(plugin !== undefined)
+  await plugin.dispose()
+})
+
+test('the first turn attaches its session to the channel workspace', async () => {
+  const attached: string[] = []
+  const h = createHarness({ reply: '在' })
+  const workspace = { id: 'w1', attachSession: async (sessionId: string) => { attached.push(sessionId) } }
+  const ctx = {
+    get: (name: string) => {
+      if (name === 'agents') return h.agentsService
+      if (name === 'workspaceRegistry') return { create: async () => workspace }
+      return undefined
+    },
+  }
+  const { startChannels } = await import('../packages/core/src/index.js')
+  const plugin = await startChannels({
+    ctx,
+    config: resolveConfigForTest({ adapters: [], allowedSenders: ['sender'] }),
+  })
+  // The adapter is not started (no credentials in a temp root); drive the
+  // runtime directly, which is what an inbound message does.
+  plugin.runtime.register(createFakeAdapter())
+  plugin.runtime.dispatch(inbound())
+  await tick(200)
+  assert.deepEqual(attached, [sessionIdFor({ channel: 'fake', accountId: 'acct', conversationId: 'conv' })])
+  await plugin.dispose()
 })

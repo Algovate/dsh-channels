@@ -102,7 +102,22 @@ badges: "WeChat 用 ask_user_question 让我选一个：咖啡还是茶？…"
 console: 无 @rodin/dsh-channels 相关告警
 ```
 
-### 这一层踩到的三个坑
+### 工作区分组（M3b 已完成）
+
+插件启动时用 `ctx.inject(['workspaceRegistry'], …)` 登记一个叫「Channels」的工作区
+（`workspaceRegistry.create(dir, title)` 对已有目录幂等），并在会话**首次附着**时调
+`workspace.attachSession(sessionId)` 把已存在的会话挂进去——注册表只在建表时做历史归组，
+已存在的会话不会自动补挂。真机结果：
+
+```
+workspace.json → Channels sessions: ['chan-weixin-1421e1b70d9e4eef']
+GUI 侧栏 → Channels 分组展开后出现 "o9cq807BqQ0x: proceed"，点开渲染 19 条微信气泡
+```
+
+顺带修掉一个真 bug：`startChannels` 之前**忽略了 `config.workingDirectory`**（写死状态目录下的
+`workspace`），所以上一轮"改到默认工作区"的实验其实没生效。
+
+### 这一层踩到的几个坑
 
 1. **`apply` 必须返回 disposer 函数**：我先把 `ctx.inject(...)` 的返回值直接返回，boot 直接
    拒绝整个客户端（`TypeError: Invalid effect`，只有一行 console 日志，页面看起来一切正常）。
