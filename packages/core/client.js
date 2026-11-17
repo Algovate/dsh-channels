@@ -32,6 +32,7 @@ window.__ModuleLoader__.load({
     /** The channels this row knows how to label. */
     const CHANNELS = [
       { id: 'weixin', row: 'weixin-user', badge: { en: 'WeChat', zh: '微信' }, accent: '#07C160', accentSoft: 'rgba(7, 193, 96, 0.12)' },
+      { id: 'telegram', row: 'telegram-user', badge: { en: 'Telegram', zh: '电报' }, accent: '#2AABEE', accentSoft: 'rgba(42, 171, 238, 0.12)' },
     ]
 
     const byKind = new Map(CHANNELS.map((channel) => [channel.id, channel]))

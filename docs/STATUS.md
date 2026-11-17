@@ -177,6 +177,25 @@ POST origin=http://evil.example → 403 {"code":"origin"}
 3. 静态 `import` 一个可选 peer 会让 `tsc -b` 在没装的构建里失败；把 specifier 写进变量再
    `await import(name)`，类型上就只需要自己的接口。
 
+## M5：第二个适配器（Telegram）
+
+`packages/adapter-telegram`（`@rodin/dsh-channels-telegram`）—— 与微信适配器**不共享任何一行代码**，
+核心也没为它改一行。这就是"适配器只是翻译层"这个说法的证据。
+
+| 部分 | 内容 |
+|---|---|
+| 传输 | Bot API 长轮询（`getUpdates` + offset，webhook 需要公网 HTTPS，家用网络没有）；`sendMessage`、`sendPhoto/sendVideo/sendDocument`（multipart）、`getFile` 下载、`sendChatAction` typing；`fetchImpl` 可注入，所以一次轮询能在测试里单步 |
+| 归一化 | 私聊/群聊、photo 只取最大尺寸、document/voice/audio/video 带 mime、**拒绝**编辑消息、频道广播、bot 自己的消息和空消息 |
+| 交互 | 编号式（与微信一致）：`render` 生成 `1. …`，`parse` 接受全角数字 |
+| 失败策略 | 每次发送都返回结果不抛异常；429 带 `retryAfterMs`；轮询失败退避 3s |
+
+真机**未验**：需要一个 bot token（`adapterConfig["@rodin/dsh-channels-telegram"].token`）。
+代码层面的证据是 11 条适配器测试 + 契约测试（同一份 `ChannelAdapter` 契约被核心接受，
+`render/parse` 的编号行为一致，缺 token 时是清晰报错而不是半启动）。
+
+客户端也认识它了：`CHANNELS` 表里加了 `telegram`（行 `telegram-user`，徽标「Telegram／电报」）。
+这张表是唯一需要为新适配器改动的地方——因为浏览器看不到宿主的注册（见 M3 那条限制）。
+
 ## 已知边界
 
 - 语音**微信端到端**未验：ASR 引擎与桥在 mini 上已单独验证（见下），但用户发出的一条语音没有到达 iLink。

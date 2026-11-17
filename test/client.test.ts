@@ -99,11 +99,13 @@ test('the row claims weixin user messages exclusively and nothing else', async (
     },
   })
   assert.equal(typeof dispose, 'function', 'apply must return a disposer function, not the injection handle')
-  assert.equal(definitions.length, 1)
+  assert.equal(definitions.length, 2, 'one row per known channel')
+  const weixin = definitions.find((definition) => definition.kind === 'weixin-user')
+  assert.ok(weixin !== undefined)
   assert.equal(definitions[0]?.kind, 'weixin-user')
   assert.equal(definitions[0]?.target, 'chat')
 
-  const match = definitions[0]?.match as (event: unknown) => Record<string, any> | null
+  const match = weixin?.match as (event: unknown) => Record<string, any> | null
   assert.deepEqual(match({ type: 'user/message', data: { id: 'm1', source: { kind: 'weixin', conversationId: 'c' } } }), {
     id: 'm1',
     role: 'start',
@@ -114,9 +116,11 @@ test('the row claims weixin user messages exclusively and nothing else', async (
 
   assert.equal(seats[0]?.name, 'conversation.chat.node')
   assert.equal(seats[0]?.key, 'weixin-user')
+  const telegram = definitions.find((definition) => definition.kind === 'telegram-user')
+  assert.ok(telegram !== undefined, 'the second channel gets its own row')
   assert.equal(typeof dispose, 'function')
   dispose?.()
-  assert.equal(definitions.length, 1, 'registration happened once')
+  assert.equal(definitions.length, 2, 'registration happened once')
   })
 })
 
@@ -142,7 +146,8 @@ test('the renderer shows the channel badge, the sender and the words', async () 
   const renderer = renderers[0]
   assert.ok(renderer !== undefined)
 
-  const start = definitions[0]?.start as (context: unknown, match: unknown) => Record<string, any>
+  const weixinDefinition = definitions.find((definition) => definition.kind === 'weixin-user')
+  const start = weixinDefinition?.start as (context: unknown, match: unknown) => Record<string, any>
   const data = start({}, { event: { data: { content: [{ type: 'text', text: '你好' }], source: { kind: 'weixin', senderId: 'abcdefghijklmnop@im.wechat', group: false } } } })
   const node = renderer({ node: { data } })
   const text = JSON.stringify(node)

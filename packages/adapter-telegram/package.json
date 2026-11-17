@@ -1,0 +1,33 @@
+{
+  "name": "@rodin/dsh-channels-telegram",
+  "version": "0.1.0",
+  "description": "Telegram Bot API channel adapter for @rodin/dsh-channels. Text, photos, documents and video.",
+  "type": "module",
+  "license": "MIT",
+  "engines": {
+    "node": ">=22.13.0"
+  },
+  "main": "dist/src/index.js",
+  "types": "dist/src/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/src/index.d.ts",
+      "default": "./dist/src/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -b"
+  },
+  "peerDependencies": {
+    "@rodin/dsh-channels": "*"
+  },
+  "peerDependenciesMeta": {
+    "@rodin/dsh-channels": {
+      "optional": true
+    }
+  }
+}

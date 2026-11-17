@@ -11,7 +11,7 @@
     "node": ">=22.13.0"
   },
   "scripts": {
-    "build": "tsc -b packages/core packages/adapter-weixin",
+    "build": "tsc -b packages/core packages/adapter-weixin packages/adapter-telegram",
     "clean": "rm -rf packages/*/dist packages/*/*.tsbuildinfo dist-test",
     "test:build": "tsc -p tsconfig.test.json",
     "test": "npm run build && npm run test:build && node --test --test-concurrency=4 \"dist-test/test/**/*.test.js\"",
