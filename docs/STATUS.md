@@ -1,7 +1,11 @@
 # 状态 · M0 + M1（0.1.0）
 
 - 日期：2026-11-17
-- 结论：**M0 真机通过**（文字往返、重启 resume）；**M1 提问真机通过**（agent 调 `ask_user_question` → 微信收到编号问题 → 回 `1` → 同一个回合继续，宿主记录的 tool result 是 `{"answers":[{"id":"drink","selected":["1"]}]}`）；审批的队列/竞速/失败关闭有单测，真机待验。
+- 结论：**M0 真机通过**（文字往返、重启 resume）；**M1 提问与审批都真机通过**：
+  - 提问：agent 调 `ask_user_question` → 微信收到编号问题 → 回 `1` → 同一个回合继续，宿主记录的 tool result 是
+    `{"answers":[{"id":"drink","selected":["1"]}]}`；
+  - 审批：`bash` 申请写桌面文件 → 微信收到「需要批准」→ 回 `1` → 工具真的执行，
+    `~/Desktop/channels-approval-test.txt` 出现，回合在 14.3s 时正常结束。
 - 范围：文字 + 交互。媒体、GUI 卡片、Chat 行、存储域迁移仍在后续里程碑（见 DESIGN §12）。
 
 ## 已实现

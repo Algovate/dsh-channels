@@ -173,31 +173,39 @@ function registerInteractionSeams({
   offs.push(
     ctx.on(
       'user-questions/request',
-      ((request: { agent?: unknown; questions?: unknown[]; signal?: AbortSignal }, next: () => Promise<unknown>) =>
-        answerUserQuestion({
+      ((request: { agent?: unknown; questions?: unknown[]; signal?: AbortSignal }, next: () => Promise<unknown>) => {
+        const target = runtime.targetForAgent(request?.agent)
+        // One line per seam call: "the listener never ran" and "it ran for a
+        // session this channel does not own" look identical from the phone.
+        logger.info(`user-questions/request: target=${target === undefined ? 'none' : `${target.channel}|${target.conversationId}`}`)
+        return answerUserQuestion({
           queue: runtime.interactions,
-          target: runtime.targetForAgent(request?.agent),
+          target,
           questions: (Array.isArray(request?.questions) ? request.questions : []) as AskUserQuestionItem[],
           request: request ?? {},
           next,
           enabled: config.questionsEnabled,
           logger,
-        })) as never,
+        })
+      }) as never,
       { prepend: true, global: true },
     ),
   )
   offs.push(
     ctx.on(
       'approval/request',
-      ((request: { agent?: unknown; toolName?: string; reason?: string; displayReason?: unknown; signal?: AbortSignal }, next: () => Promise<unknown>) =>
-        answerApproval({
+      ((request: { agent?: unknown; toolName?: string; reason?: string; displayReason?: unknown; signal?: AbortSignal }, next: () => Promise<unknown>) => {
+        const target = runtime.targetForAgent(request?.agent)
+        logger.info(`approval/request: tool=${String(request?.toolName ?? '?')} target=${target === undefined ? 'none' : `${target.channel}|${target.conversationId}`}`)
+        return answerApproval({
           queue: runtime.interactions,
-          target: runtime.targetForAgent(request?.agent),
+          target,
           request: request ?? {},
           next,
           enabled: config.approvalsEnabled,
           logger,
-        })) as never,
+        })
+      }) as never,
       { prepend: true, global: true },
     ),
   )
