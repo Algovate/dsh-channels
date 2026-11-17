@@ -68,6 +68,7 @@ export function createChannelsRuntime({
   maxTurnWaitMs,
   pollMs,
   workingDirectory,
+  stateRoot,
 }: {
   ctx: { get?: (name: string) => unknown }
   config?: Partial<ChannelsConfig>
@@ -75,6 +76,7 @@ export function createChannelsRuntime({
   maxTurnWaitMs?: number
   pollMs?: number
   workingDirectory?: string
+  stateRoot?: string
 }): ChannelsRuntime {
   const resolved = resolveConfig({
     maxTurnWaitMs: maxTurnWaitMs ?? 2000,
@@ -87,7 +89,7 @@ export function createChannelsRuntime({
     ctx,
     config: resolved,
     logger: { info: () => {}, warn: () => {} },
-    stateRoot: fs.mkdtempSync(path.join(os.tmpdir(), 'channels-test-')),
+    stateRoot: stateRoot ?? fs.mkdtempSync(path.join(os.tmpdir(), 'channels-test-')),
     workingDirectory: workingDirectory ?? fs.mkdtempSync(path.join(os.tmpdir(), 'channels-ws-')),
     createUserMessage: createUserMessage ?? createFakeUserMessage,
   })

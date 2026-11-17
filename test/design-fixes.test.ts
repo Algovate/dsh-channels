@@ -105,7 +105,7 @@ test('attachment failure is reported to the chat and empty output directories ar
   runtime.register(adapter)
   runtime.dispatch(inbound())
   await tick()
-  assert.match(adapter.sent[0]?.outgoing.text ?? '', /\/status/)
+  assert.ok(adapter.sent.some((entry) => entry.outgoing.text?.includes('/status')))
   assert.deepEqual(fs.readdirSync(root), [])
   await runtime.dispose()
   fs.rmSync(root, { recursive: true })

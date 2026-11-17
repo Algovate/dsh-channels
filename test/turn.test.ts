@@ -19,8 +19,9 @@ test('a conversation resumes its own session instead of creating a second one', 
   runtime.dispatch(inbound())
   await new Promise((resolve) => setTimeout(resolve, 200))
   assert.equal(h.created.length, 1, 'one session was created')
-  assert.equal(adapter.sent.length, 1)
-  assert.equal(adapter.sent[0]?.outgoing.text, '在')
+  const replies = adapter.sent.filter((entry) => entry.outgoing.kind === 'reply')
+  assert.equal(replies.length, 1)
+  assert.equal(replies[0]?.outgoing.text, '在')
   runtime.dispose()
 })
 

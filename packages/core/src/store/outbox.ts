@@ -14,6 +14,7 @@ import { atomicWriteJson, readJsonFile } from './atomic.js'
 
 export interface OutboxEntry {
   id: string
+  taskId?: string
   target: { channel: string; accountId: string; conversationId: string }
   outgoing: { text?: string; kind: 'reply' | 'notice' | 'question' }
   /** Unsent parts of the same reply; older entries have no tail. */
@@ -65,7 +66,7 @@ export class Outbox {
   }
 
   /** Append a failed send. Oldest entries are dropped once the bound is reached. */
-  add(target: OutboxEntry['target'], outgoing: OutboxEntry['outgoing'], result: { code?: string; id?: string; remaining?: string[] }): OutboxEntry | undefined {
+  add(target: OutboxEntry['target'], outgoing: OutboxEntry['outgoing'], result: { code?: string; id?: string; remaining?: string[]; taskId?: string }): OutboxEntry | undefined {
     const text = outgoing.text ?? ''
     if (text.trim() === '' || outgoing.kind !== 'reply') return undefined
     const items = this.#read()
@@ -74,6 +75,7 @@ export class Outbox {
       id: result.id ?? `out-${this.#now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
       target,
       outgoing,
+      ...(result.taskId === undefined ? {} : { taskId: result.taskId }),
       ...(result.remaining === undefined || result.remaining.length === 0 ? {} : { remaining: result.remaining }),
       attempts: 0,
       nextAt: this.#now() + backoffMs(1),
@@ -151,7 +153,7 @@ export class Outbox {
 function validEntry(value: unknown): value is OutboxEntry {
   if (value === null || typeof value !== 'object') return false
   const entry = value as Partial<OutboxEntry>
-  return typeof entry.id === 'string' && entry.target !== null && typeof entry.target === 'object'
+  return typeof entry.id === 'string' && (entry.taskId === undefined || typeof entry.taskId === 'string') && entry.target !== null && typeof entry.target === 'object'
     && ['channel', 'accountId', 'conversationId'].every((key) => typeof entry.target![key as keyof OutboxEntry['target']] === 'string')
     && entry.outgoing?.kind === 'reply' && typeof entry.outgoing.text === 'string'
     && typeof entry.attempts === 'number' && Number.isFinite(entry.attempts) && entry.attempts >= 0

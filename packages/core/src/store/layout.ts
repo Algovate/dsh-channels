@@ -56,7 +56,14 @@ export const STATE_LAYOUT: Readonly<Record<string, LayoutEntry>> = Object.freeze
     relative: 'inbox.json',
     label: '未开始的入站消息',
     store: STORE.FILE,
-    reason: '先原子保存再确认平台投递；回合开始前移出，重启仅恢复排队消息',
+    reason: '先原子保存再确认平台投递；重启仅恢复排队消息，清除回执保留三天防止重投',
+  },
+  tasks: {
+    kind: 'file',
+    relative: 'tasks.json',
+    label: '每聊天最近任务状态',
+    store: STORE.FILE,
+    reason: '只保存任务摘要与执行和投递状态；重启不重放已开始的任务',
   },
   outbox: {
     kind: 'file',

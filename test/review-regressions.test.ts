@@ -35,8 +35,8 @@ test('automatic attachments ignore recent files in the shared workspace', async 
   runtime.register(adapter)
   runtime.dispatch(inbound())
   await delay(30)
-  assert.equal(adapter.sent.length, 1)
-  assert.equal(adapter.sent[0]?.outgoing.media, undefined)
+  assert.equal(adapter.sent.filter((entry) => entry.outgoing.kind === 'reply').length, 1)
+  assert.ok(adapter.sent.every((entry) => entry.outgoing.media === undefined))
   runtime.dispose()
 })
 
@@ -271,8 +271,8 @@ test('the per-turn output directory cannot be replaced by a link to another dire
   runtime.register(adapter)
   runtime.dispatch(inbound())
   await delay(50)
-  assert.equal(adapter.sent.length, 1)
-  assert.equal(adapter.sent[0]?.outgoing.media, undefined)
+  assert.equal(adapter.sent.filter((entry) => entry.outgoing.kind === 'reply').length, 1)
+  assert.ok(adapter.sent.every((entry) => entry.outgoing.media === undefined))
   runtime.dispose()
 })
 
@@ -295,7 +295,7 @@ test('/status does not disclose another conversation’s queued sends or pending
   runtime.dispatch(inbound({ conversationId: 'other', text: '/status' }))
   const status = adapter.sent.at(-1)?.outgoing.text ?? ''
   assert.match(status, /待重发：0/)
-  assert.match(status, /等待答复：无/)
+  assert.doesNotMatch(status, /等待审批|提示发送中|Approval/)
   runtime.dispose()
   await retired
 })

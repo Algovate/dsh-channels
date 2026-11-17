@@ -18,7 +18,7 @@ import { statePath } from './layout.js'
 import fs from 'node:fs'
 import path from 'node:path'
 import { sameTarget } from '../ids.js'
-import type { Target } from '../types.js'
+import type { Outgoing, Target } from '../types.js'
 
 export interface JournalLine {
   at: number
@@ -136,11 +136,12 @@ export class Journal {
    * reported as `pending` — the only honest answer for a send that never
    * finished.
    */
-  outbound(at = this.#now(), target?: Target): Array<{ id: string; text: string; state: 'accepted' | 'unconfirmed' | 'failed' | 'pending'; code?: string }> {
+  outbound(at = this.#now(), target?: Target, kind?: Outgoing['kind']): Array<{ id: string; text: string; state: 'accepted' | 'unconfirmed' | 'failed' | 'pending'; code?: string }> {
     const byId = new Map<string, { id: string; text: string; state: 'accepted' | 'unconfirmed' | 'failed' | 'pending'; code?: string }>()
     for (const line of this.read(at)) {
       if (line.direction !== 'out') continue
       if (target !== undefined && !sameTarget(line, target)) continue
+      if (kind !== undefined && line.kind !== kind) continue
       if (line.phase === 'sending') {
         byId.delete(line.id)
         byId.set(line.id, { id: line.id, text: line.text ?? '', state: 'pending' })

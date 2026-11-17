@@ -37,18 +37,24 @@ test('/whoami answers with the ids an allowlist needs, and starts no turn', asyn
   runtime.dispose()
 })
 
-test('/status reports the live health of the channel', async () => {
-  const h = createHarness({ reply: '在' })
-  const runtime = createChannelsRuntime({ ctx: h.ctx, config: { allowedSenders: ['sender'] } })
+test('/status groups mobile information and keeps only recent results', async () => {
+  const runtime = createHarness().makeRuntime()
   const adapter = createFakeAdapter()
   runtime.register(adapter)
-  runtime.dispatch(inbound({ text: '/status' }))
-  await tick(50)
-  const text = adapter.sent.find((entry) => entry.outgoing.kind === 'notice')?.outgoing.text ?? ''
-  assert.match(text, /通道：fake/)
-  assert.match(text, /允许的发送者：1/)
-  assert.match(text, /待重发：0/)
-  runtime.dispose()
+  try {
+    const target = inbound()
+    await runtime.send(target, { kind: 'reply', text: '第一行\n第二行' })
+    await runtime.send(target, { kind: 'reply', text: '第一行\n第二行' })
+    await runtime.send(target, { kind: 'notice', text: '已接收，准备处理。' })
+    runtime.dispatch(inbound({ text: '/status' }))
+    runtime.dispatch(inbound({ text: '/status' }))
+    await tick(50)
+    const text = adapter.sent.at(-1)?.outgoing.text ?? ''
+    assert.match(text, /^【任务状态 · fake】\n\n当前任务：无\n\n【队列】排队：0 条　｜　待重发：0 条/)
+    assert.match(text, /\n\n【最近结果】\n\n· 已发送｜第一行 第二行（2 条）$/)
+    assert.doesNotMatch(text, /状态目录|允许的发送者|accepted|已接收/)
+    assert.equal(text.match(/【任务状态/g)?.length, 1)
+  } finally { await runtime.dispose() }
 })
 
 test('/new moves the conversation to a new session line, and the old line is untouched', async () => {
@@ -64,7 +70,7 @@ test('/new moves the conversation to a new session line, and the old line is unt
 
   runtime.dispatch(inbound({ text: '/new' }))
   await tick(50)
-  const confirmation = adapter.sent.find((entry) => entry.outgoing.kind === 'notice')?.outgoing.text ?? ''
+  const confirmation = adapter.sent.find((entry) => entry.outgoing.kind === 'notice' && entry.outgoing.text?.includes('开新会话'))?.outgoing.text ?? ''
   assert.match(confirmation, /开新会话/)
 
   runtime.dispatch(inbound({ text: '再来' }))

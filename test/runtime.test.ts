@@ -1,5 +1,18 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
+import fs from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
+
+// Plugin integration tests must not consume quotas or write task state in the user's profile.
+const previousStateRoot = process.env.DSH_CHANNELS_STATE_DIR
+const pluginStateRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'channels-plugin-test-'))
+process.env.DSH_CHANNELS_STATE_DIR = pluginStateRoot
+test.after(() => {
+  if (previousStateRoot === undefined) delete process.env.DSH_CHANNELS_STATE_DIR
+  else process.env.DSH_CHANNELS_STATE_DIR = previousStateRoot
+  fs.rmSync(pluginStateRoot, { recursive: true, force: true })
+})
 
 import { createFakeAdapter, createChannelsRuntime } from './runtime-helper.js'
 import { resolveConfig as resolveConfigForTest } from '../packages/core/src/config.js'
@@ -30,10 +43,10 @@ test('an allowed message becomes a turn and its reply goes back through the adap
   runtime.register(adapter)
   runtime.dispatch(inbound())
   await tick(150)
-  assert.equal(adapter.sent.length, 1)
-  assert.equal(adapter.sent[0]?.outgoing.text, '收到')
-  assert.equal(adapter.sent[0]?.outgoing.kind, 'reply')
-  assert.equal(adapter.sent[0]?.target.conversationId, 'conv')
+  const replies = adapter.sent.filter((entry) => entry.outgoing.kind === 'reply')
+  assert.equal(replies.length, 1)
+  assert.equal(replies[0]?.outgoing.text, '收到')
+  assert.equal(replies[0]?.target.conversationId, 'conv')
   runtime.dispose()
 })
 
@@ -44,7 +57,7 @@ test('a long reply is split to the channel\'s limit', async () => {
   runtime.register(adapter)
   runtime.dispatch(inbound())
   await tick(150)
-  assert.equal(adapter.sent.length, 3)
+  assert.equal(adapter.sent.filter((entry) => entry.outgoing.kind === 'reply').length, 3)
   assert.ok(adapter.sent.every((entry) => (entry.outgoing.text ?? '').length <= 10))
   runtime.dispose()
 })

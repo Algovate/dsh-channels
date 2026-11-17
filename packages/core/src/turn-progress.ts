@@ -18,6 +18,7 @@ export class TurnProgress {
   #matchingTurn: number | undefined
   #inboxIndex: number | undefined
   #text = ''
+  cancelled = false
   result: { text: string; failed?: boolean } | undefined
 
   readonly messageId: string
@@ -46,7 +47,7 @@ export class TurnProgress {
           if (index >= 0) this.#inboxIndex = start + index
           else if (this.#inboxIndex !== undefined && start <= this.#inboxIndex) {
             if (this.#inboxIndex < start + removed) {
-              if (data['outcome'] === 'canceled') { this.result = { text: '', failed: true }; return }
+              if (data['outcome'] === 'canceled') { this.cancelled = true; this.result = { text: '', failed: true }; return }
               this.#matchingTurn = this.#activeTurn
               this.#inboxIndex = undefined
             } else this.#inboxIndex += inserted.length - removed
@@ -62,7 +63,7 @@ export class TurnProgress {
           if (this.#matchingTurn === undefined || turn !== this.#matchingTurn) break
           const reason = data?.['reason'] as { kind?: string; error?: { message?: unknown } } | undefined
           if (reason?.kind === 'completed' || (reason?.kind === 'max-tokens' && this.#text !== '')) this.result = { text: this.#text }
-          else if (reason?.kind === 'aborted') this.result = { text: '', failed: true }
+          else if (reason?.kind === 'aborted') { this.cancelled = true; this.result = { text: '', failed: true } }
           else this.result = { text: typeof reason?.error?.message === 'string' ? reason.error.message : '回合失败', failed: true }
           return
         }

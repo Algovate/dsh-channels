@@ -55,6 +55,9 @@ export interface TurnReply {
   text: string
   sessionId: string
   failed?: boolean
+  cancelled?: boolean
+  interrupted?: boolean
+  settled?: boolean
 }
 
 export interface TurnContextBlock {
@@ -103,7 +106,7 @@ export class TurnDriver {
   readonly #options: TurnDriverOptions
   readonly #attached = new Map<string, Attached>()
   readonly #owned = new Set<AgentHandle>()
-  readonly #running = new Map<AgentHandle['agent'], { message: InboundMessage; progress: TurnProgress; signal: AbortSignal }>()
+  readonly #running = new Map<AgentHandle['agent'], { message: InboundMessage; progress: TurnProgress; signal: AbortSignal; removed: boolean }>()
   #disposed = false
   readonly #shutdown = new AbortController()
 
@@ -292,14 +295,35 @@ export class TurnDriver {
     const deadline = new AbortController()
     const signal = AbortSignal.any([deadline.signal, this.#shutdown.signal, ...(request.signal === undefined ? [] : [request.signal])])
     const timer = setTimeout(() => deadline.abort(new Error('the turn timed out')), this.#options.maxTurnWaitMs ?? 20 * 60_000)
+    const lifecycle: { submitted: boolean; result?: TurnReply } = { submitted: false }
+    let cancellation: Promise<TurnReply> | undefined
     let onAbort!: () => void
     const aborted = new Promise<TurnReply>((resolve) => {
-      onAbort = () => resolve({ text: '回合已取消或超时', failed: true, sessionId: request.sessionId ?? sessionIdFor(request.message) })
+      onAbort = () => {
+        const reply = { text: '回合已取消或超时', failed: true, interrupted: true, sessionId: request.sessionId ?? sessionIdFor(request.message) }
+        if (lifecycle.result?.settled) { resolve(lifecycle.result); return }
+        if (request.signal?.reason === 'user-cancel') {
+          const running = [...this.#running.entries()].find(([, value]) => value.signal === signal)
+          cancellation = (async () => {
+            if (running === undefined) return { ...reply, cancelled: !lifecycle.submitted }
+            const [agent, state] = running
+            for (let attempt = 0; attempt < 50; attempt++) {
+              await delay(10)
+              try { state.progress.update(agent.session?.snapshotEvents?.() ?? []) } catch { break }
+              if (state.removed || state.progress.cancelled) return { ...reply, cancelled: true }
+              if (state.progress.result !== undefined) return { ...state.progress.result, sessionId: reply.sessionId, settled: true }
+            }
+            return { ...reply, cancelled: false }
+          })()
+          void cancellation.then(resolve)
+        } else resolve(reply)
+      }
       if (signal.aborted) onAbort()
       else signal.addEventListener('abort', onAbort, { once: true })
     })
     try {
-      return await Promise.race([this.#run({ ...request, signal }), aborted])
+      const result = await Promise.race([this.#run({ ...request, signal, lifecycle }), aborted])
+      return await (cancellation ?? Promise.resolve(result))
     } finally {
       clearTimeout(timer)
       deadline.abort() // Withdraw prompts on success, failure and timeout alike.
@@ -307,7 +331,7 @@ export class TurnDriver {
     }
   }
 
-  async #run(request: TurnRequest & { sessionId?: string; signal: AbortSignal }): Promise<TurnReply> {
+  async #run(request: TurnRequest & { sessionId?: string; signal: AbortSignal; lifecycle: { submitted: boolean; result?: TurnReply } }): Promise<TurnReply> {
     const { message, signal } = request
     const sessionId = request.sessionId ?? sessionIdFor(message)
     if (signal?.aborted) return { text: '', failed: true, sessionId }
@@ -359,20 +383,23 @@ export class TurnDriver {
     const before = this.#lastSeq(agent)
     if (signal?.aborted) return { text: '', failed: true, sessionId }
     const progress = new TurnProgress(before, messageId)
-    const running = { message, progress, signal }
+    const running = { message, progress, signal, removed: false }
     this.#running.set(agent, running)
     const cancel = (): void => {
       try {
         progress.update(agent.session?.snapshotEvents?.() ?? [])
         if (progress.ownsActiveTurn) agent.cancel?.({ kind: 'user' }, { keepInbox: true })
-        else if (progress.result === undefined) agent.inbox?.remove?.(messageId)
+        else if (progress.result === undefined) running.removed = agent.inbox?.remove?.(messageId) === true
       } catch (error) { this.logger.warn(`could not cancel channel input: ${String(error)}`) }
     }
     signal.addEventListener('abort', cancel, { once: true })
     try {
+      request.lifecycle.submitted = true
       agent.followup(input)
       const reply = await this.#awaitReply(agent, progress, signal)
-      return { ...reply, sessionId }
+      const result = { ...reply, sessionId, settled: progress.result !== undefined }
+      request.lifecycle.result = result
+      return result
     } finally {
       signal.removeEventListener('abort', cancel)
       if (this.#running.get(agent) === running) this.#running.delete(agent)
