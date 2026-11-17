@@ -5,14 +5,14 @@
 # add a second loader row (and uninstalling one cannot leave a dangling row).
 - insert:
     - id: dsh-channels
-      name: '@rodin/dsh-channels'
+      name: '@derekluo/dsh-channels'
       config:
         # Empty allowlist = deny everyone. Fill in the sender id(s) you answer to.
         allowedSenders: []
         # Adapter packages, in load order. Remove one to disable that channel.
         adapters:
-          - '@rodin/dsh-channels-weixin'
+          - '@derekluo/dsh-channels-weixin'
         maxTextChars: 600
         bubbleGapMs: 400
         maxTurnWaitMs: 1200000
-      disabled: !!js "[...ctx.loader.entries()].some((e) => e.options.name === '@rodin/dsh-channels' && e.options.id !== 'dsh-channels' && !e.disabled)"
+      disabled: !!js "[...ctx.loader.entries()].some((e) => e.options.name === '@derekluo/dsh-channels' && e.options.id !== 'dsh-channels' && !e.disabled)"

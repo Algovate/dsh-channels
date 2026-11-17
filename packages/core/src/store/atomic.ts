@@ -3,7 +3,7 @@
  * failure is a value, not a crash: a channel plugin must not lose a turn to a
  * half-written JSON file.
  *
- * @module @rodin/dsh-channels/store/atomic
+ * @module @derekluo/dsh-channels/store/atomic
  */
 import fs from 'node:fs'
 import path from 'node:path'

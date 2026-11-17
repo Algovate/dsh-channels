@@ -12,7 +12,7 @@
  * write is logged, never thrown into the message path — a counter that cannot be
  * saved must not refuse a person's message.
  *
- * @module @rodin/dsh-channels/store/counters
+ * @module @derekluo/dsh-channels/store/counters
  */
 import fs from 'node:fs'
 import path from 'node:path'

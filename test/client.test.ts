@@ -75,7 +75,7 @@ const react = {
 
 test('the client registers under the package id the loader expects', async () => {
   await withClient('zh-CN', (client) => {
-    assert.equal(client.id, '@rodin/dsh-channels')
+    assert.equal(client.id, '@derekluo/dsh-channels')
     assert.equal(typeof client.factory, 'function')
   })
 })
@@ -211,7 +211,7 @@ test('the card asks the host for status through the channels namespace', async (
     })
     const card = seats.find((seat) => seat.name === 'plugins.bundle.config')
     assert.ok(card !== undefined, 'the card registers in the plugin page seat')
-    assert.equal(card?.key, '@rodin/dsh-channels')
+    assert.equal(card?.key, '@derekluo/dsh-channels')
     assert.equal(typeof dispose, 'function')
     assert.equal(calls.length, 0, 'nothing is fetched until the card mounts')
   })

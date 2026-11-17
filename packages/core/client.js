@@ -21,13 +21,13 @@
  */
 
 window.__ModuleLoader__.load({
-  id: '@rodin/dsh-channels',
+  id: '@derekluo/dsh-channels',
   factory(require) {
     const React = require('react')
     const h = React.createElement
 
     /** The package id the loader and the plugin page key off. */
-    const PKG = '@rodin/dsh-channels'
+    const PKG = '@derekluo/dsh-channels'
 
     /** The channels this row knows how to label. */
     const CHANNELS = [
@@ -561,7 +561,7 @@ window.__ModuleLoader__.load({
           try {
             dispose()
           } catch (error) {
-            console.warn('@rodin/dsh-channels: chat row teardown failed', error)
+            console.warn('@derekluo/dsh-channels: chat row teardown failed', error)
           }
         }
       }
@@ -584,7 +584,7 @@ window.__ModuleLoader__.load({
           try {
             disposeRows = registerRows(scope, scope.uiConversation)
           } catch (error) {
-            console.warn('@rodin/dsh-channels: chat row not registered', error)
+            console.warn('@derekluo/dsh-channels: chat row not registered', error)
             disposeRows = () => {}
           }
         })
@@ -598,14 +598,14 @@ window.__ModuleLoader__.load({
             // the registration result on others; only a function is worth keeping.
             disposeCard = typeof disposer === 'function' ? disposer : undefined
           } catch (error) {
-            console.warn('@rodin/dsh-channels: status card not registered', error)
+            console.warn('@derekluo/dsh-channels: status card not registered', error)
           }
         })
         return () => {
           try {
             disposeRows?.()
           } catch (error) {
-            console.warn('@rodin/dsh-channels: chat row teardown failed', error)
+            console.warn('@derekluo/dsh-channels: chat row teardown failed', error)
           }
           try {
             if (typeof disposeCard === 'function') disposeCard()

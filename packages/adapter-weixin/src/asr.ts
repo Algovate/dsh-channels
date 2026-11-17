@@ -12,7 +12,7 @@
  * voice note still reaches the person as a WAV path, and the model is told the
  * audio could not be transcribed rather than being handed an empty transcript.
  *
- * @module @rodin/dsh-channels-weixin/asr
+ * @module @derekluo/dsh-channels-weixin/asr
  */
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import fs from 'node:fs'

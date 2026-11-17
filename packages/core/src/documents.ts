@@ -15,7 +15,7 @@
  *
  * Extracted text is untrusted content: the caller fences it and truncates it.
  *
- * @module @rodin/dsh-channels/documents
+ * @module @derekluo/dsh-channels/documents
  */
 import fs from 'node:fs'
 import path from 'node:path'

@@ -6,7 +6,7 @@
  * Every line is redacted first — a token that reaches a log line is a token on
  * disk.
  *
- * @module @rodin/dsh-channels/log
+ * @module @derekluo/dsh-channels/log
  */
 import fs from 'node:fs'
 import path from 'node:path'

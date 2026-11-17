@@ -5,7 +5,7 @@
  * channel plugins writing one directory would fight over the account
  * credentials and the long-poll cursor of the same WeChat account.
  *
- * @module @rodin/dsh-channels/store/root
+ * @module @derekluo/dsh-channels/store/root
  */
 import fs from 'node:fs'
 import os from 'node:os'

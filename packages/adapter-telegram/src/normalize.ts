@@ -7,9 +7,9 @@
  * refuses those explicitly rather than passing them on: the core's job is
  * turning a person's message into a turn, and a system message is not one.
  *
- * @module @rodin/dsh-channels-telegram/normalize
+ * @module @derekluo/dsh-channels-telegram/normalize
  */
-import type { InboundMedia, InboundMessage } from '@rodin/dsh-channels'
+import type { InboundMedia, InboundMessage } from '@derekluo/dsh-channels'
 
 export const CHANNEL_ID = 'telegram'
 

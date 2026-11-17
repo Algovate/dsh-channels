@@ -11,7 +11,7 @@
  * working directory belongs to the user, and a stray link could otherwise point
  * a photo of something private at a chat.
  *
- * @module @rodin/dsh-channels/produced
+ * @module @derekluo/dsh-channels/produced
  */
 import fs from 'node:fs'
 import path from 'node:path'

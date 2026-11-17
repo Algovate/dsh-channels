@@ -10,7 +10,7 @@
  * editor (`configEditor.edit`), which validates and serializes profile writes,
  * rather than through a method here that would have to reimplement it.
  *
- * @module @rodin/dsh-channels/remote
+ * @module @derekluo/dsh-channels/remote
  */
 
 export interface ChannelStatusView {

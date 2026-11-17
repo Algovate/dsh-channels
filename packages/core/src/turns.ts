@@ -19,7 +19,7 @@
  * wakeup (`session/event`) is the M1 work item; the polling interval is a
  * constant so swapping it is one place.
  *
- * @module @rodin/dsh-channels/turns
+ * @module @derekluo/dsh-channels/turns
  */
 import type { InboundMessage, Target } from './types.js'
 import { setTimeout as delay } from 'node:timers/promises'

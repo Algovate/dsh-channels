@@ -5,7 +5,7 @@
  * Read-only and never throws: a missing root, an unreadable file or a
  * permission error becomes a row, because `doctor` has to print the rest.
  *
- * @module @rodin/dsh-channels/store/inventory
+ * @module @derekluo/dsh-channels/store/inventory
  */
 import fs from 'node:fs'
 import path from 'node:path'

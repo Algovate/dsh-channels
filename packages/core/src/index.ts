@@ -10,7 +10,7 @@
  * cannot start, an expired credential — each is a warning, and the plugin stays
  * loaded so the settings card can say what is wrong.
  *
- * @module @rodin/dsh-channels
+ * @module @derekluo/dsh-channels
  */
 import fs from 'node:fs'
 import path from 'node:path'

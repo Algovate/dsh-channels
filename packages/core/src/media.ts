@@ -10,7 +10,7 @@
  *
  * The person's own words stay at the end, as the last thing the model reads.
  *
- * @module @rodin/dsh-channels/media
+ * @module @derekluo/dsh-channels/media
  */
 import type { InboundMedia, InboundMessage } from './types.js'
 

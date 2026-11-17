@@ -1,5 +1,5 @@
 {
-  "name": "@rodin/dsh-channels",
+  "name": "@derekluo/dsh-channels",
   "version": "0.1.0",
   "description": "Chat channels for DeepSeek Harness agents: turn driving, interactions, media, gates, durable state and a status card. WeChat and Telegram adapters.",
   "type": "module",

@@ -10,7 +10,7 @@
  * file-backed counter store is the documented fallback. The specifier is built
  * at runtime so TypeScript does not require a type for an uninstalled peer.
  *
- * @module @rodin/dsh-channels/store/domain
+ * @module @derekluo/dsh-channels/store/domain
  */
 
 export interface ChannelsDomainSpec {

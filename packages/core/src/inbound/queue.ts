@@ -7,7 +7,7 @@
  *  - an answer to a question runs *now*, not behind the turn that is asking it.
  *    Queueing that answer behind its own question deadlocks until the timeout.
  *
- * @module @rodin/dsh-channels/inbound/queue
+ * @module @derekluo/dsh-channels/inbound/queue
  */
 
 export interface QueueTask<T = unknown> {

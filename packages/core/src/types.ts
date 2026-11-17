@@ -6,7 +6,7 @@
  * Keeping that line sharp is what lets a second channel be a few hundred lines
  * instead of a copy of the first one.
  *
- * @module @rodin/dsh-channels/types
+ * @module @derekluo/dsh-channels/types
  */
 
 /** Stable channel id. Also the `source.kind` of a message from this channel. */

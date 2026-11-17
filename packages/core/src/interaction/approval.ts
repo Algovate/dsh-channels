@@ -11,7 +11,7 @@
  * here", so it never ends the wait while the chat still has the prompt on
  * screen. Two real decisions race; the first one wins.
  *
- * @module @rodin/dsh-channels/interaction/approval
+ * @module @derekluo/dsh-channels/interaction/approval
  */
 import type { InteractionEntry, InteractionQueue } from './queue.js'
 import type { Target } from '../types.js'

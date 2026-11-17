@@ -5,7 +5,7 @@
  * instead of opening a new one. The hash covers channel + account +
  * conversation, so two accounts that happen to share a peer id stay apart.
  *
- * @module @rodin/dsh-channels/ids
+ * @module @derekluo/dsh-channels/ids
  */
 import { createHash } from 'node:crypto'
 

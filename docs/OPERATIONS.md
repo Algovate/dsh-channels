@@ -9,10 +9,12 @@
 在终端安装核心和微信适配器。将 `default` 换成实际的 DSH profile 名：
 
 ```bash
-dsh plugin --profile default add @rodin/dsh-channels@0.1.0 @rodin/dsh-channels-weixin@0.1.0
+dsh plugin --profile default add @derekluo/dsh-channels@0.1.0 @derekluo/dsh-channels-weixin@0.1.0
 ```
 
-使用 Telegram 时，把微信适配器换成 `@rodin/dsh-channels-telegram@0.1.0`。安装后按下文配置凭证和白名单，再重启宿主。
+使用 Telegram 时，把微信适配器换成 `@derekluo/dsh-channels-telegram@0.1.0`。安装后按下文配置凭证和白名单，再重启宿主。
+
+如果安装过发布前的本地构建，请把 profile 的依赖和 bundle 列表，以及配置中的 `adapters` 与 `adapterConfig`，都改成本文中的包名。
 
 ### 从源码构建安装包
 
@@ -31,13 +33,13 @@ printf '%s\n' "$package_dir"
 ```json
 {
   "dependencies": {
-    "@rodin/dsh-channels": "file:/opt/dsh-packages/rodin-dsh-channels-0.1.0.tgz",
-    "@rodin/dsh-channels-weixin": "file:/opt/dsh-packages/rodin-dsh-channels-weixin-0.1.0.tgz",
-    "@rodin/dsh-channels-telegram": "file:/opt/dsh-packages/rodin-dsh-channels-telegram-0.1.0.tgz"
+    "@derekluo/dsh-channels": "file:/opt/dsh-packages/derekluo-dsh-channels-0.1.0.tgz",
+    "@derekluo/dsh-channels-weixin": "file:/opt/dsh-packages/derekluo-dsh-channels-weixin-0.1.0.tgz",
+    "@derekluo/dsh-channels-telegram": "file:/opt/dsh-packages/derekluo-dsh-channels-telegram-0.1.0.tgz"
   },
   "dsh": {
     "profile": {
-      "bundles": ["@rodin/dsh-channels"]
+      "bundles": ["@derekluo/dsh-channels"]
     }
   }
 }
@@ -75,9 +77,9 @@ printf '%s\n' "$package_dir"
 
 ```json
 {
-  "adapters": ["@rodin/dsh-channels-weixin"],
+  "adapters": ["@derekluo/dsh-channels-weixin"],
   "adapterConfig": {
-    "@rodin/dsh-channels-weixin": {
+    "@derekluo/dsh-channels-weixin": {
       "accountId": "REPLACE_WITH_INDEXED_ACCOUNT_ID"
     }
   }
@@ -92,9 +94,9 @@ printf '%s\n' "$package_dir"
 
 ```json
 {
-  "adapters": ["@rodin/dsh-channels-telegram"],
+  "adapters": ["@derekluo/dsh-channels-telegram"],
   "adapterConfig": {
-    "@rodin/dsh-channels-telegram": {
+    "@derekluo/dsh-channels-telegram": {
       "token": "REPLACE_WITH_BOT_TOKEN",
       "botId": "my_bot"
     }

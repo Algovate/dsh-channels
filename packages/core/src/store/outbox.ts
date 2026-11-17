@@ -5,7 +5,7 @@
  * never answered, so a failed send is written here, retried with backoff, and
  * shown as backlog. Bounded: an outbox that grows without limit is a second bug.
  *
- * @module @rodin/dsh-channels/store/outbox
+ * @module @derekluo/dsh-channels/store/outbox
  */
 import path from 'node:path'
 

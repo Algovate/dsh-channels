@@ -10,12 +10,12 @@
  * Every call is injectable (`fetchImpl`) so a test can step one poll without a
  * network, and every failure is a value: a bad poll is a bad poll, not a crash.
  *
- * @module @rodin/dsh-channels-telegram/transport
+ * @module @derekluo/dsh-channels-telegram/transport
  */
 import fs from 'node:fs'
 import path from 'node:path'
 
-import type { SendResult } from '@rodin/dsh-channels'
+import type { SendResult } from '@derekluo/dsh-channels'
 import type { TelegramUpdate } from './normalize.js'
 
 export const DEFAULT_API_BASE = 'https://api.telegram.org'

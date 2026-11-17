@@ -12,7 +12,7 @@
  *  - an unparsable reply must not consume the question — the person gets a hint
  *    and keeps the prompt.
  *
- * @module @rodin/dsh-channels/interaction/questions
+ * @module @derekluo/dsh-channels/interaction/questions
  */
 import type { InteractionEntry, InteractionQueue } from './queue.js'
 import type { Outgoing, Target } from '../types.js'

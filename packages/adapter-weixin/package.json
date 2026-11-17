@@ -1,7 +1,7 @@
 {
-  "name": "@rodin/dsh-channels-weixin",
+  "name": "@derekluo/dsh-channels-weixin",
   "version": "0.1.0",
-  "description": "Weixin (personal WeChat, iLink Bot API) channel adapter for @rodin/dsh-channels: text, images, files, video, voice transcription and document text.",
+  "description": "Weixin (personal WeChat, iLink Bot API) channel adapter for @derekluo/dsh-channels: text, images, files, video, voice transcription and document text.",
   "type": "module",
   "license": "MIT",
   "engines": {

@@ -12,7 +12,7 @@
  * plugin's day buckets. Failures to write only warn: the journal is diagnostics,
  * never the reason a message is lost.
  *
- * @module @rodin/dsh-channels/store/journal
+ * @module @derekluo/dsh-channels/store/journal
  */
 import fs from 'node:fs'
 import path from 'node:path'

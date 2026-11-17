@@ -6,9 +6,9 @@
 
 | 包 | 用途 |
 |---|---|
-| [`@rodin/dsh-channels`](packages/core) | DSH bundle：会话、权限、交互、重试、桌面状态卡片 |
-| [`@rodin/dsh-channels-weixin`](packages/adapter-weixin) | 个人微信，通过 iLink 长轮询 |
-| [`@rodin/dsh-channels-telegram`](packages/adapter-telegram) | Telegram Bot API，通过长轮询，不用配置 webhook |
+| [`@derekluo/dsh-channels`](packages/core) | DSH bundle：会话、权限、交互、重试、桌面状态卡片 |
+| [`@derekluo/dsh-channels-weixin`](packages/adapter-weixin) | 个人微信，通过 iLink 长轮询 |
+| [`@derekluo/dsh-channels-telegram`](packages/adapter-telegram) | Telegram Bot API，通过长轮询，不用配置 webhook |
 
 ## 开始使用
 
@@ -30,7 +30,7 @@
 
 命令也需要通过权限和配额检查。遇到提问时按提示回复序号或文字；审批回复 `1` 允许一次，`2` 拒绝。
 
-桌面聊天中的通道消息带有微信或 Telegram 徽标。宿主支持工作区登记时，会话归入 **Channels**；通道状态和设置在 **Plugins → @rodin/dsh-channels**。
+桌面聊天中的通道消息带有微信或 Telegram 徽标。宿主支持工作区登记时，会话归入 **Channels**；通道状态和设置在 **Plugins → @derekluo/dsh-channels**。
 
 ## 开发与参考
 

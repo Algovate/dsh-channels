@@ -13,7 +13,7 @@
  *  - a poll round is bounded from outside, because the vendor timeout covers
  *    only the fetch and a stalled body would hang the loop.
  *
- * @module @rodin/dsh-channels-weixin/transport
+ * @module @derekluo/dsh-channels-weixin/transport
  */
 import { setTimeout as delay } from 'node:timers/promises'
 
@@ -23,7 +23,7 @@ import { MessageItemType } from '../vendor/openclaw-weixin/api/types.js'
 import { sendMessageItemWeixin } from '../vendor/openclaw-weixin/messaging/send.js'
 import { sendWeixinMediaFile } from '../vendor/openclaw-weixin/messaging/send-media.js'
 import { getSyncBufFilePath, loadGetUpdatesBuf, saveGetUpdatesBuf } from '../vendor/openclaw-weixin/storage/sync-buf.js'
-import type { SendResult } from '@rodin/dsh-channels'
+import type { SendResult } from '@derekluo/dsh-channels'
 import type { RawMessage } from './normalize.js'
 
 export const SESSION_EXPIRED_ERRCODE = -14

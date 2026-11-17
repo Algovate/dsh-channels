@@ -7,7 +7,7 @@ import path from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
 import test, { type TestContext } from 'node:test'
 import { pathToFileURL } from 'node:url'
-import type { InboundMessage } from '@rodin/dsh-channels'
+import type { InboundMessage } from '@derekluo/dsh-channels'
 
 import { createAdapter } from '../packages/adapter-weixin/src/index.js'
 import { saveInboundItem } from '../packages/adapter-weixin/src/media.js'

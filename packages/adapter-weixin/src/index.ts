@@ -5,14 +5,14 @@
  * interactions and storage lives in the core, which is what makes a second
  * channel a few hundred lines instead of a copy of this file.
  *
- * @module @rodin/dsh-channels-weixin
+ * @module @derekluo/dsh-channels-weixin
  */
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import { CDN_BASE_URL, listIndexedWeixinAccountIds } from '../vendor/openclaw-weixin/auth/accounts.js'
-import type { AccountInfo, AdapterRuntime, ChannelAdapter, InboundMessage, InteractionReply, InteractionView, Outgoing, SendResult, Target } from '@rodin/dsh-channels'
+import type { AccountInfo, AdapterRuntime, ChannelAdapter, InboundMessage, InteractionReply, InteractionView, Outgoing, SendResult, Target } from '@derekluo/dsh-channels'
 import { mediaItemsOf, normalizeInbound, type NormalizedInbound, type RawMediaItem, type RawMessage } from './normalize.js'
 import { MAX_INBOUND_MEDIA, saveInboundItem } from './media.js'
 import { AsrBridge } from './asr.js'

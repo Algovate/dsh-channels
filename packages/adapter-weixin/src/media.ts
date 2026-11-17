@@ -10,7 +10,7 @@
  * Nothing here may fail a message: the person still said something in text, and
  * a photo that could not be fetched is reported as "could not be fetched".
  *
- * @module @rodin/dsh-channels-weixin/media
+ * @module @derekluo/dsh-channels-weixin/media
  */
 import { randomUUID } from 'node:crypto'
 import fs from 'node:fs/promises'
@@ -19,7 +19,7 @@ import path from 'node:path'
 import { downloadMediaFromItem } from '../vendor/openclaw-weixin/media/media-download.js'
 import { getMimeFromFilename } from '../vendor/openclaw-weixin/media/mime.js'
 import { MessageItemType } from '../vendor/openclaw-weixin/api/types.js'
-import type { InboundMedia } from '@rodin/dsh-channels'
+import type { InboundMedia } from '@derekluo/dsh-channels'
 
 /** iLink item type → the kind the core understands. */
 const ITEM_KIND: Record<number, InboundMedia['kind'] | undefined> = {

@@ -5,7 +5,7 @@
  * override) means nobody can drive the agent. Everything else has a sane
  * default so first run needs one value, not fifteen.
  *
- * @module @rodin/dsh-channels/config
+ * @module @derekluo/dsh-channels/config
  */
 import z from '@deepseek-ai/schemastery'
 

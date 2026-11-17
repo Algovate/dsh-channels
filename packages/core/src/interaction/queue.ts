@@ -12,7 +12,7 @@
  * result: a timeout or a withdrawal rejects, and the caller decides whether
  * another surface can still take over.
  *
- * @module @rodin/dsh-channels/interaction/queue
+ * @module @derekluo/dsh-channels/interaction/queue
  */
 import type { Outgoing, SendResult, Target } from '../types.js'
 

@@ -1,7 +1,7 @@
 {
-  "name": "@rodin/dsh-channels-telegram",
+  "name": "@derekluo/dsh-channels-telegram",
   "version": "0.1.0",
-  "description": "Telegram Bot API channel adapter for @rodin/dsh-channels. Text, photos, documents and video.",
+  "description": "Telegram Bot API channel adapter for @derekluo/dsh-channels. Text, photos, documents and video.",
   "type": "module",
   "license": "MIT",
   "engines": {
@@ -23,10 +23,10 @@
     "build": "tsc -b"
   },
   "peerDependencies": {
-    "@rodin/dsh-channels": "*"
+    "@derekluo/dsh-channels": "*"
   },
   "peerDependenciesMeta": {
-    "@rodin/dsh-channels": {
+    "@derekluo/dsh-channels": {
       "optional": true
     }
   },

@@ -8,10 +8,10 @@
  * Attachment descriptors are retained here so the adapter can authorize the
  * sender before downloading media.
  *
- * @module @rodin/dsh-channels-weixin/normalize
+ * @module @derekluo/dsh-channels-weixin/normalize
  */
 import { MessageItemType, MessageState, MessageType } from '../vendor/openclaw-weixin/api/types.js'
-import type { InboundMessage } from '@rodin/dsh-channels'
+import type { InboundMessage } from '@derekluo/dsh-channels'
 
 const TEXT_ITEM = MessageItemType.TEXT
 

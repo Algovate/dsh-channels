@@ -6,7 +6,7 @@
  * the user with silence. Deny-by-default is the whole security model here:
  * an empty allowlist means nobody.
  *
- * @module @rodin/dsh-channels/inbound/gates
+ * @module @derekluo/dsh-channels/inbound/gates
  */
 import type { InboundMessage } from '../types.js'
 

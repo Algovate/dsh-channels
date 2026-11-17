@@ -4,17 +4,17 @@
  * Same shape as the WeChat adapter and deliberately no bigger: it knows how to
  * poll updates, how to turn one into a normalized message, how to send text and
  * files, and how to phrase a numbered question. Turns, queues, gates, retries,
- * interactions and state all live in @rodin/dsh-channels — this file is the
+ * interactions and state all live in @derekluo/dsh-channels — this file is the
  * evidence that the split holds, because it shares no line of WeChat code.
  *
- * @module @rodin/dsh-channels-telegram
+ * @module @derekluo/dsh-channels-telegram
  */
 import { createHash } from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
 
-import type { AccountInfo, AdapterRuntime, ChannelAdapter, InboundMedia, InboundMessage, InteractionReply, InteractionView, Outgoing, SendResult, Target } from '@rodin/dsh-channels'
+import type { AccountInfo, AdapterRuntime, ChannelAdapter, InboundMedia, InboundMessage, InteractionReply, InteractionView, Outgoing, SendResult, Target } from '@derekluo/dsh-channels'
 import { DEFAULT_API_BASE, MAX_TEXT_CHARS, TelegramTransport, type FetchLike } from './transport.js'
 import { CHANNEL_ID, mediaOf, normalizeInbound, type NormalizedInbound, type TelegramUpdate } from './normalize.js'
 
@@ -49,7 +49,7 @@ function safeName(name: string, fallback: string): string {
 export async function createAdapter({ runtime, config = {}, stateRoot = '' }: TelegramAdapterOptions): Promise<ChannelAdapter> {
   const logger = runtime?.logger ?? { info: () => {}, warn: () => {} }
   const token = (config.token ?? '').trim()
-  if (token === '') throw new Error('no Telegram bot token configured (adapterConfig["@rodin/dsh-channels-telegram"].token)')
+  if (token === '') throw new Error('no Telegram bot token configured (adapterConfig["@derekluo/dsh-channels-telegram"].token)')
   const apiBase = (config.apiBaseUrl ?? DEFAULT_API_BASE).replace(/\/$/, '')
   const telegramId = /^([1-9]\d*):[\w-]+$/.exec(token)?.[1]
   if (telegramId === undefined && apiBase === DEFAULT_API_BASE) {

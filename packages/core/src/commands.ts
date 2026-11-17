@@ -11,7 +11,7 @@
  * sender gets an answer, a stranger gets the gate's refusal, and neither starts
  * a model turn.
  *
- * @module @rodin/dsh-channels/commands
+ * @module @derekluo/dsh-channels/commands
  */
 import type { InboundMessage } from './types.js'
 

@@ -5,7 +5,7 @@
  * channel's capability, and the rule ("never cut a code fence in half, prefer a
  * paragraph boundary") is the same everywhere.
  *
- * @module @rodin/dsh-channels/outbound
+ * @module @derekluo/dsh-channels/outbound
  */
 
 /**

@@ -7,7 +7,7 @@
  * storage domain is the home (a file then exists only as the fallback for a host
  * without that domain).
  *
- * @module @rodin/dsh-channels/store/layout
+ * @module @derekluo/dsh-channels/store/layout
  */
 import path from 'node:path'
 

@@ -5,7 +5,7 @@ import path from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
 import test from 'node:test'
 
-import type { InboundMessage } from '@rodin/dsh-channels'
+import type { InboundMessage } from '@derekluo/dsh-channels'
 import { createAdapter } from '../packages/adapter-telegram/src/index.js'
 import { mediaOf, normalizeInbound } from '../packages/adapter-telegram/src/normalize.js'
 import { TelegramTransport } from '../packages/adapter-telegram/src/transport.js'

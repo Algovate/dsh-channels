@@ -6,7 +6,7 @@
  * with a normalized message. The runtime decides whether the message is
  * allowed, serializes it per conversation, drives the turn and sends the reply.
  *
- * @module @rodin/dsh-channels/runtime
+ * @module @derekluo/dsh-channels/runtime
  */
 import fs from 'node:fs'
 import path from 'node:path'
