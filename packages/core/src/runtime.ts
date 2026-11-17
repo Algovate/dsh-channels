@@ -128,6 +128,24 @@ export class ChannelsRuntime {
     return this.#targets.get(sessionId)
   }
 
+  /**
+   * Add or remove one sender in the live allowlist.
+   *
+   * The gate reads `config.allowedSenders` on every message, so mutating it here
+   * takes effect for the next message without a restart; the caller persists the
+   * overlay so it survives one.
+   */
+  updateAllowlist(action: { add?: string; remove?: string }): string[] {
+    const list = this.#options.config.allowedSenders
+    if (typeof action.remove === 'string' && action.remove !== '') {
+      const index = list.indexOf(action.remove)
+      if (index >= 0) list.splice(index, 1)
+    }
+    const add = typeof action.add === 'string' ? action.add.trim() : ''
+    if (add !== '' && !list.includes(add)) list.push(add)
+    return [...list]
+  }
+
   /** Forget a conversation (tests, or after the adapter is removed). */
   forgetTarget(sessionId: string): void {
     this.#targets.delete(sessionId)

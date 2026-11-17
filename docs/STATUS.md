@@ -122,6 +122,17 @@ GUI 侧栏 → Channels 分组展开后出现 "o9cq807BqQ0x: proceed"，点开�
 插件页（Plugins → `@rodin/dsh-channels`）里有一张「通道」卡片：通道、媒体能力、允许的发送者数量、
 待重发数、是否在等答复、最近 8 条发出的状态（accepted / unconfirmed / failed / pending），带刷新。
 
+卡片还能**改白名单**：输入发送者 id → 添加，或点某个条目上的 ✕ 移除。写入走宿主自己的
+`POST /channels/allowlist`（同源 + `Origin` 校验），一次同时改**运行中的门链**与状态目录里的
+`config.json`，所以下一条消息就生效、重启后还在。真机：
+
+```
+POST {add:"test-sender-1"} → {"ok":true,"allowlist":[…,"test-sender-1"]}   （config.json 同步）
+POST {remove:"test-sender-1"} → {"ok":true,"allowlist":[…]}
+POST origin=http://evil.example → 403 {"code":"origin"}
+卡片（Plugins → @rodin/dsh-channels）：微信 / 1 个允许 / image·file·video / Outbox 0 / 最近发出 accepted…
+```
+
 数据来源按优先级两级：
 
 1. **`channels.status()` Remote**（`TypertRemoteService`，namespace `channels`）。宿主侧注册成功

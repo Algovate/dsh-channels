@@ -295,6 +295,7 @@ window.__ModuleLoader__.load({
                   h('span', null, `${t('Outbox', '待重发')}: ${Number(data.outboxPending) || 0}`),
                   h('span', null, `${t('Waiting for an answer', '等待答复')}: ${data.interactions && data.interactions.pending ? t('yes', '有') : t('no', '无')}`),
                 ),
+                h(AllowlistEditor, { data, reload: load, t }),
                 (data.journal || []).length > 0
                   ? h('div', { style: { display: 'flex', flexDirection: 'column', gap: 6 } },
                       h('div', { style: { fontSize: 12, fontWeight: 600, opacity: 0.85 } }, t('Recent outbound', '最近的发出')),
@@ -311,6 +312,109 @@ window.__ModuleLoader__.load({
             : null,
         )
       }
+    }
+
+
+    /**
+     * The allowlist editor.
+     *
+     * Deny-by-default only works if adding the first stranger is easy, and
+     * hand-editing `config.json` is not easy. The write goes to the Host's own
+     * route (`POST /channels/allowlist`), which updates the live gate and the
+     * overlay together, so the next message from that sender is accepted
+     * without a restart.
+     */
+    function AllowlistEditor({ data, reload, t }) {
+      const [value, setValue] = React.useState('')
+      const [busy, setBusy] = React.useState(false)
+      const [error, setError] = React.useState('')
+      const list = Array.isArray(data.allowlist) ? data.allowlist : []
+
+      const send = (patch) => {
+        setBusy(true)
+        setError('')
+        fetch('/channels/allowlist', {
+          method: 'POST',
+          credentials: 'same-origin',
+          headers: { 'content-type': 'application/json', accept: 'application/json' },
+          body: JSON.stringify(patch),
+        })
+          .then(async (response) => {
+            const body = await response.json().catch(() => ({}))
+            if (!response.ok || body.ok !== true) throw new Error(body.detail || `${response.status} ${response.statusText}`)
+            setValue('')
+            reload()
+          })
+          .catch((cause) => setError(String((cause && cause.message) || cause)))
+          .finally(() => setBusy(false))
+      }
+
+      const chip = {
+        display: 'inline-flex',
+        alignItems: 'center',
+        gap: 6,
+        padding: '4px 8px',
+        borderRadius: 999,
+        background: 'rgba(128,128,128,0.12)',
+        fontSize: 12,
+      }
+      return h(
+        'div',
+        { 'data-channels-allowlist': '', style: { display: 'flex', flexDirection: 'column', gap: 8 } },
+        h('div', { style: { fontSize: 12, fontWeight: 600, opacity: 0.85 } }, t('Allowed senders', '允许的发送者')),
+        h('div', { style: { display: 'flex', gap: 8, flexWrap: 'wrap' } },
+          list.length === 0
+            ? h('span', { style: { fontSize: 12, opacity: 0.7 } }, t('Nobody yet — every message is refused.', '还没有人 —— 所有消息都会被拒绝。'))
+            : list.map((sender) =>
+                h('span', { key: sender, style: chip },
+                  h('span', null, sender),
+                  h('button', {
+                    type: 'button',
+                    'data-channels-remove': sender,
+                    disabled: busy,
+                    onClick: () => send({ remove: sender }),
+                    title: t('Remove', '移除'),
+                    style: { border: 'none', background: 'transparent', cursor: 'pointer', color: 'inherit', opacity: 0.7, padding: 0, fontSize: 12 },
+                  }, '✕'),
+                ),
+              ),
+        ),
+        h('div', { style: { display: 'flex', gap: 8 } },
+          h('input', {
+            value,
+            placeholder: t('sender id, e.g. wxid_xxx@im.wechat', '发送者 id，例如 wxid_xxx@im.wechat'),
+            onChange: (event) => setValue(event.target.value),
+            onKeyDown: (event) => {
+              if (event.key === 'Enter' && value.trim() !== '' && !busy) send({ add: value.trim() })
+            },
+            style: {
+              flex: 1,
+              padding: '6px 10px',
+              borderRadius: 'var(--dsw-radius-m, 10px)',
+              border: '1px solid var(--dsw-alias-divider, rgba(128,128,128,0.3))',
+              background: 'transparent',
+              color: 'inherit',
+              fontSize: 13,
+            },
+          }),
+          h('button', {
+            type: 'button',
+            disabled: busy || value.trim() === '',
+            onClick: () => send({ add: value.trim() }),
+            style: {
+              padding: '6px 14px',
+              borderRadius: 'var(--dsw-radius-m, 10px)',
+              border: '1px solid var(--dsw-alias-divider, rgba(128,128,128,0.3))',
+              background: 'transparent',
+              color: 'inherit',
+              fontSize: 13,
+              cursor: busy || value.trim() === '' ? 'default' : 'pointer',
+              opacity: busy || value.trim() === '' ? 0.5 : 1,
+            },
+          }, busy ? t('Saving…', '保存中…') : t('Add', '添加')),
+        ),
+        error !== '' ? h('div', { 'data-channels-allowlist-error': '', style: { color: '#c92a2a', fontSize: 12 } }, error) : null,
+      )
     }
 
     //#endregion

@@ -18,6 +18,7 @@ import path from 'node:path'
 import { Config as CoreConfig, resolveConfig, type ChannelsConfig } from './config.js'
 import { answerApproval } from './interaction/approval.js'
 import { ChannelsRemote, type StatusPayload, type StatusSource } from './remote.js'
+import { saveConfigOverlay } from './store/root.js'
 import { answerUserQuestion, type AskUserQuestionItem } from './interaction/questions.js'
 import { createLogger } from './log.js'
 import { ChannelsRuntime } from './runtime.js'
@@ -129,11 +130,13 @@ export async function startChannels({ ctx, config }: { ctx: PluginContext; confi
   const offSeams = registerInteractionSeams({ ctx, config, runtime, logger })
   const remote = registerRemote({ ctx, config, runtime, root, logger })
   const offStatusRoute = registerStatusRoute({ ctx, config, runtime, root, logger })
+  const offAllowlistRoute = registerAllowlistRoute({ ctx, config, runtime, root, logger })
 
   return {
     runtime,
     adapters,
     async dispose() {
+      offAllowlistRoute()
       offStatusRoute()
       remote?.dispose?.()
       offSeams()
@@ -337,6 +340,87 @@ function registerRemote({
  * generator. The route is a plain GET, same origin as the GUI, and returns only
  * what the card shows: no tokens, no message bodies beyond the journal tail.
  */
+function registerAllowlistRoute({
+  ctx,
+  config: _config,
+  runtime,
+  root,
+  logger,
+}: {
+  ctx: PluginContext
+  config: ChannelsConfig
+  runtime: ChannelsRuntime
+  root: string
+  logger: { info: (line: string) => void; warn: (line: string) => void }
+}): () => void {
+  const webServer = ctx.get?.('webServer') as { register?: (route: unknown) => () => void; getOrigin?: () => string } | undefined
+  if (typeof webServer?.register !== 'function') return () => {}
+  const allowedOrigin = ((): string | undefined => {
+    try {
+      return webServer.getOrigin?.()
+    } catch {
+      return undefined
+    }
+  })()
+  try {
+    const off = webServer.register({
+      path: '/channels/allowlist',
+      kind: 'exact',
+      handler: (req: { method?: string; headers: Record<string, string | string[] | undefined>; on: (event: string, listener: (chunk?: unknown) => void) => void }, res: { writeHead: (status: number, headers: Record<string, string>) => void; end: (body?: string) => void }) => {
+        const json = (status: number, body: unknown): void => {
+          res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
+          res.end(JSON.stringify(body))
+        }
+        if (req.method !== 'POST') return json(405, { ok: false, code: 'method', detail: 'POST only' })
+        // A grant must come from the page itself: browsers send Origin on POST,
+        // and a cross-site form post must not be able to widen the allowlist.
+        const origin = typeof req.headers['origin'] === 'string' ? req.headers['origin'] : ''
+        if (allowedOrigin !== undefined && origin !== '' && origin !== allowedOrigin) {
+          return json(403, { ok: false, code: 'origin', detail: origin })
+        }
+        let body = ''
+        req.on('data', (chunk) => {
+          if (typeof chunk === 'string') body += chunk
+          else if (chunk instanceof Uint8Array) body += Buffer.from(chunk).toString('utf8')
+          if (body.length > 4096) body = body.slice(0, 4096)
+        })
+        req.on('end', () => {
+          try {
+            const parsed = JSON.parse(body === '' ? '{}' : body) as { add?: unknown; remove?: unknown }
+            const add = typeof parsed.add === 'string' ? parsed.add.trim() : undefined
+            const remove = typeof parsed.remove === 'string' ? parsed.remove.trim() : undefined
+            const invalid = (value: string | undefined): boolean => value !== undefined && (value === '' || value.length > 200 || /\s/.test(value))
+            if (invalid(add) || invalid(remove) || (add === undefined && remove === undefined)) {
+              json(400, { ok: false, code: 'invalid', detail: 'add/remove must be a single non-empty sender id' })
+              return
+            }
+            const allowlist = runtime.updateAllowlist({
+              ...(add === undefined ? {} : { add }),
+              ...(remove === undefined ? {} : { remove }),
+            })
+            saveConfigOverlay(root, { allowedSenders: allowlist }, { warn: (line) => logger.warn(line) })
+            logger.info(`allowlist updated: ${allowlist.length} sender(s)`)
+            json(200, { ok: true, allowlist })
+          } catch (error) {
+            json(400, { ok: false, code: 'parse', detail: String((error as Error)?.message ?? error) })
+          }
+        })
+      },
+    })
+    logger.info('allowlist route registered at POST /channels/allowlist')
+    return () => {
+      try {
+        off()
+      } catch {
+        // Unregistering cannot fail an unload.
+      }
+    }
+  } catch (error) {
+    logger.warn(`allowlist route not registered: ${String((error as Error)?.message ?? error)}`)
+    return () => {}
+  }
+}
+
 function registerStatusRoute({
   ctx,
   config,

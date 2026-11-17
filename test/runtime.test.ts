@@ -277,3 +277,17 @@ test('the first turn attaches its session to the channel workspace', async () =>
   assert.deepEqual(attached, [sessionIdFor({ channel: 'fake', accountId: 'acct', conversationId: 'conv' })])
   await plugin.dispose()
 })
+
+test('the live allowlist can be extended and trimmed without a restart', () => {
+  const h = createHarness()
+  const runtime = createChannelsRuntime({ ctx: h.ctx, config: { allowedSenders: ['a'] } })
+  assert.deepEqual(runtime.updateAllowlist({ add: 'b' }), ['a', 'b'])
+  assert.deepEqual(runtime.updateAllowlist({ add: 'b' }), ['a', 'b'], 'adding twice is idempotent')
+  assert.deepEqual(runtime.updateAllowlist({ remove: 'a' }), ['b'])
+  // The gate reads the same array, so the next message sees the change.
+  const decision = runtime.dispatch(inbound({ senderId: 'b' }))
+  assert.equal(decision.allow, true)
+  const refused = runtime.dispatch(inbound({ senderId: 'c' }))
+  assert.equal(refused.allow, false)
+  runtime.dispose()
+})
