@@ -63,51 +63,6 @@ function usageOf(absolute: string): Usage {
   return { exists: true, bytes, files, mtimeMs: stat.mtimeMs }
 }
 
-/** `memory/life-<account>.json` → a regex over the basename, plus its directory. */
-function patternOf(relative: string): { dir: string; regex: RegExp } {
-  const segments = relative.split('/')
-  const firstPattern = segments.findIndex((segment) => segment.includes('<'))
-  const dir = segments.slice(0, firstPattern).join('/')
-  const name = segments[firstPattern] ?? ''
-  const source = name
-    .split(/(<[^>]+>)/)
-    .map((part) => (part.startsWith('<') ? '[^/]+' : part.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
-    .join('')
-  return { dir, regex: new RegExp(`^${source}$`) }
-}
-
-function patternUsage(root: string, relative: string): Usage {
-  const { dir, regex } = patternOf(relative)
-  const base = path.join(root, dir)
-  let bytes = 0
-  let files = 0
-  let newest = 0
-  const walk = (current: string): void => {
-    let entries: fs.Dirent[]
-    try {
-      entries = fs.readdirSync(current, { withFileTypes: true })
-    } catch {
-      return
-    }
-    for (const entry of entries) {
-      const full = path.join(current, entry.name)
-      if (entry.isDirectory()) walk(full)
-      else if (entry.isFile() && regex.test(entry.name)) {
-        try {
-          const stat = fs.lstatSync(full)
-          bytes += stat.size
-          files += 1
-          newest = Math.max(newest, stat.mtimeMs)
-        } catch {
-          // Vanished mid-walk.
-        }
-      }
-    }
-  }
-  walk(base)
-  return { exists: files > 0, bytes, files, mtimeMs: newest }
-}
-
 export interface InventoryRow extends Usage {
   key: string
   relative: string
@@ -116,21 +71,20 @@ export interface InventoryRow extends Usage {
   label: string
   reason?: string
   contents?: string
-  pattern?: true
 }
 
 export interface Inventory {
   root: string
   entries: InventoryRow[]
   unlisted: Array<{ relative: string; kind: 'file' | 'dir' } & Usage>
-  totals: { entries: number; present: number; bytes: number; files: number; domain: number; planned: number; file: number; unlisted: number; unlistedBytes: number }
+  totals: { entries: number; present: number; bytes: number; files: number; domain: number; file: number; unlisted: number; unlistedBytes: number }
 }
 
 export function stateInventory(root: string): Inventory {
   const base = path.resolve(root)
   const entries: InventoryRow[] = []
   for (const [key, entry] of Object.entries(STATE_LAYOUT)) {
-    const usage = entry.pattern === true ? patternUsage(base, entry.relative) : usageOf(path.join(base, entry.relative))
+    const usage = usageOf(path.join(base, entry.relative))
     entries.push({
       key,
       relative: entry.relative,
@@ -139,7 +93,6 @@ export function stateInventory(root: string): Inventory {
       label: entry.label,
       ...(entry.reason === undefined ? {} : { reason: entry.reason }),
       ...(entry.contents === undefined ? {} : { contents: entry.contents }),
-      ...(entry.pattern === true ? { pattern: true as const } : {}),
       ...usage,
     })
   }
@@ -164,7 +117,6 @@ export function stateInventory(root: string): Inventory {
     bytes: rootUsage.bytes,
     files: rootUsage.files,
     domain: entries.filter((entry) => entry.store === STORE.DOMAIN).length,
-    planned: entries.filter((entry) => entry.store === STORE.PLANNED).length,
     file: entries.filter((entry) => entry.store === STORE.FILE).length,
     unlisted: unlisted.length,
     unlistedBytes: unlisted.reduce((sum, entry) => sum + entry.bytes, 0),
@@ -174,7 +126,7 @@ export function stateInventory(root: string): Inventory {
 
 export function summarizeInventory(inventory: Inventory): string {
   const { totals } = inventory
-  const parts = [`${totals.present}/${totals.entries} 项在表内`, `域 ${totals.domain} · 计划 ${totals.planned} · 文件 ${totals.file}`, `状态目录共 ${formatBytes(totals.bytes)}（${totals.files} 个文件）`]
+  const parts = [`${totals.present}/${totals.entries} 项在表内`, `域 ${totals.domain} · 文件 ${totals.file}`, `状态目录共 ${formatBytes(totals.bytes)}（${totals.files} 个文件）`]
   if (totals.unlisted > 0) parts.push(`表外 ${totals.unlisted} 项 ${formatBytes(totals.unlistedBytes)}`)
   return parts.join('；')
 }

@@ -26,20 +26,17 @@ test('every entry resolves inside the state root with a unique relative path', (
     assert.ok(seen.has(entry.relative) === false, `duplicate relative path: ${entry.relative}`)
     seen.add(entry.relative)
   }
-  assert.equal(statePath(root, 'budget'), path.join(root, 'budget.json'))
+  assert.equal(statePath(root, 'config'), path.join(root, 'config.json'))
   assert.throws(() => statePath(root, 'nope'), /unknown state entry/)
 })
 
-test('a pattern entry is a naming rule, not a path', () => {
-  assert.equal(STATE_LAYOUT['lifeState']?.pattern, true)
-  assert.throws(() => statePath('/tmp/x', 'lifeState'), /pattern, not a path/)
+test('no entry carries a placeholder path', () => {
   for (const [key, entry] of Object.entries(STATE_LAYOUT)) {
-    if (entry.pattern === true) continue
-    assert.equal(entry.relative.includes('<'), false, `${key} has a placeholder but is not a pattern`)
+    assert.equal(entry.relative.includes('<'), false, `${key} has a placeholder and needs a keyed helper`)
   }
 })
 
-test('every entry says what the storage migration intends, and a file entry says why', () => {
+test('every entry says where it lives, and a file entry says why', () => {
   const tiers = new Set(Object.values(STORE))
   for (const [key, entry] of Object.entries(STATE_LAYOUT)) {
     assert.ok(tiers.has(entry.store), `${key} has no store tier`)
@@ -53,8 +50,8 @@ test('every entry says what the storage migration intends, and a file entry says
 
 test('a key cannot escape its directory', () => {
   const root = '/tmp/channels-layout-test'
-  const full = keyedStatePath(root, 'memoryDir', '../../etc/passwd')
-  assert.ok(full.startsWith(path.join(root, 'memory') + path.sep))
+  const full = keyedStatePath(root, 'mediaInbound', '../../etc/passwd')
+  assert.ok(full.startsWith(path.join(root, 'media', 'inbound') + path.sep))
 })
 
 test('no module writes a top-level state path the table does not declare', () => {

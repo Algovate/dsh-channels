@@ -1,7 +1,7 @@
 {
   "name": "@rodin/dsh-channels",
   "version": "0.1.0",
-  "description": "Chat channels for DeepSeek Harness agents: turn driving, interactions, state and gates in one place. WeChat is the first adapter.",
+  "description": "Chat channels for DeepSeek Harness agents: turn driving, interactions, media, gates, durable state and a status card. WeChat and Telegram adapters.",
   "type": "module",
   "license": "MIT",
   "engines": {
@@ -18,8 +18,7 @@
     "dist",
     "client.js",
     "cordis.patch.yml",
-    "bin",
-    "THIRD-PARTY-NOTICES.md"
+    "bin"
   ],
   "bin": {
     "dsh-channels-doctor": "bin/doctor.mjs"
