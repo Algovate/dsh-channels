@@ -209,14 +209,27 @@ window.__ModuleLoader__.load({
         // `uiConversation` is not in the module-level inject on purpose: a host
         // without the Conversation registry should lose the row, not keep the
         // whole client inactive. A reactive injection does exactly that.
-        return ctx.inject(['uiConversation', 'slots'], (scope) => {
+        //
+        // `apply` must return a disposer FUNCTION, not the injection handle:
+        // returning the handle made the boot refuse the entry with
+        // "TypeError: Invalid effect" and the row never appeared (found on the
+        // device; the failure is one console line, easy to miss).
+        let disposeRows
+        const injection = ctx.inject(['uiConversation', 'slots'], (scope) => {
           try {
-            return registerRows(scope, scope.uiConversation)
+            disposeRows = registerRows(scope, scope.uiConversation)
           } catch (error) {
             console.warn('@rodin/dsh-channels: chat row not registered', error)
-            return () => {}
+            disposeRows = () => {}
           }
         })
+        return () => {
+          try {
+            disposeRows?.()
+          } finally {
+            injection?.dispose?.()
+          }
+        }
       },
     }
   },

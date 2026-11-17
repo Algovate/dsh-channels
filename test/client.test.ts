@@ -92,7 +92,13 @@ test('the row claims weixin user messages exclusively and nothing else', async (
       register: (seat: Record<string, any>) => seats.push(seat),
     },
   }
-  const dispose = module.apply({ inject: (_services: string[], callback: (scope: unknown) => unknown) => callback(scope) })
+  const dispose = module.apply({
+    inject: (_services: string[], callback: (scope: unknown) => unknown) => {
+      callback(scope)
+      return { dispose: () => {} }
+    },
+  })
+  assert.equal(typeof dispose, 'function', 'apply must return a disposer function, not the injection handle')
   assert.equal(definitions.length, 1)
   assert.equal(definitions[0]?.kind, 'weixin-user')
   assert.equal(definitions[0]?.target, 'chat')
@@ -126,7 +132,12 @@ test('the renderer shows the channel badge, the sender and the words', async () 
       register: (_seat: Record<string, any>, renderer: (props: unknown) => any) => renderers.push(renderer),
     },
   }
-  module.apply({ inject: (_services: string[], callback: (scope: unknown) => unknown) => callback(scope) })
+  module.apply({
+    inject: (_services: string[], callback: (scope: unknown) => unknown) => {
+      callback(scope)
+      return { dispose: () => {} }
+    },
+  })
   const renderer = renderers[0]
   assert.ok(renderer !== undefined)
 
@@ -151,7 +162,12 @@ test('an English page gets English labels', async () => {
       register: (_seat: Record<string, any>, renderer: (props: unknown) => any) => renderers.push(renderer),
     },
   }
-  module.apply({ inject: (_services: string[], callback: (scope: unknown) => unknown) => callback(scope) })
+  module.apply({
+    inject: (_services: string[], callback: (scope: unknown) => unknown) => {
+      callback(scope)
+      return { dispose: () => {} }
+    },
+  })
   const node = renderers[0]?.({ node: { data: { text: '', group: false, senderId: '', others: 0 } } })
   const text = JSON.stringify(node)
   assert.match(text, /WeChat/)

@@ -88,23 +88,31 @@ M2b 文档正文（正文进了 prompt；该回合随后因 API 余额不足失�
 竞速本身是对的（先真答者胜），但"桌面答空"与"用户跳过"在 seam 词汇里无法区分。
 后续可选：把空答案集当成"还没决定"，继续等微信（像 approval 对 `unavailable` 那样）。
 
-## M3 进展与阻塞：频道会话在 GUI 列表里不可见
+## M3：Chat 行（GUI 已验）
 
-Chat 行已实现并部署（`client.js`，host 的 boot 条目里已经列出 `@rodin/dsh-channels`，
-`plugins/??@rodin/dsh-channels/client.js` 返回 200），但**还没能在 GUI 里验到**，原因是更根本的一层：
-频道会话不在 GUI 的会话列表里。
+频道消息在 GUI 里现在是一条带「微信」徽标的气泡：徽标 + 群聊/发信人/附件数，人话在气泡里，
+右对齐、配色和圆角用宿主自己的 token。
 
-已排除的两条（都部署到 mini 试过，无效）：
+真机证据（浏览器里数 DOM）：
 
-1. **没有标题**：`sessionTitle.rename` 的签名是 `rename(session 对象, title)`，我先前传的是 id 字符串，
-   宿主答 `session "undefined" is not live`。改成传活会话对象后不再报错，但列表仍不出现。
-2. **工作目录**：频道会话原先跑在 `~/.dsh/channels/workspace`（GUI 没打开过这个目录），
-   改成 GUI 的默认工作区 `~/Documents/deepseek-harness-default-workspace` 后仍不出现。
+```
+打开 chan-weixin-1421e1b70d9e4eef →
+[data-channels-chat-row] 19 个
+badges: "WeChat 用 ask_user_question 让我选一个：咖啡还是茶？…"
+console: 无 @rodin/dsh-channels 相关告警
+```
 
-剩下的最可能原因：GUI 的列表按**已打开的工作区**分组，会话必须挂在一条 workspace 记录上；
-旧插件的会话能出现，可能是因为那个目录曾被当作工作区打开过。
-下一步：通过宿主的 workspace 服务登记/复用一个工作区（或在创建会话时带上 workspace id），
-然后重验 Chat 行。这一步要在宿主的 workspace API 上做，不能靠猜。
+### 这一层踩到的三个坑
+
+1. **`apply` 必须返回 disposer 函数**：我先把 `ctx.inject(...)` 的返回值直接返回，boot 直接
+   拒绝整个客户端（`TypeError: Invalid effect`，只有一行 console 日志，页面看起来一切正常）。
+   现在返回一个函数，里面同时拆行注册与注入。
+2. **频道的会话在 GUI 里属于「Ungrouped」**：会话按工作区分组，而 `~/.dsh/channels/workspace`
+   不是已登记的工作区。展开「Ungrouped」就能看到；会话标题是首条消息命名出来的
+   （`o9cq807BqQ0x: 图显示不了？`）。要给频道会话一个正经分组，得向宿主的 workspace 服务登记
+   工作区——留给 M3b。
+3. **会话要先有标题**：`sessionTitle.rename(session 对象, title)`（第一个参数是活会话对象，
+   不是 id，传 id 会得到 `session "undefined" is not live`）。
 
 ## 已知边界
 
