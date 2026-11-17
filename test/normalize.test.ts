@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
-import { normalizeInbound } from '../packages/adapter-weixin/src/normalize.js'
+import { mediaItemsOf, normalizeInbound } from '../packages/adapter-weixin/src/normalize.js'
 
 const TEXT = 1
 const IMAGE = 2
@@ -52,19 +52,39 @@ test('an unfinished message and a missing sender are dropped', () => {
   assert.equal(normalizeInbound(raw({ from_user_id: '' }), 'acct'), null)
 })
 
-test('a media-only message is dropped in 0.1.0, with no crash', () => {
+test('a media-only message is kept: the attachment is the message', () => {
   const message = normalizeInbound(raw({ item_list: [{ type: IMAGE }] }), 'acct')
-  assert.equal(message, null)
+  assert.ok(message !== null)
+  assert.equal(message.text, '')
+  assert.equal(message.media.length, 0, 'nothing is downloaded yet at this stage')
+  assert.equal(mediaItemsOf(message).length, 1, 'the item is queued for the downloader')
 })
 
-test('text and an attachment together keep the text and count the attachment', () => {
+test('an empty item list is not a message', () => {
+  assert.equal(normalizeInbound(raw({ item_list: [] }), 'acct'), null)
+})
+
+test('text and an attachment together keep both', () => {
   const message = normalizeInbound(raw({ item_list: [{ type: TEXT, text_item: { text: '看图' } }, { type: IMAGE }] }), 'acct')
   assert.ok(message !== null)
   assert.equal(message.text, '看图')
-  assert.deepEqual(message.raw, { unsupportedItems: 1 })
+  assert.equal(mediaItemsOf(message).length, 1)
 })
 
 test('anything that is not an object is dropped rather than thrown', () => {
   assert.equal(normalizeInbound(null as never, 'acct'), null)
   assert.equal(normalizeInbound({} as never, 'acct'), null)
+})
+
+test('an inbound image that declares no type still gets a usable extension', async () => {
+  const { extensionFor, sniffMime } = await import('../packages/adapter-weixin/src/media.js')
+  const jpeg = Buffer.concat([Buffer.from([0xff, 0xd8, 0xff, 0xe0]), Buffer.alloc(20)])
+  const png = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47]), Buffer.alloc(20)])
+  assert.equal(sniffMime(jpeg), 'image/jpeg')
+  assert.equal(sniffMime(png), 'image/png')
+  assert.equal(sniffMime(Buffer.from('hello')), undefined)
+  assert.equal(extensionFor({ kind: 'image', mime: 'image/jpeg' }), '.jpg')
+  assert.equal(extensionFor({ kind: 'image' }), '.jpg', 'a nameless, typeless image is still a jpg')
+  assert.equal(extensionFor({ kind: 'file', originalName: 'report.pdf' }), '.pdf')
+  assert.equal(extensionFor({ kind: 'video' }), '.mp4')
 })

@@ -23,6 +23,7 @@
  */
 import type { InboundMessage, Target } from './types.js'
 import { sessionIdFor } from './ids.js'
+import { inboundTextWithMedia } from './media.js'
 
 /** What `agents.create` / `agents.get` hand back, as far as this module cares. */
 export interface AgentHandle {
@@ -266,7 +267,9 @@ export class TurnDriver {
     if (typeof agent.followup !== 'function') throw new Error('the agent cannot accept a followup message')
     agent.followup(
       factory({
-        content: [{ type: 'text', text: message.text }],
+        // Attachments become text the model can act on ("saved here, open it
+        // with read_image"); the person's own words stay last.
+        content: [{ type: 'text', text: inboundTextWithMedia(message) }],
         source: {
           kind: message.channel,
           form: 'message',

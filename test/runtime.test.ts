@@ -147,3 +147,61 @@ test('an agent that answers for a conversation can be mapped back to it', async 
   assert.equal(runtime.targetForAgent({ session: { id: 'someone-elses-session' } }), undefined)
   runtime.dispose()
 })
+
+test('a media reply goes out through the adapter, and both phases are journalled', async () => {
+  const fs = await import('node:fs')
+  const h = createHarness()
+  const runtime = h.makeRuntime()
+  const adapter = createFakeAdapter()
+  runtime.register(adapter)
+  const target = { channel: 'fake', accountId: 'acct', conversationId: 'conv' }
+  const results = await runtime.send(target, { text: '给你看', kind: 'reply', media: [{ kind: 'image', path: '/tmp/a.png' }] })
+  assert.equal(results.length, 2, 'the caption bubble and the attachment')
+  assert.equal(adapter.sent.length, 2)
+  assert.equal(adapter.sent[0]?.outgoing.text, '给你看')
+  assert.equal(adapter.sent[1]?.outgoing.media?.length, 1)
+  const states = runtime.journal.outbound().map((row) => row.state)
+  assert.deepEqual(states, ['accepted', 'accepted'])
+  const day = runtime.journal.file()
+  assert.ok(fs.existsSync(day))
+  runtime.dispose()
+})
+
+test('files the turn wrote are sent as attachments after the reply', async () => {
+  const fs = await import('node:fs')
+  const os = await import('node:os')
+  const path = await import('node:path')
+  const workspaceDir = fs.mkdtempSync(path.join(os.tmpdir(), 'channels-ws-'))
+  const h = createHarness({
+    reply: '做好了',
+    // The fake agent "uses a tool" during the turn.
+    onFollowup: () => fs.writeFileSync(path.join(workspaceDir, 'out.txt'), 'done'),
+  })
+  const runtime = createChannelsRuntime({ ctx: h.ctx, config: { autoSendFiles: true }, workingDirectory: workspaceDir })
+  const adapter = createFakeAdapter()
+  runtime.register(adapter)
+  runtime.dispatch(inbound())
+  await tick(200)
+  const withMedia = adapter.sent.filter((entry) => (entry.outgoing.media ?? []).length > 0)
+  assert.equal(withMedia.length, 1, 'the produced file went out as an attachment')
+  assert.match(withMedia[0]?.outgoing.media?.[0]?.path ?? '', /out\.txt$/)
+  runtime.dispose()
+})
+
+test('autoSendFiles:false keeps the turn text-only', async () => {
+  const fs = await import('node:fs')
+  const os = await import('node:os')
+  const path = await import('node:path')
+  const workspaceDir = fs.mkdtempSync(path.join(os.tmpdir(), 'channels-ws-'))
+  const h = createHarness({
+    reply: '做好了',
+    onFollowup: () => fs.writeFileSync(path.join(workspaceDir, 'out.txt'), 'done'),
+  })
+  const runtime = createChannelsRuntime({ ctx: h.ctx, config: { autoSendFiles: false }, workingDirectory: workspaceDir })
+  const adapter = createFakeAdapter()
+  runtime.register(adapter)
+  runtime.dispatch(inbound())
+  await tick(200)
+  assert.equal(adapter.sent.some((entry) => (entry.outgoing.media ?? []).length > 0), false)
+  runtime.dispose()
+})

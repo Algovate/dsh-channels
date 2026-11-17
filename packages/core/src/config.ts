@@ -25,6 +25,9 @@ export const Config = z.object({
   questionsEnabled: z.boolean().default(true).description('Let the agent ask its questions in the chat and take the answer back.'),
   approvalsEnabled: z.boolean().default(true).description('Let the chat approve or reject tool calls (allowed once only).'),
   interactionTimeoutMs: z.number().default(600000).description('How long one question or approval waits for a chat reply before falling back to the desktop.'),
+  autoSendFiles: z.boolean().default(true).description('Send files the agent wrote in its working directory during a turn as chat attachments.'),
+  maxProducedFiles: z.number().default(3).description('How many produced files one turn may send.'),
+  maxProducedBytes: z.number().default(20971520).description('Largest produced file that is sent (bytes).'),
 })
 
 export interface ChannelsConfig {
@@ -43,6 +46,9 @@ export interface ChannelsConfig {
   questionsEnabled: boolean
   approvalsEnabled: boolean
   interactionTimeoutMs: number
+  autoSendFiles: boolean
+  maxProducedFiles: number
+  maxProducedBytes: number
 }
 
 const DEFAULTS: ChannelsConfig = {
@@ -61,6 +67,9 @@ const DEFAULTS: ChannelsConfig = {
   questionsEnabled: true,
   approvalsEnabled: true,
   interactionTimeoutMs: 600_000,
+  autoSendFiles: true,
+  maxProducedFiles: 3,
+  maxProducedBytes: 20 * 1024 * 1024,
 }
 
 /** Fill missing fields; tolerate a config object from an older version. */
@@ -82,6 +91,9 @@ export function resolveConfig(raw: Partial<ChannelsConfig> | undefined): Channel
     questionsEnabled: input.questionsEnabled ?? DEFAULTS.questionsEnabled,
     approvalsEnabled: input.approvalsEnabled ?? DEFAULTS.approvalsEnabled,
     interactionTimeoutMs: Number.isFinite(input.interactionTimeoutMs) ? Number(input.interactionTimeoutMs) : DEFAULTS.interactionTimeoutMs,
+    autoSendFiles: input.autoSendFiles ?? DEFAULTS.autoSendFiles,
+    maxProducedFiles: Number.isFinite(input.maxProducedFiles) ? Number(input.maxProducedFiles) : DEFAULTS.maxProducedFiles,
+    maxProducedBytes: Number.isFinite(input.maxProducedBytes) ? Number(input.maxProducedBytes) : DEFAULTS.maxProducedBytes,
   }
 }
 

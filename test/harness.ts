@@ -29,6 +29,8 @@ export interface HarnessOptions {
   existing?: string[]
   maxTurnWaitMs?: number
   pollMs?: number
+  /** Called when the fake agent receives a followup — the place to "use a tool". */
+  onFollowup?: () => void
 }
 
 export function createHarness(options: HarnessOptions = {}) {
@@ -48,6 +50,7 @@ export function createHarness(options: HarnessOptions = {}) {
     },
     followup: (message) => {
       followedUp.push({ message })
+      options.onFollowup?.()
       events.push({ seq: events.length + 1, type: 'user/message', data: { message } })
       if (options.silent === true) return
       // The host settles the turn asynchronously; the driver polls until it sees this.

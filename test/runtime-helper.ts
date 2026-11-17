@@ -67,12 +67,14 @@ export function createChannelsRuntime({
   createUserMessage,
   maxTurnWaitMs,
   pollMs,
+  workingDirectory,
 }: {
   ctx: { get?: (name: string) => unknown }
   config?: Partial<ChannelsConfig>
   createUserMessage?: (fields: Record<string, unknown>) => unknown
   maxTurnWaitMs?: number
   pollMs?: number
+  workingDirectory?: string
 }): ChannelsRuntime {
   const resolved = resolveConfig({
     maxTurnWaitMs: maxTurnWaitMs ?? 2000,
@@ -86,7 +88,9 @@ export function createChannelsRuntime({
     config: resolved,
     logger: { info: () => {}, warn: () => {} },
     stateRoot: fs.mkdtempSync(path.join(os.tmpdir(), 'channels-test-')),
-    workingDirectory: '/tmp',
-    ...(createUserMessage === undefined ? {} : { createUserMessage }),
+    workingDirectory: workingDirectory ?? fs.mkdtempSync(path.join(os.tmpdir(), 'channels-ws-')),
+    // A host without `@deepseek-ai/dsh-llm` still builds user messages in tests;
+    // the fields object is exactly what `createUserMessage` returns in the host.
+    createUserMessage: createUserMessage ?? ((fields: Record<string, unknown>) => fields),
   })
 }

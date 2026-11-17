@@ -19,6 +19,8 @@ import { getUpdates } from '../vendor/openclaw-weixin/api/api.js'
 import { DEFAULT_BASE_URL, loadWeixinAccount } from '../vendor/openclaw-weixin/auth/accounts.js'
 import { MessageItemType } from '../vendor/openclaw-weixin/api/types.js'
 import { sendMessageItemWeixin } from '../vendor/openclaw-weixin/messaging/send.js'
+import { sendWeixinMediaFile } from '../vendor/openclaw-weixin/messaging/send-media.js'
+import { CDN_BASE_URL as DEFAULT_CDN_BASE_URL } from '../vendor/openclaw-weixin/auth/accounts.js'
 import { getSyncBufFilePath, loadGetUpdatesBuf, saveGetUpdatesBuf } from '../vendor/openclaw-weixin/storage/sync-buf.js'
 import type { SendResult } from '@rodin/dsh-channels'
 import type { RawMessage } from './normalize.js'
@@ -66,9 +68,15 @@ export interface TransportOptions {
   getUpdatesImpl?: (params: Record<string, unknown>) => Promise<Record<string, unknown>>
   /** Injected in tests: the real iLink send. */
   sendImpl?: (params: Record<string, unknown>) => Promise<{ messageId?: string; serverMessageId?: string }>
+  /** Injected in tests: the real iLink media upload+send. */
+  sendMediaImpl?: (params: Record<string, unknown>) => Promise<{ messageId?: string; serverMessageId?: string }>
   /** Retry delays; tests shrink them so a retry is observable without waiting. */
   retryDelayMs?: number
   backoffDelayMs?: number
+  /** Outbound pacing: minimum gap between sends, and the cooldown after three failures. */
+  sendIntervalMs?: number
+  sendCooldownMs?: number
+  cdnBaseUrl?: string
 }
 
 export class WeixinTransport {
@@ -80,11 +88,15 @@ export class WeixinTransport {
   #buffer: string | undefined
   #bufferPath: string
   #contextTokens = new Map<string, string>()
+  readonly #pacer: SendPacer
+  readonly #cdnBaseUrl: string
 
   constructor(options: TransportOptions) {
     this.#options = options
     this.#longPollTimeoutMs = options.longPollTimeoutMs ?? 35_000
     this.#bufferPath = getSyncBufFilePath(options.accountId)
+    this.#pacer = new SendPacer({ minIntervalMs: options.sendIntervalMs, cooldownMs: options.sendCooldownMs })
+    this.#cdnBaseUrl = options.cdnBaseUrl ?? DEFAULT_CDN_BASE_URL
   }
 
   get running(): boolean {
@@ -197,6 +209,7 @@ export class WeixinTransport {
 
   /** Send one text bubble. Never throws: the caller decides what a failure means. */
   async sendText(conversationId: string, text: string): Promise<SendResult> {
+    if (!(await this.#pacer.take())) return { ok: false, code: 'cooling-down', retryAfterMs: 30_000 }
     const contextToken = this.#contextTokens.get(conversationId) ?? ''
     try {
       const send = (this.#options.sendImpl ?? (sendMessageItemWeixin as unknown as (params: Record<string, unknown>) => Promise<{ messageId?: string; serverMessageId?: string }>))
@@ -209,12 +222,93 @@ export class WeixinTransport {
           ...(contextToken === '' ? {} : { contextToken }),
         },
       })) as { messageId?: string; serverMessageId?: string }
+      this.#pacer.noteSuccess()
       const serverMessageId = typeof result?.serverMessageId === 'string' ? result.serverMessageId : ''
       // "ret=0 with no message_id" is accepted-but-unconfirmed, not delivered.
       return serverMessageId === '' ? { ok: true, unconfirmed: true } : { ok: true, messageId: serverMessageId }
     } catch (error) {
+      this.#pacer.noteFailure()
       const message = String((error as Error)?.message ?? error)
       return { ok: false, code: /session|token|unauthor/i.test(message) ? 'session-rejected' : 'send-failed', detail: message }
+    }
+  }
+
+  /**
+   * Upload and send one local file, routed by MIME type by the vendored layer
+   * (image → picture bubble, video → video, else → file attachment).
+   *
+   * Voice outbound is deliberately absent: the server accepts a bot voice item
+   * and never delivers it (measured twice on the reference implementation), so
+   * audio goes out as a file.
+   */
+  async sendMedia(conversationId: string, filePath: string, text = ''): Promise<SendResult> {
+    if (!(await this.#pacer.take())) return { ok: false, code: 'cooling-down', retryAfterMs: 30_000 }
+    const contextToken = this.#contextTokens.get(conversationId) ?? ''
+    try {
+      const sendMedia = (this.#options.sendMediaImpl ?? (sendWeixinMediaFile as unknown as (params: Record<string, unknown>) => Promise<{ messageId?: string; serverMessageId?: string }>))
+      const result = (await sendMedia({
+        filePath,
+        to: conversationId,
+        text,
+        opts: {
+          baseUrl: this.#options.baseUrl,
+          token: this.#options.token,
+          ...(contextToken === '' ? {} : { contextToken }),
+        },
+        cdnBaseUrl: this.#cdnBaseUrl,
+      })) as { messageId?: string; serverMessageId?: string }
+      this.#pacer.noteSuccess()
+      const serverMessageId = typeof result?.serverMessageId === 'string' ? result.serverMessageId : ''
+      return serverMessageId === '' ? { ok: true, unconfirmed: true } : { ok: true, messageId: serverMessageId }
+    } catch (error) {
+      this.#pacer.noteFailure()
+      const message = String((error as Error)?.message ?? error)
+      return { ok: false, code: 'send-media-failed', detail: message }
+    }
+  }
+}
+
+/**
+ * Outbound pacing.
+ *
+ * iLink rate-limits hard, and the reference implementation measured that
+ * hammering a rejecting server is what turns a temporary rejection into a
+ * send ban. So: a minimum interval between sends, and after three consecutive
+ * failures a cooldown in which nothing is sent at all.
+ */
+export class SendPacer {
+  #lastAt = 0
+  #failures = 0
+  #cooldownUntil = 0
+  readonly #minIntervalMs: number
+  readonly #cooldownMs: number
+  readonly #now: () => number
+
+  constructor({ minIntervalMs = 300, cooldownMs = 30_000, now = Date.now }: { minIntervalMs?: number; cooldownMs?: number; now?: () => number } = {}) {
+    this.#minIntervalMs = minIntervalMs
+    this.#cooldownMs = cooldownMs
+    this.#now = now
+  }
+
+  /** Wait until a send is allowed; resolves false when a cooldown is active. */
+  async take(): Promise<boolean> {
+    const now = this.#now()
+    if (now < this.#cooldownUntil) return false
+    const wait = this.#minIntervalMs - (now - this.#lastAt)
+    if (wait > 0) await new Promise((resolve) => setTimeout(resolve, wait))
+    this.#lastAt = this.#now()
+    return true
+  }
+
+  noteSuccess(): void {
+    this.#failures = 0
+  }
+
+  noteFailure(): void {
+    this.#failures += 1
+    if (this.#failures >= 3) {
+      this.#cooldownUntil = this.#now() + this.#cooldownMs
+      this.#failures = 0
     }
   }
 }

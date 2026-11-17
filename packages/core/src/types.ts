@@ -18,9 +18,16 @@ export interface Target {
   conversationId: string
 }
 
-export type InboundMedia =
-  | { kind: 'image' | 'file' | 'video'; path: string; mime: string; bytes: number; name?: string }
-  | { kind: 'voice'; path: string; mime: string; bytes: number; transcript?: string }
+export interface InboundMedia {
+  kind: 'image' | 'file' | 'voice' | 'video'
+  path: string
+  mime: string
+  bytes: number
+  /** Original file name when the platform knows one. */
+  name?: string
+  /** Present only for voice notes that were actually transcribed. */
+  transcript?: string
+}
 
 export interface InboundMessage extends Target {
   senderId: string

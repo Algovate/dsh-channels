@@ -14,8 +14,10 @@ import { createRateLimiter, gateMessage, type GateContext, type GateDecision } f
 import { allowlistFor, type ChannelsConfig } from './config.js'
 import { lineKey } from './ids.js'
 import { Outbox } from './store/outbox.js'
+import { Journal } from './store/journal.js'
 import { TurnDriver } from './turns.js'
 import { plainText, splitIntoBubbles } from './outbound.js'
+import { listProducedFiles } from './produced.js'
 import type { ChannelAdapter, InboundMessage, Outgoing, SendResult, Target } from './types.js'
 
 export interface RuntimeLogger {
@@ -39,6 +41,7 @@ export class ChannelsRuntime {
   readonly #queue = new ConversationQueue()
   readonly #expiredAccounts = new Set<string>()
   readonly #outbox: Outbox
+  readonly #journal: Journal
   readonly #driver: TurnDriver
   readonly #interactions: InteractionQueue
   /** session id → the conversation it answers for; the interaction seams need it. */
@@ -48,6 +51,7 @@ export class ChannelsRuntime {
   constructor(options: RuntimeOptions) {
     this.#options = options
     this.#outbox = new Outbox({ stateRoot: options.stateRoot, warn: options.logger.warn })
+    this.#journal = new Journal({ stateRoot: options.stateRoot, warn: options.logger.warn })
     this.#interactions = new InteractionQueue({
       send: (target, outgoing) => this.send(target, outgoing),
       logger: options.logger,
@@ -82,6 +86,10 @@ export class ChannelsRuntime {
 
   get outbox(): Outbox {
     return this.#outbox
+  }
+
+  get journal(): Journal {
+    return this.#journal
   }
 
   get interactions(): InteractionQueue {
@@ -150,6 +158,17 @@ export class ChannelsRuntime {
     // A reply to an open question or approval is consumed here, before the turn
     // queue: queueing it behind the very turn that is asking deadlocks until the
     // timeout. The gate above still applies — a stranger cannot answer for you.
+    this.#journal.append({
+      direction: 'in',
+      phase: 'received',
+      id: `in-${message.at.toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
+      channel: message.channel,
+      accountId: message.accountId,
+      conversationId: message.conversationId,
+      kind: 'message',
+      text: message.text.slice(0, 500),
+      ...(message.media.length === 0 ? {} : { media: message.media.map((item) => item.path) }),
+    })
     const claim = this.#interactions.claim(message, message.text)
     if (claim.status === 'answered') {
       this.#options.logger.info(`answered the pending interaction in ${lineKey(message)}`)
@@ -189,8 +208,8 @@ export class ChannelsRuntime {
       await this.send(message, { text: '（这边出了点问题，这条没答上来。稍后再发一次，或者看 /diag。）', kind: 'notice' })
       return
     }
-    if (reply.text.trim() === '') return
-    await this.send(message, { text: reply.text, kind: 'reply' })
+    if (reply.text.trim() !== '') await this.send(message, { text: reply.text, kind: 'reply' })
+    await this.#sendProducedFiles(message, startedAt)
   }
 
   /** Send one outgoing message, split to the channel's capability, with outbox fallback. */
@@ -203,19 +222,77 @@ export class ChannelsRuntime {
     const results: SendResult[] = []
     for (const [index, bubble] of bubbles.entries()) {
       if (index > 0 && this.#options.config.bubbleGapMs > 0) await new Promise((resolve) => setTimeout(resolve, this.#options.config.bubbleGapMs))
-      let result: SendResult
-      try {
-        result = await adapter.send(target, { ...outgoing, text: bubble })
-      } catch (error) {
-        result = { ok: false, code: 'adapter-threw', detail: String((error as Error)?.message ?? error) }
-      }
+      results.push(await this.#deliver(adapter, target, { ...outgoing, text: bubble }, bubble))
+    }
+    for (const item of outgoing.media ?? []) {
+      // Media cannot be re-sent from the outbox (it holds text), so a failure
+      // is reported and journalled, not queued.
+      const result = await this.#deliver(adapter, target, { kind: outgoing.kind, text: '', media: [item] }, '')
       results.push(result)
-      if (result.ok !== true) {
-        this.#options.logger.warn(`send failed on ${target.channel} (${result.code}); keeping the reply in the outbox`)
-        this.#outbox.add({ channel: target.channel, accountId: target.accountId, conversationId: target.conversationId }, { text: bubble, kind: outgoing.kind }, { code: result.code })
-      }
     }
     return results
+  }
+
+  /**
+   * Send what the turn wrote. The scan is bounded, and a file that cannot go
+   * out costs a log line, never the reply that already went out.
+   */
+  async #sendProducedFiles(message: InboundMessage, sinceMs: number): Promise<void> {
+    if (this.#options.config.autoSendFiles !== true) return
+    let files
+    try {
+      files = await listProducedFiles({
+        dir: this.#options.workingDirectory,
+        sinceMs,
+        maxFiles: this.#options.config.maxProducedFiles,
+        maxBytes: this.#options.config.maxProducedBytes,
+      })
+    } catch (error) {
+      this.#options.logger.warn(`scanning produced files failed: ${String((error as Error)?.message ?? error)}`)
+      return
+    }
+    if (files.length === 0) return
+    const media = files
+      .filter((file) => file.bytes > 0)
+      .map((file) => ({ kind: 'file' as const, path: file.path, name: file.name, bytes: file.bytes }))
+    if (media.length === 0) return
+    this.#options.logger.info(`sending ${media.length} produced file(s)`)
+    await this.send(message, { kind: 'reply', media })
+  }
+
+  /** One send, journalled in two phases. */
+  async #deliver(adapter: ChannelAdapter, target: Target, outgoing: Outgoing, text: string): Promise<SendResult> {
+    const id = `out-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
+    const media = (outgoing.media ?? []).map((item) => item.path)
+    const base = {
+      direction: 'out' as const,
+      id,
+      channel: target.channel,
+      accountId: target.accountId,
+      conversationId: target.conversationId,
+      kind: outgoing.kind,
+      text: text.slice(0, 500),
+      ...(media.length === 0 ? {} : { media }),
+    }
+    this.#journal.append({ ...base, phase: 'sending' })
+    let result: SendResult
+    try {
+      result = await adapter.send(target, outgoing)
+    } catch (error) {
+      result = { ok: false, code: 'adapter-threw', detail: String((error as Error)?.message ?? error) }
+    }
+    this.#journal.append({
+      ...base,
+      phase: 'settled',
+      delivery: result.ok === true ? (result.unconfirmed === true ? 'unconfirmed' : 'accepted') : 'failed',
+      ...(result.ok === true && result.messageId !== undefined ? { messageId: result.messageId } : {}),
+      ...(result.ok === true ? {} : { code: result.code }),
+    })
+    if (result.ok !== true && text !== '') {
+      this.#options.logger.warn(`send failed on ${target.channel} (${result.code}); keeping the reply in the outbox`)
+      this.#outbox.add({ channel: target.channel, accountId: target.accountId, conversationId: target.conversationId }, { text, kind: outgoing.kind }, { code: result.code })
+    }
+    return result
   }
 
   /** Start a periodic outbox retry; returns the stop function. */

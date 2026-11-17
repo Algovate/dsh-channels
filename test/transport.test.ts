@@ -116,3 +116,36 @@ test('a saved account without a token is treated as not logged in', () => {
   freshStateDir()
   assert.equal(readAccount('missing'), undefined)
 })
+
+test('the pacer refuses to send during a cooldown instead of hammering', async () => {
+  let now = 0
+  const { instance } = transport({
+    sendImpl: async () => {
+      throw new Error('server rejected')
+    },
+    sendIntervalMs: 0,
+    sendCooldownMs: 1000,
+  })
+  // Three failures arm the cooldown; the fourth send is refused locally.
+  for (let i = 0; i < 3; i += 1) await instance.sendText('conv', 'x')
+  const refused = await instance.sendText('conv', 'x')
+  assert.equal(refused.ok, false)
+  assert.equal(refused.ok === false ? refused.code : '', 'cooling-down')
+  assert.ok(now >= 0)
+})
+
+test('media is sent with a caption on the first attachment only', async () => {
+  const { readFile: _readFile } = await import('node:fs/promises')
+  const seen: Array<Record<string, unknown>> = []
+  const { instance } = transport({
+    sendMediaImpl: async (params) => {
+      seen.push(params)
+      return { serverMessageId: `s-${seen.length}` }
+    },
+  })
+  await instance.sendMedia('conv', '/tmp/a.png', '看图')
+  await instance.sendMedia('conv', '/tmp/b.png', '')
+  assert.equal(seen.length, 2)
+  assert.equal(seen[0]?.['text'], '看图')
+  assert.equal(seen[1]?.['text'], '')
+})

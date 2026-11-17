@@ -39,6 +39,15 @@ export interface NormalizedInbound extends InboundMessage {
   contextToken: string
 }
 
+/** A media item as iLink sent it, before it is downloaded. */
+export interface RawMediaItem {
+  type?: number
+  image_item?: unknown
+  voice_item?: unknown
+  file_item?: { file_name?: string }
+  video_item?: unknown
+}
+
 export function normalizeInbound(raw: RawMessage, accountId: string): NormalizedInbound | null {
   if (raw === null || typeof raw !== 'object') return null
   // Our own outbound echoes come back through getUpdates.
@@ -54,16 +63,17 @@ export function normalizeInbound(raw: RawMessage, accountId: string): Normalized
 
   const items = Array.isArray(raw.item_list) ? raw.item_list : []
   const texts: string[] = []
-  let unsupported = 0
+  const media: RawMediaItem[] = []
   for (const item of items) {
     if (item?.type === TEXT_ITEM && typeof item.text_item?.text === 'string' && item.text_item.text !== '') {
       texts.push(item.text_item.text)
     } else if (item !== undefined && item !== null) {
-      unsupported += 1
+      media.push(item as RawMediaItem)
     }
   }
   const text = texts.join('\n').trim()
-  if (text === '') return null
+  // A media-only message is still a message: the attachment is the message.
+  if (text === '' && media.length === 0) return null
 
   return {
     channel: 'weixin',
@@ -75,6 +85,12 @@ export function normalizeInbound(raw: RawMessage, accountId: string): Normalized
     group,
     at: typeof raw.create_time_ms === 'number' ? raw.create_time_ms : Date.now(),
     contextToken: typeof raw.context_token === 'string' ? raw.context_token : '',
-    ...(unsupported > 0 ? { raw: { unsupportedItems: unsupported } } : {}),
+    ...(media.length === 0 ? {} : { raw: { mediaItems: media } }),
   }
+}
+
+/** The media items to fetch for one normalized message. */
+export function mediaItemsOf(message: NormalizedInbound): RawMediaItem[] {
+  const raw = message.raw as { mediaItems?: RawMediaItem[] } | undefined
+  return Array.isArray(raw?.mediaItems) ? raw.mediaItems : []
 }
