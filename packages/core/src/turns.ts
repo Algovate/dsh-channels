@@ -116,16 +116,6 @@ export class TurnDriver {
     return running.progress.ownsActiveTurn ? { target: running.message, signal: running.signal } : undefined
   }
 
-  targetForAgent(value: unknown): InboundMessage | undefined {
-    return this.interactionForAgent(value)?.target
-  }
-
-  forgetTarget(sessionId: string): void {
-    for (const agent of this.#running.keys()) {
-      if (agent.session?.id === sessionId) this.#running.delete(agent)
-    }
-  }
-
   async dispose(): Promise<void> {
     this.#disposed = true
     this.#shutdown.abort()

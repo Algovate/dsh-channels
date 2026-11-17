@@ -1,21 +1,4 @@
-/**
- * One FIFO per conversation, plus a way for an interaction reply to jump it.
- *
- * Two properties matter and both are tested:
- *  - two messages in one conversation never run at the same time (the agent
- *    session is not re-entrant), while different conversations run in parallel;
- *  - an answer to a question runs *now*, not behind the turn that is asking it.
- *    Queueing that answer behind its own question deadlocks until the timeout.
- *
- * @module @derekluo/dsh-channels/inbound/queue
- */
-
-export interface QueueTask<T = unknown> {
-  run(signal: AbortSignal): Promise<T>
-}
-
-/** A task, either as an object or as a bare function. */
-export type QueueWork<T = unknown> = QueueTask<T> | ((signal: AbortSignal) => Promise<T>)
+/** Cancellable FIFO per conversation; interaction answers bypass it in the runtime. */
 
 interface Tail {
   /** Resolves when the tail of this conversation's queue settles. */
@@ -28,15 +11,14 @@ export class ConversationQueue {
   #tails = new Map<string, Tail>()
 
   /** Append a task; resolves with its result once everything before it settled. */
-  push<T>(key: string, work: QueueWork<T>): Promise<T> {
-    const task: QueueTask<T> = typeof work === 'function' ? { run: work } : work
+  push<T>(key: string, work: (signal: AbortSignal) => Promise<T>): Promise<T> {
     if (this.#disposed) return Promise.reject(new Error('the conversation queue is disposed'))
     const previous = this.#tails.get(key)
     const controller = new AbortController()
     this.#controllers.set(controller, key)
     const start = (previous?.promise ?? Promise.resolve()).then(() => {
       controller.signal.throwIfAborted()
-      return task.run(controller.signal)
+      return work(controller.signal)
     })
     const settled = start.then(
       () => undefined,
@@ -49,12 +31,6 @@ export class ConversationQueue {
       if (this.#tails.get(key) === tail) this.#tails.delete(key)
     })
     return start
-  }
-
-  /** Run a task immediately, in parallel with whatever the conversation is doing. */
-  runNow<T>(work: QueueWork<T>): Promise<T> {
-    const task: QueueTask<T> = typeof work === 'function' ? { run: work } : work
-    return task.run(new AbortController().signal)
   }
 
   /** Abort the queued work of one conversation (the running task sees the signal). */

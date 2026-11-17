@@ -45,7 +45,7 @@ function describeOne(item: InboundMedia): string {
         }
         return `${head}\n【语音转写】以下是识别结果，按用户原话处理：\n${item.transcript}`
       }
-      return `${head}\n这是一段微信语音，已转成 WAV；请用 read 工具处理，无法读取音频就如实说明。`
+      return `${head}\n这是一段音频（${item.mime}），尚无转写结果；无法读取音频就如实说明，不要臆测内容。`
     case 'video':
       return `${head}\n这是一个视频文件，无法直接读取内容；需要了解画面时请让用户描述或发截图。`
     default:

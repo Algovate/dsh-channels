@@ -87,6 +87,7 @@ export interface TransportOptions {
 interface PollBatch {
   buffer: string
   delivered: boolean
+  failed: boolean
   completion: Promise<void>
 }
 
@@ -118,7 +119,8 @@ export class WeixinTransport {
   }
 
   /** Latest context token seen for one conversation; iLink routes a reply by it. */
-  rememberContextToken(conversationId: string, token: string): void {
+  rememberContextToken(conversationId: string, token: string, onlyIfMissing = false): void {
+    if (onlyIfMissing && this.#contextTokens.has(conversationId)) return
     if (token !== '') this.#contextTokens.set(conversationId, token)
   }
 
@@ -135,7 +137,6 @@ export class WeixinTransport {
   }
 
   async stop(): Promise<void> {
-    if (this.#loop === undefined) return
     this.#abort.abort()
     await this.#loop
   }
@@ -197,23 +198,30 @@ export class WeixinTransport {
       this.#checkpoint()
       return 'ok'
     }
+    let handoffFailed = false
     const batch: PollBatch = {
       buffer: nextBuffer,
       delivered: false,
+      failed: false,
       completion: Promise.all(messages.map(async (raw) => {
         try {
           await this.#options.onMessage(raw)
         } catch (error) {
-          this.#options.logger.warn(`dropped one inbound message: ${String((error as Error)?.message ?? error)}`)
+          if ((error as { code?: string } | null)?.code === 'DSH_INBOUND_RETRY') handoffFailed = true
+          this.#options.logger.warn(`inbound handler failed: ${String((error as Error)?.message ?? error)}`)
         }
       })).then(() => {
         if (stopSignal.aborted) return
-        batch.delivered = true
+        batch.failed = handoffFailed
+        batch.delivered = !handoffFailed
         this.#checkpoint()
       }),
     }
     this.#batches.push(batch)
-    if (waitForDelivery) await batch.completion
+    if (waitForDelivery) {
+      await batch.completion
+      if (batch.failed) { await this.#rewindBatches(); return 'retry' }
+    }
     return stopSignal.aborted ? 'stopped' : 'ok'
   }
 
@@ -233,10 +241,22 @@ export class WeixinTransport {
     }
   }
 
+  async #rewindBatches(): Promise<void> {
+    await Promise.all(this.#batches.map((batch) => batch.completion))
+    this.#checkpoint()
+    this.#batches.length = 0
+    this.#fetchBuffer = this.#completedBuffer
+  }
+
   async #poll(): Promise<void> {
     let consecutiveFailures = 0
     try {
       while (!this.#abort.signal.aborted) {
+        if (this.#batches.some((batch) => batch.failed)) {
+          await this.#rewindBatches()
+          await delay(this.#options.retryDelayMs ?? RETRY_DELAY_MS, undefined, { signal: this.#abort.signal }).catch(() => {})
+          continue
+        }
         if (this.#batches.length >= MAX_PENDING_BATCHES) {
           await this.#batches[0]?.completion
           continue
@@ -266,7 +286,8 @@ export class WeixinTransport {
 
   /** Send one text bubble. Never throws: the caller decides what a failure means. */
   async sendText(conversationId: string, text: string): Promise<SendResult> {
-    if (!(await this.#pacer.take())) return { ok: false, code: 'cooling-down', retryAfterMs: 30_000 }
+    if (this.#abort.signal.aborted) return { ok: false, code: 'stopped' }
+    if (!(await this.#pacer.take(this.#abort.signal))) return this.#abort.signal.aborted ? { ok: false, code: 'stopped' } : { ok: false, code: 'cooling-down', retryAfterMs: 30_000 }
     const contextToken = this.#contextTokens.get(conversationId) ?? ''
     try {
       const send = (this.#options.sendImpl ?? (sendMessageItemWeixin as unknown as (params: Record<string, unknown>) => Promise<{ messageId?: string; serverMessageId?: string }>))
@@ -274,6 +295,7 @@ export class WeixinTransport {
         to: conversationId,
         item: { type: MessageItemType.TEXT, text_item: { text } },
         opts: {
+          signal: this.#abort.signal,
           baseUrl: this.#options.baseUrl,
           token: this.#options.token,
           ...(contextToken === '' ? {} : { contextToken }),
@@ -299,7 +321,8 @@ export class WeixinTransport {
    * audio goes out as a file.
    */
   async sendMedia(conversationId: string, filePath: string, text = ''): Promise<SendResult> {
-    if (!(await this.#pacer.take())) return { ok: false, code: 'cooling-down', retryAfterMs: 30_000 }
+    if (this.#abort.signal.aborted) return { ok: false, code: 'stopped' }
+    if (!(await this.#pacer.take(this.#abort.signal))) return this.#abort.signal.aborted ? { ok: false, code: 'stopped' } : { ok: false, code: 'cooling-down', retryAfterMs: 30_000 }
     const contextToken = this.#contextTokens.get(conversationId) ?? ''
     try {
       const sendMedia = (this.#options.sendMediaImpl ?? (sendWeixinMediaFile as unknown as (params: Record<string, unknown>) => Promise<{ messageId?: string; serverMessageId?: string }>))
@@ -350,17 +373,19 @@ export class SendPacer {
   }
 
   /** Wait until a send is allowed; resolves false when a cooldown is active. */
-  take(): Promise<boolean> {
-    const turn = this.#tail.then(() => this.#take())
+  take(signal?: AbortSignal): Promise<boolean> {
+    const turn = this.#tail.then(() => this.#take(signal))
     this.#tail = turn.catch(() => {})
     return turn
   }
 
-  async #take(): Promise<boolean> {
+  async #take(signal?: AbortSignal): Promise<boolean> {
+    if (signal?.aborted) return false
     const now = this.#now()
     if (now < this.#cooldownUntil) return false
     const wait = this.#minIntervalMs - (now - this.#lastAt)
-    if (wait > 0) await new Promise((resolve) => setTimeout(resolve, wait))
+    if (wait > 0) await delay(wait, undefined, { signal }).catch(() => {})
+    if (signal?.aborted) return false
     if (this.#now() < this.#cooldownUntil) return false
     this.#lastAt = this.#now()
     return true

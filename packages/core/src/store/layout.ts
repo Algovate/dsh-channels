@@ -51,6 +51,13 @@ export const STATE_LAYOUT: Readonly<Record<string, LayoutEntry>> = Object.freeze
     store: STORE.FILE,
     reason: '身份变更须原子保存成功后确认；旧 counters 的线号按需兼容读取',
   },
+  inbox: {
+    kind: 'file',
+    relative: 'inbox.json',
+    label: '未开始的入站消息',
+    store: STORE.FILE,
+    reason: '先原子保存再确认平台投递；回合开始前移出，重启仅恢复排队消息',
+  },
   outbox: {
     kind: 'file',
     relative: 'outbox.json',

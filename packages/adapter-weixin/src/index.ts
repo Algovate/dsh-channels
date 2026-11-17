@@ -93,9 +93,10 @@ export async function createAdapter({ runtime, config = {}, stateRoot }: WeixinA
       const message = normalizeInbound(raw, accountId)
       if (message === null) return
       const items = mediaItemsOf(message)
+      message.raw = { contextToken: message.contextToken }
       const { conversationId, contextToken } = message
       // Slow attachments must not make later messages pass earlier ones in the same chat.
-      const queued = (inbox.get(conversationId) ?? Promise.resolve()).then(async () => {
+      const queued = (inbox.get(conversationId) ?? Promise.resolve()).catch(() => {}).then(async () => {
         if (signal.aborted || runtime?.canReceive?.(message, items.length > 0) === false) return
         try {
           await attachMedia(message, items, signal)
@@ -105,9 +106,9 @@ export async function createAdapter({ runtime, config = {}, stateRoot }: WeixinA
         } finally {
           runtime?.cancelReceive?.(message)
         }
-      }).catch((error: unknown) => logger.warn(`inbound processing failed: ${String((error as Error)?.message ?? error)}`))
+      })
       inbox.set(conversationId, queued)
-      return queued.then(() => {
+      return queued.finally(() => {
         if (inbox.get(conversationId) === queued) inbox.delete(conversationId)
       })
     },
@@ -208,6 +209,10 @@ export async function createAdapter({ runtime, config = {}, stateRoot }: WeixinA
       return () => {
         handlers.delete(handler)
       }
+    },
+    restoreInbound(message: InboundMessage): void {
+      const context = message.raw as { contextToken?: unknown } | undefined
+      if (typeof context?.contextToken === 'string') transport.rememberContextToken(message.conversationId, context.contextToken, true)
     },
     async send(target: Target, outgoing: Outgoing): Promise<SendResult> {
       if (target.channel !== CHANNEL_ID || target.accountId !== accountId) return { ok: false, code: 'account-mismatch' }

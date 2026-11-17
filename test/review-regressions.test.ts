@@ -187,7 +187,7 @@ test('an interrupted attachment does not spend the last durable slot before repl
   afterDelivery.dispose()
 })
 
-test('shutdown before a queued turn starts leaves its replay eligible', async () => {
+test('shutdown preserves queued work and rejects duplicate provider replay', async () => {
   const stateRoot = temp()
   const open = async () => {
     const counters = new FileCounterStore({ stateRoot })
@@ -203,7 +203,8 @@ test('shutdown before a queued turn starts leaves its replay eligible', async ()
   assert.equal(runtime.canReceive({ ...message }), false)
   runtime.dispose() // no microtask has started the queued turn
   const restarted = await open()
-  assert.equal(restarted.canReceive({ ...message }), true)
+  assert.equal(restarted.canReceive({ ...message }), false)
+  assert.equal(JSON.parse(fs.readFileSync(path.join(stateRoot, 'inbox.json'), 'utf8')).length, 1)
   restarted.dispose()
 })
 
@@ -304,7 +305,7 @@ test('a failed retry callback backs off without blocking other replies', async (
   const outbox = new Outbox({ stateRoot: temp(), now: () => now })
   const target = inbound()
   outbox.add(target, { text: 'bad adapter', kind: 'reply' }, {})
-  outbox.add(target, { text: 'healthy adapter', kind: 'reply' }, {})
+  outbox.add({ ...target, conversationId: 'healthy-chat' }, { text: 'healthy adapter', kind: 'reply' }, {})
   now = 90_000
   const sent = await outbox.drain(async (entry) => {
     if (entry.outgoing.text === 'bad adapter') throw new Error('account lookup failed')

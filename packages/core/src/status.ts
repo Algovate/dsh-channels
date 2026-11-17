@@ -11,6 +11,7 @@ export interface StatusPayload {
   stateRoot: string
   channels: ChannelStatusView[]
   allowlist: string[]
+  inboxPending: number
   outboxPending: number
   journal: Array<{ at: number; kind: string; state: string; text: string }>
   interactions: { pending: boolean }
@@ -21,14 +22,4 @@ export interface StatusPayload {
     questionsEnabled: boolean
     approvalsEnabled: boolean
   }
-}
-
-export interface StatusSource {
-  stateRoot: string
-  channels(): Promise<ChannelStatusView[]>
-  allowlist(): string[]
-  outboxPending(): number
-  journalTail(limit: number): Array<{ at: number; kind: string; state: string; text: string }>
-  interactionsPending(): boolean
-  settings(): StatusPayload['settings']
 }

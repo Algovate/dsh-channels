@@ -19,6 +19,7 @@ import { allowlistFor, type ChannelsConfig } from './config.js'
 import { lineKey, sameTarget, sessionIdFor } from './ids.js'
 import { helpText, parseCommand } from './commands.js'
 import { SessionLines } from './store/lines.js'
+import { Inbox, type InboxEntry } from './store/inbox.js'
 import { Outbox } from './store/outbox.js'
 import { Journal, receiptKey } from './store/journal.js'
 import { TurnDriver } from './turns.js'
@@ -38,7 +39,6 @@ export interface RuntimeOptions {
   stateRoot: string
   workingDirectory: string
   createUserMessage?: (fields: Record<string, unknown>) => unknown
-  now?: () => number
   /** Put a channel session in the host's workspace grouping (once per session). */
   attachToWorkspace?: (sessionId: string) => void
   /** Durable rate counters; without one the gates count in memory only. */
@@ -50,6 +50,9 @@ export class ChannelsRuntime {
   readonly #adapters = new Map<string, ChannelAdapter>()
   readonly #queue = new ConversationQueue()
   readonly #expiredAccounts = new Set<string>()
+  readonly #inbox: Inbox
+  readonly #scheduledInbox = new Set<string>()
+  #resuming = false
   readonly #outbox: Outbox
   readonly #journal: Journal
   readonly #driver: TurnDriver
@@ -69,6 +72,7 @@ export class ChannelsRuntime {
   constructor(options: RuntimeOptions) {
     this.#options = options
     this.#lines = new SessionLines(options.stateRoot, options.logger.warn)
+    this.#inbox = new Inbox(options.stateRoot, options.logger.warn)
     this.#outbox = new Outbox({ stateRoot: options.stateRoot, warn: options.logger.warn })
     this.#journal = new Journal({ stateRoot: options.stateRoot, warn: options.logger.warn })
     const counters = options.counters
@@ -127,6 +131,10 @@ export class ChannelsRuntime {
     return this.#outbox
   }
 
+  pendingInputs(target?: Target): number {
+    return this.#inbox.list().filter((entry) => target === undefined || sameTarget(entry.message, target)).length
+  }
+
   get journal(): Journal {
     return this.#journal
   }
@@ -143,10 +151,6 @@ export class ChannelsRuntime {
    */
   interactionForAgent(agent: unknown): ReturnType<TurnDriver['interactionForAgent']> {
     return this.#driver.interactionForAgent(agent)
-  }
-
-  targetForAgent(agent: unknown): Target | undefined {
-    return this.#driver.targetForAgent(agent)
   }
 
   /**
@@ -192,11 +196,6 @@ export class ChannelsRuntime {
       questionsEnabled: config.questionsEnabled,
       approvalsEnabled: config.approvalsEnabled,
     }
-  }
-
-  /** Forget a conversation (tests, or after the adapter is removed). */
-  forgetTarget(sessionId: string): void {
-    this.#driver.forgetTarget(sessionId)
   }
 
   register(adapter: ChannelAdapter): () => void {
@@ -273,7 +272,7 @@ export class ChannelsRuntime {
     const access = authorizeMessage(message, context)
     if (!access.allow) return this.#refuse(message, access)
     const id = message.platformMessageId
-    if (id !== undefined && (this.#queuedReceipts.has(receiptKey(message, id)) || this.#journal.received(message, id))) {
+    if (id !== undefined && (this.#inbox.contains(message) || this.#queuedReceipts.has(receiptKey(message, id)) || this.#journal.received(message, id))) {
       return { allow: false, reason: 'duplicate' }
     }
     return access
@@ -319,29 +318,58 @@ export class ChannelsRuntime {
     return access
   }
 
-  #enqueueTurn(message: InboundMessage, reservation: Reservation): void {
-    const sessionId = this.#sessionIdFor(message)
+  /** Schedule saved work only after its channel has started; retry quota waits periodically. */
+  async resumePending(): Promise<void> {
+    if (this.#disposed || this.#resuming) return
+    this.#resuming = true
+    try {
+      for (const entry of this.#inbox.list()) {
+        if (this.#scheduledInbox.has(entry.id)) continue
+        const adapter = this.#adapters.get(entry.message.channel)
+        if (adapter === undefined) continue
+        try {
+          const accounts = await adapter.accounts.list()
+          if (this.#disposed) return
+          if (!accounts.some((account) => account.accountId === entry.message.accountId && !account.expired)) continue
+          const access = authorizeMessage(entry.message, this.gateContext())
+          if (!access.allow) { this.#inbox.remove(entry.id); continue }
+          const quota = reserveMessage(entry.message, this.gateContext())
+          if (!quota.allow) continue
+          try { adapter.restoreInbound?.(entry.message) }
+          catch (error) { quota.finish(false); throw error }
+          this.#enqueueTurn(entry.message, quota.finish, entry)
+        } catch (error) { this.logger.warn(`queued input could not resume: ${String(error)}`) }
+      }
+    } finally { this.#resuming = false }
+  }
+
+  #enqueueTurn(message: InboundMessage, reservation: Reservation, saved?: InboxEntry): void {
+    let entry: InboxEntry
+    try { entry = saved ?? this.#inbox.add(message, this.#sessionIdFor(message)) }
+    catch (error) { reservation(false); throw error }
+    this.#scheduledInbox.add(entry.id)
     const id = message.platformMessageId === undefined ? undefined : receiptKey(message, message.platformMessageId)
     if (id !== undefined) this.#queuedReceipts.add(id)
-    let started = false
+    let charged = false
     void this.#queue
       .push(lineKey(message), async (signal) => {
-        started = true
-        if (id !== undefined) this.#queuedReceipts.delete(id)
+        if (signal.aborted || this.#disposed || !this.#adapters.has(message.channel)) return
+        // Removal is the start boundary: after this point tools may have effects and must not be replayed.
+        this.#inbox.remove(entry.id)
         const access = authorizeMessage(message, this.gateContext())
-        if (!access.allow || signal.aborted || this.#disposed) {
-          reservation(false)
-          return
-        }
+        if (!access.allow) return
+        if (id !== undefined) this.#queuedReceipts.delete(id)
         this.#acceptInbound(message, reservation)
-        await this.#runTurn(message, sessionId, signal)
+        charged = true
+        await this.#runTurn(message, entry.sessionId, signal)
       })
       .catch((error: unknown) => {
-        if (!started) {
-          if (id !== undefined) this.#queuedReceipts.delete(id)
-          reservation(false)
-        }
         this.#options.logger.warn(`turn failed for ${lineKey(message)}: ${String((error as Error)?.message ?? error)}`)
+      })
+      .finally(() => {
+        if (!charged) reservation(false)
+        if (id !== undefined) this.#queuedReceipts.delete(id)
+        this.#scheduledInbox.delete(entry.id)
       })
   }
 
@@ -367,7 +395,7 @@ export class ChannelsRuntime {
    * Line 0 is the deterministic id every existing conversation already uses;
    * `/new` moves the conversation to line 1, 2, … so the old session stays
    * intact (and visible in the GUI) while the next message starts clean. The
-   * line is persisted in the counter store, so a restart does not walk back.
+   * line is persisted in the session-line store, so a restart does not walk back.
    */
   #sessionIdFor(message: InboundMessage): string {
     const key = lineKey(message)
@@ -401,6 +429,7 @@ export class ChannelsRuntime {
         `通道：${[...this.#adapters.keys()].join(', ') || '（没有）'}`,
         `状态目录：${this.#options.stateRoot}`,
         `允许的发送者：${config.allowedSenders.length}`,
+        `排队输入：${this.pendingInputs(message)}`,
         `待重发：${this.#outbox.list().filter((entry) => sameTarget(entry.target, message)).length}`,
         `等待答复：${this.#interactions.busy(message) ? '有' : '无'}`,
       ]
@@ -425,11 +454,6 @@ export class ChannelsRuntime {
     }
     this.#options.logger.info(`${key} starts session line ${next}`)
     await this.send(message, { text: `好，这条聊天从这里开新会话（第 ${next} 条）。上一条还留在 GUI 里。`, kind: 'notice' })
-  }
-
-  /** Answer a pending interaction out of band (never queued behind its own turn). */
-  async replyNow<T>(task: (signal: AbortSignal) => Promise<T>): Promise<T> {
-    return this.#queue.runNow({ run: (signal: AbortSignal) => task(signal) })
   }
 
   async #runTurn(message: InboundMessage, sessionId: string, signal: AbortSignal): Promise<void> {
@@ -458,7 +482,7 @@ export class ChannelsRuntime {
         await this.send(message, { text: '（这边出了点问题，这条没答上来。稍后再发一次，或者看 /status。）', kind: 'notice' })
         return
       }
-      if (reply.text.trim() !== '') await this.send(message, { text: reply.text, kind: 'reply' })
+      if (reply.text.trim() !== '' && (await this.send(message, { text: reply.text, kind: 'reply' })).some((result) => !result.ok)) return
       if (outputDir !== undefined && !this.#disposed) await this.#sendProducedFiles(message, outputDir)
     } finally {
       // Keep user artifacts; remove only empty directories, never recursively.
@@ -476,12 +500,22 @@ export class ChannelsRuntime {
     const text = outgoing.text === undefined ? '' : plainText(outgoing.text)
     const limit = Number.isFinite(adapter.capabilities.maxTextChars) && adapter.capabilities.maxTextChars > 0 ? adapter.capabilities.maxTextChars : this.#options.config.maxTextChars
     const bubbles = splitIntoBubbles(text, limit)
+    if (outgoing.kind === 'reply' && bubbles.length > 0 && this.#outbox.list().some((entry) => sameTarget(entry.target, target))) {
+      this.#outbox.add(target, { kind: 'reply', text: bubbles[0]! }, { code: 'queued', remaining: bubbles.slice(1) })
+      return [{ ok: false, code: 'queued' }]
+    }
     const results: SendResult[] = []
     const base = { kind: outgoing.kind }
     for (const [index, bubble] of bubbles.entries()) {
       if (index > 0 && this.#options.config.bubbleGapMs > 0) await new Promise((resolve) => setTimeout(resolve, this.#options.config.bubbleGapMs))
       if (this.#disposed) return [...results, { ok: false, code: 'stopped' }]
-      results.push(await this.#deliver(adapter, target, { ...base, text: bubble }, bubble))
+      const id = `out-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
+      const result = await this.#deliver(adapter, target, { ...base, text: bubble }, bubble, id)
+      results.push(result)
+      if (!result.ok) {
+        if (outgoing.kind === 'reply') this.#outbox.add(target, { kind: 'reply', text: bubble }, { id, code: result.code, remaining: bubbles.slice(index + 1) })
+        return results
+      }
     }
     for (const item of outgoing.media ?? []) {
       if (this.#disposed) return [...results, { ok: false, code: 'stopped' }]
@@ -560,16 +594,13 @@ export class ChannelsRuntime {
       ...(result.ok === true && result.messageId !== undefined ? { messageId: result.messageId } : {}),
       ...(result.ok === true ? {} : { code: result.code, id }),
     })
-    if (retryId === undefined && result.ok !== true && text !== '' && outgoing.kind === 'reply') {
-      this.#options.logger.warn(`send failed on ${target.channel} (${result.code}); keeping the reply in the outbox`)
-      this.#outbox.add({ channel: target.channel, accountId: target.accountId, conversationId: target.conversationId }, { text, kind: outgoing.kind }, { code: result.code, id })
-    }
     return result
   }
 
   /** Start a periodic outbox retry; returns the stop function. */
   startOutboxRetry(intervalMs = 30_000): () => void {
     const timer = setInterval(() => {
+      void this.resumePending()
       void this.#outbox
         .drain(async (entry) => {
           const adapter = this.#adapters.get(entry.target.channel)
@@ -580,7 +611,9 @@ export class ChannelsRuntime {
             return { ok: false as const, code: 'account-unavailable' }
           }
           if (this.#disposed || this.#adapters.get(entry.target.channel) !== adapter) return { ok: false as const, code: 'stopped' }
-          const result = await this.#deliver(adapter, entry.target, entry.outgoing, entry.outgoing.text ?? '', entry.id)
+          if ((entry.part ?? 0) > 0 && this.config.bubbleGapMs > 0) await new Promise((resolve) => setTimeout(resolve, this.config.bubbleGapMs))
+          if (this.#disposed) return { ok: false as const, code: 'stopped' }
+          const result = await this.#deliver(adapter, entry.target, entry.outgoing, entry.outgoing.text ?? '', entry.part === undefined ? entry.id : `${entry.id}:${entry.part}`)
           return result.ok === true ? { ok: true as const } : { ok: false as const, code: result.code }
         })
         .catch((error: unknown) => this.#options.logger.warn(`outbox retry failed: ${String(error)}`))

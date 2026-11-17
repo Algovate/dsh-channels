@@ -80,6 +80,7 @@ export async function sendMessageWeixin(params) {
             token: opts.token,
             timeoutMs: opts.timeoutMs,
             body: req,
+            signal: opts.signal,
         });
         const serverMessageId = response?.message_id;
         await cacheOutboundMessage({ opts, to, serverMessageId, body: text });
@@ -118,6 +119,7 @@ export async function sendMessageItemWeixin(params) {
             token: opts.token,
             timeoutMs: opts.timeoutMs,
             body: req,
+            signal: opts.signal,
         });
         const serverMessageId = response?.message_id;
         const itemText = item.type === MessageItemType.TEXT ? (item.text_item?.text ?? "") : "";
@@ -167,6 +169,7 @@ async function sendMediaItems(params) {
                 token: opts.token,
                 timeoutMs: opts.timeoutMs,
                 body: req,
+                signal: opts.signal,
             });
             lastServerMessageId = response?.message_id;
             if (item.type === MessageItemType.TEXT) {

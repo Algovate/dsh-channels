@@ -282,6 +282,7 @@ window.__ModuleLoader__.load({
                   ),
                 ),
                 h('div', { style: { display: 'flex', gap: 18, flexWrap: 'wrap', fontSize: 12, opacity: 0.85 } },
+                  h('span', null, `${t('Queued inputs', '排队输入')}: ${Number(data.inboxPending) || 0}`),
                   h('span', null, `${t('Outbox', '待重发')}: ${Number(data.outboxPending) || 0}`),
                   h('span', null, `${t('Waiting for an answer', '等待答复')}: ${data.interactions && data.interactions.pending ? t('yes', '有') : t('no', '无')}`),
                 ),
@@ -419,13 +420,15 @@ window.__ModuleLoader__.load({
      */
     function SettingsEditor({ data, reload, t }) {
       const live = data.settings || {}
-      const [values, setValues] = React.useState({
+      const [edits, setEdits] = React.useState({})
+      const values = {
         senderPerMinute: String(live.senderPerMinute ?? 6),
         senderPerDay: String(live.senderPerDay ?? 60),
         autoSendFiles: live.autoSendFiles !== false,
         questionsEnabled: live.questionsEnabled !== false,
         approvalsEnabled: live.approvalsEnabled !== false,
-      })
+        ...edits,
+      }
       const [busy, setBusy] = React.useState(false)
       const [saved, setSaved] = React.useState('')
       const [error, setError] = React.useState('')
@@ -438,17 +441,13 @@ window.__ModuleLoader__.load({
           method: 'POST',
           credentials: 'same-origin',
           headers: { 'content-type': 'application/json', accept: 'application/json' },
-          body: JSON.stringify({
-            senderPerMinute: Number(values.senderPerMinute),
-            senderPerDay: Number(values.senderPerDay),
-            autoSendFiles: values.autoSendFiles,
-            questionsEnabled: values.questionsEnabled,
-            approvalsEnabled: values.approvalsEnabled,
-          }),
+          body: JSON.stringify(Object.fromEntries(Object.entries(edits).map(([key, value]) =>
+            [key, key === 'senderPerMinute' || key === 'senderPerDay' ? Number(value) : value]))),
         })
           .then(async (response) => {
             const body = await response.json().catch(() => ({}))
             if (!response.ok || body.ok !== true) throw new Error(body.detail || `${response.status} ${response.statusText}`)
+            setEdits({})
             setSaved(t('Saved — it applies to the next message.', '已保存 —— 下一条消息就生效。'))
             reload()
           })
@@ -463,7 +462,8 @@ window.__ModuleLoader__.load({
             type: 'number',
             min: 0,
             value: values[key],
-            onChange: (event) => setValues((current) => ({ ...current, [key]: event.target.value })),
+            disabled: busy,
+            onChange: (event) => setEdits((current) => ({ ...current, [key]: event.target.value })),
             style: {
               width: 96,
               padding: '5px 8px',
@@ -481,7 +481,8 @@ window.__ModuleLoader__.load({
           h('input', {
             type: 'checkbox',
             checked: values[key],
-            onChange: (event) => setValues((current) => ({ ...current, [key]: event.target.checked })),
+            disabled: busy,
+            onChange: (event) => setEdits((current) => ({ ...current, [key]: event.target.checked })),
           }),
           h('span', { style: { opacity: 0.85 } }, label),
         )
@@ -502,7 +503,7 @@ window.__ModuleLoader__.load({
         h('div', { style: { display: 'flex', alignItems: 'center', gap: 10 } },
           h('button', {
             type: 'button',
-            disabled: busy,
+            disabled: busy || Object.keys(edits).length === 0,
             onClick: save,
             style: {
               padding: '6px 14px',

@@ -157,6 +157,11 @@ export async function createAdapter({ runtime, config = {}, stateRoot = '' }: Te
               await handleUpdate(update)
             } catch (error) {
               logger.warn(`telegram update failed: ${String((error as Error)?.message ?? error)}`)
+              if ((error as { code?: string } | null)?.code === 'DSH_INBOUND_RETRY') {
+                transport.retryFrom(update.update_id)
+                await delay(3000, undefined, { signal: transport.signal }).catch(() => {})
+                break
+              }
             }
           }
         }

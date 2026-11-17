@@ -3,7 +3,7 @@
   "version": "2.4.10",
   "files": {
     "LICENSE": "7f1e8cf099cf03de7c775e33e97e3c950c3a56a9616bb4de6b14d3c911bc5573",
-    "api/api.js": "28e30173a843111357fbac2b2e4acfd19094bd39140f5bf1c984dc20570d3159",
+    "api/api.js": "5c589c414ef031e245fd7b041b574fd7e21ab990f81ba4743356481024c2770f",
     "api/types.js": "bb1beff52adda8e48c6b4bc04d583a2823e2ebc23d682bb81dcadf905cdecc6e",
     "auth/accounts.js": "a54fa439349491e21a2c663c29f9294032de5855c7c3d7e0fe2dddb58332f0e6",
     "auth/login-qr.js": "bca3ca5610fb8926809e9649f6a66a6ca41bb2f71fac9c973112dfd280af06c8",
@@ -20,7 +20,7 @@
     "messaging/partial-quote.js": "7200dad1609c6f0529a96f858b8960304866e0d966163e2daf510ed89461126e",
     "messaging/quote-store.js": "44b418eb43ad358c3e7347567d556ae29bbb0c2d637ec3fb57d65e38b04d17e6",
     "messaging/send-media.js": "a42d6ff2317eb28c968ae9aa936790389b4b6480543d6e3849b69b4e0e05d7fa",
-    "messaging/send.js": "b721bf147b3ed5d8da1469c31bb4c87b40ea19af72587082dcb005a5f40510df",
+    "messaging/send.js": "6efe504f4e4d95e9db0e183b3ba820b4b8e57a611a942ec4c892699715aeaab3",
     "openclaw-shim.js": "60507a9dbddb3a3cfe28bedc86bdaed84dc156344e3074582019b0be1b33a164",
     "package.json": "7e50f77818680a280cba15d09aa9cf4b6830b7db2e950a231e7eddf815eb708b",
     "storage/state-dir.js": "1a7d7b2bc761ffa87282958beaeb00b6bae26ad130efd9ec9d8ec022800ad1ca",

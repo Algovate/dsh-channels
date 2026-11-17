@@ -182,8 +182,8 @@ test('an agent that answers for a conversation can be mapped back to it', async 
   await tick(150)
   const agent = h.agents.get(sessionIdFor({ channel: 'fake', accountId: 'acct', conversationId: 'conv' }))
   assert.ok(agent !== undefined)
-  assert.equal(runtime.targetForAgent(agent), undefined)
-  assert.equal(runtime.targetForAgent({ session: { id: 'someone-elses-session' } }), undefined)
+  assert.equal(runtime.interactionForAgent(agent)?.target, undefined)
+  assert.equal(runtime.interactionForAgent({ session: { id: 'someone-elses-session' } })?.target, undefined)
   runtime.dispose()
 })
 

@@ -27,7 +27,7 @@ test('the person\'s words stay last, so nothing they said is buried', () => {
 test('a voice note without a transcript says it cannot be listened to', () => {
   const text = inboundTextWithMedia({ text: '', media: [voice] })
   assert.match(text, /语音/)
-  assert.match(text, /WAV/)
+  assert.match(text, /audio\/wav/)
   assert.match(text, /无法读取音频就如实说明/)
 })
 

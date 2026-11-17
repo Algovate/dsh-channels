@@ -81,6 +81,8 @@ test('no module writes a top-level state path the table does not declare', () =>
 test('real core writers keep every generated path in the declared inventory', async () => {
   const os = await import('node:os')
   const { FileCounterStore } = await import('../packages/core/src/store/counters.js')
+  const { Inbox } = await import('../packages/core/src/store/inbox.js')
+  const { inbound } = await import('./harness.js')
   const { SessionLines } = await import('../packages/core/src/store/lines.js')
   const { Journal } = await import('../packages/core/src/store/journal.js')
   const { Outbox } = await import('../packages/core/src/store/outbox.js')
@@ -89,13 +91,14 @@ test('real core writers keep every generated path in the declared inventory', as
   const { stateInventory } = await import('../packages/core/src/store/inventory.js')
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'channels-layout-writes-'))
   try {
+    new Inbox(root, () => {}).add(inbound(), 'session')
     new FileCounterStore({ stateRoot: root }).set('line:conversation', 1)
     assert.equal(new SessionLines(root, () => {}).set('conversation', 2), true)
     new Journal({ stateRoot: root }).append({ direction: 'in', phase: 'received', id: 'test', channel: 'fake', accountId: 'a', conversationId: 'c', kind: 'message', text: 'hi' })
     new Outbox({ stateRoot: root }).add({ channel: 'fake', accountId: 'a', conversationId: 'c' }, { kind: 'reply', text: 'hi' }, {})
     createLogger({ stateRoot: root }).info('test')
     assert.equal(saveConfigOverlay(root, { allowedSenders: ['sender'] }), true)
-    assert.deepEqual(fs.readdirSync(root).sort(), ['config.json', 'counters.json', 'journal', 'lines.json', 'logs', 'outbox.json'])
+    assert.deepEqual(fs.readdirSync(root).sort(), ['config.json', 'counters.json', 'inbox.json', 'journal', 'lines.json', 'logs', 'outbox.json'])
     assert.deepEqual(stateInventory(root).unlisted, [])
   } finally { fs.rmSync(root, { recursive: true }) }
 })

@@ -41,7 +41,7 @@ export interface InboundMessage extends Target {
   at: number
   /** A stable provider ID, unique within this conversation when available. */
   platformMessageId?: string
-  /** Platform-private structure, for adapter diagnostics only. */
+  /** Platform-private context, also persisted for queued-message recovery. */
   raw?: unknown
 }
 
@@ -124,7 +124,10 @@ export interface ChannelAdapter {
   }
   start(): Promise<void>
   stop(): Promise<void>
+  /** A handler error with code DSH_INBOUND_RETRY means durable handoff failed: do not acknowledge it. */
   onInbound(handler: (message: InboundMessage) => void): () => void
+  /** Restore platform-private routing context before replaying a persisted input. */
+  restoreInbound?(message: InboundMessage): void
   send(target: Target, outgoing: Outgoing): Promise<SendResult>
   typing?(target: Target): Promise<void>
 }

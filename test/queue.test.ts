@@ -37,23 +37,6 @@ test('different conversations run in parallel', async () => {
   assert.deepEqual(order, ['a:start', 'b:start', 'b:end', 'a:end'])
 })
 
-test('runNow is not queued behind the conversation', async () => {
-  const queue = new ConversationQueue()
-  const order: string[] = []
-  const busy = queue.push('a', async () => {
-    order.push('turn:start')
-    await tick(30)
-    order.push('turn:end')
-  })
-  await tick(1)
-  await queue.runNow(async () => {
-    order.push('answer')
-  })
-  assert.equal(order[0], 'turn:start')
-  assert.equal(order[1], 'answer', 'the answer runs while the turn is still busy')
-  await busy
-})
-
 test('a failing task still lets the next one run, and the failure reaches the caller', async () => {
   const queue = new ConversationQueue()
   const failed = queue.push('a', async () => {

@@ -434,3 +434,37 @@ test('a stopped Telegram transport can start again without discarding its cursor
   assert.deepEqual(offsets, [undefined, 13])
   transport.stop()
 })
+
+test('a failed durable Telegram handoff rewinds the offset instead of acknowledging later updates', async () => {
+  const calls: number[] = []
+  let count = 0
+  const transport = new TelegramTransport({ token: '123:secret', logger: silent, fetchImpl: async (_url, init) => {
+    calls.push(JSON.parse(String(init?.body)).offset ?? 0)
+    return Response.json({ ok: true, result: count++ === 0 ? [baseUpdate, { ...baseUpdate, update_id: 11 }] : [] })
+  } })
+  await transport.pollOnce()
+  transport.retryFrom(10)
+  await transport.pollOnce()
+  assert.deepEqual(calls, [0, 10])
+  transport.stop()
+})
+
+test('the Telegram adapter retries a failed durable handoff before confirming the update', { timeout: 5000 }, async () => {
+  const delivered = deferred<void>()
+  const offsets: number[] = []
+  let attempts = 0
+  const adapter = await createAdapter({ config: { token: '123:secret', mediaEnabled: false, fetchImpl: async (_url, init) => {
+    offsets.push(JSON.parse(String(init?.body)).offset ?? 0)
+    if (offsets.length <= 2) return Response.json({ ok: true, result: [baseUpdate] })
+    return new Promise(() => {})
+  } } })
+  adapter.onInbound(() => {
+    if (++attempts === 1) throw Object.assign(new Error('cannot persist'), { code: 'DSH_INBOUND_RETRY' })
+    delivered.resolve()
+  })
+  await adapter.start()
+  try {
+    await delivered.promise
+    assert.deepEqual(offsets.slice(0, 2), [0, baseUpdate.update_id])
+  } finally { await adapter.stop() }
+})

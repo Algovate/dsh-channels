@@ -216,3 +216,45 @@ test('the card asks the host for status through the channels namespace', async (
     assert.equal(calls.length, 0, 'nothing is fetched until the card mounts')
   })
 })
+
+test('settings refresh replaces pristine fields and save submits only edited fields', async () => {
+  await withClient('en', (client) => {
+    let hooks: unknown[] = []
+    let index = 0
+    const React = {
+      ...react,
+      useState(value: unknown) { const i = index++; if (!(i in hooks)) hooks[i] = value; return [hooks[i], (next: unknown) => { hooks[i] = typeof next === 'function' ? next(hooks[i]) : next }] },
+      useCallback: (fn: unknown) => fn,
+      useEffect() {},
+    }
+    let Card: (() => any) | undefined
+    const slots = { inject: (_name: string, callback: () => unknown) => callback(), register: (seat: { name: string }, renderer: () => any) => { if (seat.name === 'plugins.bundle.config') Card = renderer; return () => {} } }
+    client.factory((name) => name === 'react' ? React : undefined).apply({ inject(services: string[], callback: (scope: unknown) => unknown) { if (!services.includes('uiConversation')) callback({ slots }); return { dispose() {} } } })
+    const data = { channels: [], journal: [], settings: { senderPerMinute: 6, approvalsEnabled: true } }
+    hooks = [{ phase: 'ready', data, error: '' }]
+    assert.ok(Card)
+    let editor: any
+    const find = (node: any): void => { if (node === null || typeof node !== 'object') return; if (node.type?.name === 'SettingsEditor') editor = node; for (const child of node.children ?? []) { if (Array.isArray(child)) child.forEach(find); else find(child) } }
+    find(Card())
+    assert.ok(editor)
+    hooks = []; index = 0
+    const fields = (tree: any): any[] => { const result: any[] = []; const walk = (node: any) => { if (node === null || typeof node !== 'object') return; if (node.type === 'input') result.push(node); for (const child of node.children ?? []) { if (Array.isArray(child)) child.forEach(walk); else walk(child) } }; walk(tree); return result }
+    let tree = editor.type(editor.props)
+    fields(tree)[0].props.onChange({ target: { value: '8' } })
+    const fresh = { ...editor.props, data: { ...data, settings: { senderPerMinute: 1, approvalsEnabled: false } } }
+    index = 0; tree = editor.type(fresh)
+    assert.equal(fields(tree)[0].props.value, '8', 'refresh preserves an unsaved edit')
+    assert.equal(fields(tree).at(-1)?.props.checked, false, 'refresh updates pristine fields')
+    let patch: any
+    const previous = globalThis.fetch
+    globalThis.fetch = ((_url: unknown, init: { body: string }) => { patch = JSON.parse(init.body); return new Promise(() => {}) }) as typeof fetch
+    try {
+      const click = (node: any): void => { if (node === null || typeof node !== 'object') return; if (node.type === 'button') node.props.onClick(); for (const child of node.children ?? []) { if (Array.isArray(child)) child.forEach(click); else click(child) } }
+      click(tree)
+      assert.deepEqual(patch, { senderPerMinute: 8 })
+      hooks = []; index = 0; tree = editor.type(editor.props)
+      index = 0; tree = editor.type(fresh)
+      assert.equal(fields(tree)[0].props.value, '1', 'a pristine form follows server refresh')
+    } finally { globalThis.fetch = previous }
+  })
+})

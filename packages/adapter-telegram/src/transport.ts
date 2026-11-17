@@ -142,6 +142,11 @@ export class TelegramTransport {
     return updates
   }
 
+  /** A failed durable handoff must be retried before a newer offset confirms it. */
+  retryFrom(updateId: number | undefined): void {
+    this.#offset = Math.min(this.#offset, typeof updateId === 'number' && Number.isSafeInteger(updateId) ? updateId : 0)
+  }
+
   /** Send one text message. Never throws: the caller decides what a failure means. */
   async sendText(chatId: string, text: string): Promise<SendResult> {
     try {

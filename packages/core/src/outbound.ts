@@ -2,8 +2,7 @@
  * Turning one reply into the bubbles a channel can carry.
  *
  * Splitting is the core's job, not the adapter's: the limit comes from the
- * channel's capability, and the rule ("never cut a code fence in half, prefer a
- * paragraph boundary") is the same everywhere.
+ * channel's capability, and the rule ("prefer a paragraph boundary") is the same everywhere.
  *
  * @module @derekluo/dsh-channels/outbound
  */
@@ -18,15 +17,17 @@ export function splitIntoBubbles(text: string, maxChars: number): string[] {
   if (!Number.isFinite(maxChars) || maxChars <= 0 || source.length <= maxChars) return source === '' ? [] : [source]
   const out: string[] = []
   const limit = Math.max(1, Math.floor(maxChars))
-  let rest = Array.from(source)
-  while (rest.length > limit) {
-    const window = rest.slice(0, limit).join('')
+  const points = Array.from(source)
+  let start = 0
+  while (points.length - start > limit) {
+    const window = points.slice(start, start + limit).join('')
     const cut = Math.max(window.lastIndexOf('\n\n'), window.lastIndexOf('\n'), window.lastIndexOf('。'), window.lastIndexOf('. '), window.lastIndexOf(' '))
     const at = cut > window.length * 0.4 ? Array.from(window.slice(0, cut + (window[cut] === '\n' ? 0 : 1))).length : limit
-    out.push(rest.slice(0, at).join('').trimEnd())
-    rest = Array.from(rest.slice(at).join('').trimStart())
+    out.push(points.slice(start, start + at).join('').trimEnd())
+    start += at
+    while (start < points.length && /\s/u.test(points[start]!)) start++
   }
-  if (rest.length > 0) out.push(rest.join(''))
+  if (start < points.length) out.push(points.slice(start).join(''))
   return out.filter((piece) => piece !== '')
 }
 

@@ -450,6 +450,7 @@ export async function sendMessage(params) {
         token: params.token,
         timeoutMs: params.timeoutMs ?? DEFAULT_API_TIMEOUT_MS,
         label: "sendMessage",
+        abortSignal: params.signal,
     });
     const resp = parseWeixinApiJson(rawText);
     if (resp.errcode && resp.errcode !== 0) {
