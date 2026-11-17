@@ -12,7 +12,6 @@
  *
  * @module @rodin/dsh-channels/remote
  */
-import { TypertRemoteService, RemoteError } from '@deepseek-ai/dsh-typert-protocol'
 
 export interface ChannelStatusView {
   id: string
@@ -50,17 +49,35 @@ function markRemoteMethods(target: object, names: string[]): void {
   })
 }
 
-export class ChannelsRemote extends TypertRemoteService {
-  readonly #source: StatusSource
-
-  constructor(ctx: unknown, source: StatusSource) {
-    super(ctx as never, 'channelsStatus', { namespace: 'channels' })
-    this.#source = source
+/**
+ * Build the Remote face when the host can host it.
+ *
+ * Returns undefined when the protocol package is absent (a test build, or a host
+ * without the API layer), and the card then reads the HTTP route instead.
+ */
+export async function createChannelsRemote(ctx: unknown, source: StatusSource): Promise<{ dispose?: () => void } | undefined> {
+  type Base = new (ctx: unknown, name: string, options: { namespace: string }) => object
+  let protocol: { TypertRemoteService?: Base } | undefined
+  try {
+    // A dynamic specifier keeps TypeScript from requiring the optional peer's
+    // types in a build where it is not installed.
+    const name = '@deepseek-ai/dsh-typert-protocol'
+    protocol = (await import(name)) as unknown as typeof protocol
+  } catch {
+    return undefined
   }
+  const Base = protocol?.TypertRemoteService
+  if (typeof Base !== 'function') return undefined
 
-  /** Everything the card renders, computed on the host at call time. */
-  async status(): Promise<StatusPayload> {
-    try {
+  class ChannelsRemote extends Base {
+    readonly #source: StatusSource
+
+    constructor(innerCtx: unknown, innerSource: StatusSource) {
+      super(innerCtx, 'channelsStatus', { namespace: 'channels' })
+      this.#source = innerSource
+    }
+
+    async status(): Promise<StatusPayload> {
       return {
         stateRoot: this.#source.stateRoot,
         channels: this.#source.channels(),
@@ -69,12 +86,8 @@ export class ChannelsRemote extends TypertRemoteService {
         journal: this.#source.journalTail(8),
         interactions: { pending: this.#source.interactionsPending() },
       }
-    } catch (error) {
-      // A throwing status must render as an error in the card, not as a broken
-      // page; the gateway turns RemoteError into a readable message.
-      throw new RemoteError('gateway/internal', String((error as Error)?.message ?? error), {})
     }
   }
+  markRemoteMethods(ChannelsRemote.prototype, ['status'])
+  return new ChannelsRemote(ctx, source) as { dispose?: () => void }
 }
-
-markRemoteMethods(ChannelsRemote.prototype, ['status'])

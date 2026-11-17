@@ -157,6 +157,26 @@ POST origin=http://evil.example → 403 {"code":"origin"}
 3. **会话要先有标题**：`sessionTitle.rename(session 对象, title)`（第一个参数是活会话对象，
    不是 id，传 id 会得到 `session "undefined" is not live`）。
 
+## M4：持久化的限流计数（存储域）
+
+限流闸门原来是**内存计数**：重启清零，"每人每天 60 条"等于没有。现在计数持久化，
+存活在宿主的 `channels` 存储域里（`ctx.storageDomain.open` + `defineDomain`/`domainTable`），
+读是同步的（闸门不能 await），写是写穿（落盘失败只 warn，绝不因此拒绝人的消息）。
+
+没有 storageDomain 的宿主（测试、headless）回落到插件自己的 `counters.json`，接口一致。
+
+真机：`rate counters: channels storage domain`（03:51:11）——域打开成功；写入在首条入站消息时发生。
+
+### 这一层踩到的坑（值得记住）
+
+1. **把宿主包当普通依赖装，会把宿主的行搞坏**：`@deepseek-ai/dsh-storage-domain@0.2.0-rc.2` 作为
+   dependency 被 pnpm 按到 profile 里，宿主启动时判定 "incompatible with dsh 0.2.2-rc.3" 并
+   **禁用了自己的 storage-domain 行**。改成 **optional peerDependencies** + 运行期动态 `import()`
+   之后宿主恢复正常。教训：宿主提供的包只能声明成 peer，且代码里必须能"没有它也跑"。
+2. **`ctx.get('storageDomain')` 拿不到**（和 workspaceRegistry 一样），必须 `ctx.inject(['storageDomain'], …)`。
+3. 静态 `import` 一个可选 peer 会让 `tsc -b` 在没装的构建里失败；把 specifier 写进变量再
+   `await import(name)`，类型上就只需要自己的接口。
+
 ## 已知边界
 
 - 语音**微信端到端**未验：ASR 引擎与桥在 mini 上已单独验证（见下），但用户发出的一条语音没有到达 iLink。

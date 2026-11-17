@@ -10,7 +10,8 @@
  */
 import { InteractionQueue } from './interaction/queue.js'
 import { ConversationQueue } from './inbound/queue.js'
-import { createRateLimiter, gateMessage, type GateContext, type GateDecision } from './inbound/gates.js'
+import { createDurableRateLimiter, createRateLimiter, gateMessage, type GateContext, type GateDecision } from './inbound/gates.js'
+import type { CounterStore } from './store/counters.js'
 import { allowlistFor, type ChannelsConfig } from './config.js'
 import { lineKey } from './ids.js'
 import { Outbox } from './store/outbox.js'
@@ -35,6 +36,8 @@ export interface RuntimeOptions {
   now?: () => number
   /** Put a channel session in the host's workspace grouping (once per session). */
   attachToWorkspace?: (sessionId: string) => void
+  /** Durable rate counters; without one the gates count in memory only. */
+  counters?: CounterStore
 }
 
 export class ChannelsRuntime {
@@ -180,8 +183,14 @@ export class ChannelsRuntime {
       expiredAccounts: this.#expiredAccounts,
       allowlistFor: (accountId) => allowlistFor(config, accountId),
       allowedChats: config.allowedChats,
-      minute: createRateLimiter({ limit: config.senderPerMinute, windowMs: 60_000, now: () => now() }),
-      day: createRateLimiter({ limit: config.senderPerDay, windowMs: 24 * 60 * 60_000, now: () => now() }),
+      minute:
+        this.#options.counters === undefined
+          ? createRateLimiter({ limit: config.senderPerMinute, windowMs: 60_000, now: () => now() })
+          : createDurableRateLimiter({ limit: config.senderPerMinute, windowMs: 60_000, prefix: 'minute', store: this.#options.counters, now: () => now() }),
+      day:
+        this.#options.counters === undefined
+          ? createRateLimiter({ limit: config.senderPerDay, windowMs: 24 * 60 * 60_000, now: () => now() })
+          : createDurableRateLimiter({ limit: config.senderPerDay, windowMs: 24 * 60 * 60_000, prefix: 'day', store: this.#options.counters, now: () => now() }),
       keyOf: (message) => lineKey(message),
     }
   }

@@ -72,3 +72,37 @@ export function createRateLimiter({ limit, windowMs, now = Date.now }: { limit: 
     },
   }
 }
+
+/**
+ * A fixed-window limiter whose counts survive a restart.
+ *
+ * The window key is the window's start instant, so yesterday's count can never
+ * be read as today's: a new window means a new key and the old row is simply
+ * never read again (the file keeps a handful of keys).
+ */
+export function createDurableRateLimiter({
+  limit,
+  windowMs,
+  prefix,
+  store,
+  now = Date.now,
+}: {
+  limit: number
+  windowMs: number
+  prefix: string
+  store: { get(key: string): number; set(key: string, value: number): void }
+  now?: () => number
+}): RateLimiter {
+  return {
+    take(key: string): boolean {
+      if (!Number.isFinite(limit) || limit <= 0) return true
+      const at = now()
+      const windowStart = Math.floor(at / windowMs) * windowMs
+      const windowKey = `${prefix}:${key}:${windowStart}`
+      const used = store.get(windowKey)
+      if (used >= limit) return false
+      store.set(windowKey, used + 1)
+      return true
+    },
+  }
+}

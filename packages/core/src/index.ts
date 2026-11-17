@@ -17,8 +17,10 @@ import path from 'node:path'
 
 import { Config as CoreConfig, resolveConfig, type ChannelsConfig } from './config.js'
 import { answerApproval } from './interaction/approval.js'
-import { ChannelsRemote, type StatusPayload, type StatusSource } from './remote.js'
+import { createChannelsRemote, type StatusPayload, type StatusSource } from './remote.js'
 import { saveConfigOverlay } from './store/root.js'
+import { DomainCounterStore, FileCounterStore, type CounterStore } from './store/counters.js'
+import { loadChannelsDomainSpec } from './store/domain.js'
 import { answerUserQuestion, type AskUserQuestionItem } from './interaction/questions.js'
 import { createLogger } from './log.js'
 import { ChannelsRuntime } from './runtime.js'
@@ -69,6 +71,7 @@ export async function startChannels({ ctx, config }: { ctx: PluginContext; confi
   // the default, so a channel can never write into a directory the user did not
   // choose for it.
   const workingDirectory = config.workingDirectory !== '' ? config.workingDirectory : path.join(root, 'workspace')
+  const counters = await openCounters({ ctx, root, logger })
   const workspace = await registerWorkspace({ ctx, workingDirectory, logger })
   const runtime = new ChannelsRuntime({
     ctx,
@@ -76,6 +79,7 @@ export async function startChannels({ ctx, config }: { ctx: PluginContext; confi
     logger,
     stateRoot: root,
     workingDirectory,
+    counters,
     ...(workspace === undefined
       ? {}
       : {
@@ -128,7 +132,7 @@ export async function startChannels({ ctx, config }: { ctx: PluginContext; confi
   }
   const stopOutbox = runtime.startOutboxRetry()
   const offSeams = registerInteractionSeams({ ctx, config, runtime, logger })
-  const remote = registerRemote({ ctx, config, runtime, root, logger })
+  const remote = await registerRemote({ ctx, config, runtime, root, logger })
   const offStatusRoute = registerStatusRoute({ ctx, config, runtime, root, logger })
   const offAllowlistRoute = registerAllowlistRoute({ ctx, config, runtime, root, logger })
 
@@ -307,7 +311,7 @@ async function registerWorkspace({
  * A Host without the typert protocol (a bare test context) simply gets no card
  * data; the plugin keeps working, because a status page is not a capability.
  */
-function registerRemote({
+async function registerRemote({
   ctx,
   config,
   runtime,
@@ -319,9 +323,9 @@ function registerRemote({
   runtime: ChannelsRuntime
   root: string
   logger: { info: (line: string) => void; warn: (line: string) => void }
-}): { dispose?: () => void } | undefined {
+}): Promise<{ dispose?: () => void } | undefined> {
   try {
-    const remote = new ChannelsRemote(ctx, statusSource({ config, runtime, root }))
+    const remote = await createChannelsRemote(ctx, statusSource({ config, runtime, root }))
     logger.info('status remote registered as channels.status()')
     return remote as unknown as { dispose?: () => void }
   } catch (error) {
@@ -340,6 +344,65 @@ function registerRemote({
  * generator. The route is a plain GET, same origin as the GUI, and returns only
  * what the card shows: no tokens, no message bodies beyond the journal tail.
  */
+/**
+ * Where the rate counters live: the host's `channels` storage domain when it is
+ * mounted, the plugin's own file otherwise.
+ *
+ * The domain gives atomic, validated, multi-process-safe records; the file keeps
+ * a headless or test host working exactly the same way. Both satisfy the same
+ * synchronous read the gate needs, because a gate cannot await.
+ */
+async function openCounters({
+  ctx,
+  root,
+  logger,
+}: {
+  ctx: PluginContext
+  root: string
+  logger: { info: (line: string) => void; warn: (line: string) => void }
+}): Promise<CounterStore> {
+  const fileStore = new FileCounterStore({ stateRoot: root, warn: (line) => logger.warn(line) })
+  await fileStore.load()
+  // `ctx.get` does not reach a service this plugin never injected (it answered
+  // undefined for the workspace registry too); `inject` runs the callback only
+  // when the service exists.
+  type Facet = { open?: (spec: unknown) => Promise<unknown> }
+  const storageDomain = await new Promise<Facet | undefined>((resolve) => {
+    const inject = (ctx as { inject?: (services: string[], callback: (scope: { storageDomain?: Facet }) => unknown) => unknown }).inject
+    if (typeof inject !== 'function') {
+      resolve(undefined)
+      return
+    }
+    try {
+      inject.call(ctx, ['storageDomain'], (scope) => resolve(scope.storageDomain))
+    } catch {
+      resolve(undefined)
+    }
+  })
+  if (typeof storageDomain?.open !== 'function') {
+    logger.info('rate counters: plugin file (no storage domain on this host)')
+    return fileStore
+  }
+  try {
+    const spec = await loadChannelsDomainSpec()
+    if (spec === undefined) {
+      logger.info('rate counters: plugin file (storage domain packages unavailable)')
+      return fileStore
+    }
+    const domain = (await storageDomain.open(spec)) as {
+      table: (name: string) => { get: (key: string) => { count?: number } | undefined; put: (key: string, value: unknown) => Promise<unknown> }
+    }
+    const table = domain.table('counters')
+    const store = new DomainCounterStore({ table, warn: (line) => logger.warn(line) })
+    await store.load()
+    logger.info('rate counters: channels storage domain')
+    return store
+  } catch (error) {
+    logger.warn(`storage domain unavailable (${String((error as Error)?.message ?? error)}); counters go to the plugin file`)
+    return fileStore
+  }
+}
+
 function registerAllowlistRoute({
   ctx,
   config: _config,
