@@ -38,5 +38,15 @@
   "homepage": "https://github.com/Algovate/dsh-channels",
   "bugs": {
     "url": "https://github.com/Algovate/dsh-channels/issues"
-  }
+  },
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "telegram",
+    "telegram-bot",
+    "bot-api",
+    "chatbot",
+    "channel",
+    "adapter"
+  ]
 }

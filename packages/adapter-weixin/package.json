@@ -36,5 +36,15 @@
   "homepage": "https://github.com/Algovate/dsh-channels",
   "bugs": {
     "url": "https://github.com/Algovate/dsh-channels/issues"
-  }
+  },
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "wechat",
+    "weixin",
+    "personal-wechat",
+    "chatbot",
+    "channel",
+    "adapter"
+  ]
 }
