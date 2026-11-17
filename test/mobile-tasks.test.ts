@@ -469,3 +469,24 @@ test('recovering work left in the inbox reuses its task history entry', async ()
     assert.equal(h.followedUp.length, 1)
   } finally { await runtime.dispose(); fs.rmSync(root, { recursive: true, force: true }) }
 })
+
+test('/tasks omits legacy query records before taking the five visible tasks', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'mobile-history-legacy-'))
+  const target = { channel: 'fake', accountId: 'acct', conversationId: 'conv' }
+  const summaries = ['任务 1', '任务 2', '任务 3', '任务 4', '任务 5', '/tasks']
+  fs.writeFileSync(path.join(root, 'tasks.json'), JSON.stringify(summaries.map((summary, index) => ({
+    id: `task-${index}`, target, senderId: 'sender', summary, startedAt: index, execution: 'completed', delivery: 'sent',
+  }))))
+  const h = createHarness()
+  const runtime = createChannelsRuntime({ ctx: h.ctx, stateRoot: root })
+  const adapter = createFakeAdapter()
+  runtime.register(adapter)
+  try {
+    runtime.dispatch(inbound({ text: '/tasks' }))
+    await until(() => adapter.sent.length > 0)
+    const text = adapter.sent.map((item) => item.outgoing.text).join('\n')
+    assert.deepEqual(text.match(/任务 \d/g), ['任务 5', '任务 4', '任务 3', '任务 2', '任务 1'])
+    assert.doesNotMatch(text, /\/tasks/)
+    assert.equal(h.followedUp.length, 0)
+  } finally { await runtime.dispose(); fs.rmSync(root, { recursive: true, force: true }) }
+})

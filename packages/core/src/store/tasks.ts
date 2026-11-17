@@ -1,5 +1,6 @@
 /** Recent executions per chat; never replay this file as work. */
 import fs from 'node:fs'
+import { parseCommand } from '../commands.js'
 import { sameTarget } from '../ids.js'
 import type { Target } from '../types.js'
 import { atomicWriteJson } from './atomic.js'
@@ -41,12 +42,17 @@ export class Tasks {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') { this.#unreadable = true; warn(`tasks could not be loaded: ${String(error)}`) }
     }
   }
-  latest(target: Target): TaskRecord | undefined { return this.#items.findLast((task) => sameTarget(task.target, target)) }
+  latest(target: Target): TaskRecord | undefined {
+    return this.#items.findLast((task) => sameTarget(task.target, target) && !isLegacyQuery(task))
+  }
   get(target: Target, id: string): TaskRecord | undefined {
     return this.#items.find((task) => task.id === id && sameTarget(task.target, target))
   }
   recent(target: Target, senderId?: string): TaskRecord[] {
-    return this.#items.filter((task) => sameTarget(task.target, target) && (senderId === undefined || task.senderId === senderId)).slice(-5).reverse()
+    return this.#items
+      .filter((task) => sameTarget(task.target, target) && (senderId === undefined || task.senderId === senderId) && !isLegacyQuery(task))
+      .slice(-5)
+      .reverse()
   }
   save(task: TaskRecord): boolean {
     // The inbox may still contain this ID if the process stopped between the two writes.
@@ -74,6 +80,13 @@ export class Tasks {
     }
   }
 }
+
+// Releases before /tasks could execute a bare query as an ordinary message.
+function isLegacyQuery(task: TaskRecord): boolean {
+  const command = parseCommand(task.summary)
+  return command?.name === 'tasks' && command.args === ''
+}
+
 function validTask(value: unknown): value is TaskRecord {
   if (value === null || typeof value !== 'object') return false
   const task = value as Partial<TaskRecord>
