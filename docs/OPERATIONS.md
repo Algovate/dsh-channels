@@ -4,6 +4,18 @@
 
 需要 Node.js 22.13 或更高版本。已验证的 DSH 版本见[验证状态](STATUS.md)。
 
+### 从 npm 安装
+
+在终端安装核心和微信适配器。将 `default` 换成实际的 DSH profile 名：
+
+```bash
+dsh plugin --profile default add @rodin/dsh-channels@0.1.0 @rodin/dsh-channels-weixin@0.1.0
+```
+
+使用 Telegram 时，把微信适配器换成 `@rodin/dsh-channels-telegram@0.1.0`。安装后按下文配置凭证和白名单，再重启宿主。
+
+### 从源码构建安装包
+
 在仓库根目录构建并生成本地安装包：
 
 ```bash

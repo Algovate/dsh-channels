@@ -29,5 +29,14 @@
     "@rodin/dsh-channels": {
       "optional": true
     }
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Algovate/dsh-channels.git",
+    "directory": "packages/adapter-telegram"
+  },
+  "homepage": "https://github.com/Algovate/dsh-channels",
+  "bugs": {
+    "url": "https://github.com/Algovate/dsh-channels/issues"
   }
 }

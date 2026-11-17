@@ -56,5 +56,22 @@
     "@deepseek-ai/dsh-typert-protocol": {
       "optional": true
     }
-  }
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Algovate/dsh-channels.git",
+    "directory": "packages/core"
+  },
+  "homepage": "https://github.com/Algovate/dsh-channels",
+  "bugs": {
+    "url": "https://github.com/Algovate/dsh-channels/issues"
+  },
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "wechat",
+    "weixin",
+    "telegram",
+    "chat"
+  ]
 }

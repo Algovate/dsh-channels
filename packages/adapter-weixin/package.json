@@ -27,5 +27,14 @@
   },
   "optionalDependencies": {
     "silk-wasm": "^3.7.1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Algovate/dsh-channels.git",
+    "directory": "packages/adapter-weixin"
+  },
+  "homepage": "https://github.com/Algovate/dsh-channels",
+  "bugs": {
+    "url": "https://github.com/Algovate/dsh-channels/issues"
   }
 }
