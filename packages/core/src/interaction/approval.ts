@@ -17,6 +17,7 @@ import { withinLifetime } from './lifetime.js'
 import type { InteractionEntry, InteractionQueue } from './queue.js'
 import { randomBytes } from 'node:crypto'
 import type { Target } from '../types.js'
+import { chatParagraphs } from '../outbound.js'
 
 export type ApprovalOutcome = 'allowed-once' | 'rejected' | 'cancelled' | 'unavailable'
 
@@ -24,15 +25,13 @@ const ALLOW_TOKENS = new Set(['1', '允许', '同意', '批准', 'allow', 'yes',
 const DENY_TOKENS = new Set(['2', '拒绝', '不同意', 'deny', 'no', 'n', '不行', '不要'])
 const CANCEL_TOKENS = new Set(['3', '取消', 'cancel', '算了'])
 
-/** The prompt: what wants to run, why, and the two numbers that decide it. */
+/** The prompt: identify the tool and show why it needs approval. */
 export function formatApprovalPrompt(request: { toolName?: string; reason?: string; displayReason?: unknown }): string {
   const tool = typeof request.toolName === 'string' && request.toolName !== '' ? request.toolName : '一个工具'
   const reason = typeof request.reason === 'string' && request.reason.trim() !== '' ? request.reason.trim() : ''
   const display = typeof request.displayReason === 'string' ? request.displayReason.trim() : ''
-  const lines = ['【需要批准】', `${tool} 想要执行。`]
-  if (reason !== '') lines.push(reason.length > 700 ? `${reason.slice(0, 700)}…` : reason)
-  else if (display !== '') lines.push(display.length > 700 ? `${display.slice(0, 700)}…` : display)
-  return lines.join('\n')
+  const detail = reason || display
+  return chatParagraphs('【需要批准】', `工具：${tool}`, detail ? `原因：${detail.length > 700 ? detail.slice(0, 700) + '…' : detail}` : '')
 }
 
 /** Reply text → one of the seam's outcomes; `null` means "not an answer". */
@@ -47,16 +46,13 @@ export function parseApprovalOutcome(text: string): ApprovalOutcome | null {
 
 export function approvalEntry({ target, request }: { target: Target; request: { toolName?: string; reason?: string; displayReason?: unknown } }): InteractionEntry {
   const code = randomBytes(3).toString('hex')
-  const hint = `回复「${code} 1」允许、「${code} 2」拒绝；「${code} 3」取消。`
+  const hint = chatParagraphs('请回复下面任意一组验证码和序号。', `「${code} 1」允许一次`, `「${code} 2」拒绝`, `「${code} 3」取消审批`)
   return {
     kind: 'approval',
     target,
     view: {
       title: formatApprovalPrompt(request),
-      options: [
-        { id: 'allowed-once', label: '允许（只这一次）' },
-        { id: 'rejected', label: '拒绝' },
-      ],
+      options: [],
       hint,
     },
     parse(text: string) {
@@ -64,8 +60,8 @@ export function approvalEntry({ target, request }: { target: Target; request: { 
       const outcome = parts.length === 2 && parts[0]?.toLowerCase() === code ? parseApprovalOutcome(parts[1]!) : null
       return outcome === null ? { ok: false, hint } : { ok: true, value: outcome }
     },
-    expiredNotice: '（这个审批等太久了，先在电脑上处理一下吧。）',
-    retiredNotice: '（这个审批已经在电脑上处理过了。）',
+    expiredNotice: '聊天审批已超时。请在 DSH 查看工具是否仍在等待批准。',
+    retiredNotice: '审批已在 DSH 处理。',
     retireValue: 'unavailable',
   }
 }

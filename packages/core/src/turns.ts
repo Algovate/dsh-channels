@@ -365,7 +365,11 @@ export class TurnDriver {
       content: [
         ...(request.outputDirectory === undefined ? [] : [{
           type: 'text',
-          text: `To attach a file to this chat reply, write it into this turn's output directory: ${request.outputDirectory}. Only put files for this chat in that directory.`,
+          text: [
+            `Deliver any final image or other file requested below as a chat attachment. Before replying, save it in this turn's output directory: ${request.outputDirectory}.`,
+            'If a tool or skill saves the result somewhere else (for example, output/), keep the original and copy the finished file into the turn output directory before replying. Only put files intended for this chat in that directory.',
+            'A local Markdown image or file link in the reply does not send the file. The chat channel uploads files from the turn output directory, so omit local links and use the reply for a short description.',
+          ].join('\n'),
         }]),
         { type: 'text', text: inboundTextWithMedia({ ...message, media: enriched }) },
       ],

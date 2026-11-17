@@ -19,6 +19,8 @@ test('a slash word is a command; anything else is a message', () => {
 
 test('help lists every command once', () => {
   const text = helpText()
+  assert.match(text, /^【可用命令】\n\n/)
+  assert.match(text, /\n\n\/cancel.*\n\n\/clear/)
   for (const name of ['help', 'status', 'whoami', 'new']) assert.match(text, new RegExp(`/${name}`))
 })
 
@@ -31,7 +33,7 @@ test('/whoami answers with the ids an allowlist needs, and starts no turn', asyn
   await tick(50)
   const notice = adapter.sent.find((entry) => entry.outgoing.kind === 'notice')
   assert.ok(notice !== undefined)
-  assert.match(notice.outgoing.text ?? '', /发送者 id：sender/)
+  assert.match(notice.outgoing.text ?? '', /^【当前聊天】\n\n发送者 ID：sender\n\n聊天 ID：conv/)
   assert.match(notice.outgoing.text ?? '', /通道：fake/)
   assert.equal(h.created.length, 0, 'a command does not start a session')
   runtime.dispose()
@@ -50,7 +52,7 @@ test('/status groups mobile information and keeps only recent results', async ()
     runtime.dispatch(inbound({ text: '/status' }))
     await tick(50)
     const text = adapter.sent.at(-1)?.outgoing.text ?? ''
-    assert.match(text, /^【任务状态 · fake】\n\n当前任务：无\n\n【队列】排队：0 条　｜　待重发：0 条/)
+    assert.match(text, /^【任务状态 · 测试】\n\n当前任务：无\n\n【队列】排队：0 条　｜　待重发：0 条/)
     assert.match(text, /\n\n【最近结果】\n\n· 已发送｜第一行 第二行（2 条）$/)
     assert.doesNotMatch(text, /状态目录|允许的发送者|accepted|已接收/)
     assert.equal(text.match(/【任务状态/g)?.length, 1)

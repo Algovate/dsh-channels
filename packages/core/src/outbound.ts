@@ -54,3 +54,8 @@ export function plainText(markdown: string): string {
   out = out.replace(/\u0000FENCE(\d+)\u0000/g, (_whole, index: string) => fences[Number(index)] ?? '')
   return out
 }
+
+/** WeChat collapses single newlines in chat. Blank lines keep separate instructions readable. */
+export function chatParagraphs(...paragraphs: string[]): string {
+  return paragraphs.filter(Boolean).join('\n\n')
+}

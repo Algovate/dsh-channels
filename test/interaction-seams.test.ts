@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
-import { answerApproval, formatApprovalPrompt, parseApprovalOutcome } from '../packages/core/src/interaction/approval.js'
+import { approvalEntry, answerApproval, formatApprovalPrompt, parseApprovalOutcome } from '../packages/core/src/interaction/approval.js'
 import { answerUserQuestion, formatQuestionPrompt, parseAnswers, parseOneQuestion } from '../packages/core/src/interaction/questions.js'
 import { InteractionQueue, type InteractionEntry } from '../packages/core/src/interaction/queue.js'
 import type { Outgoing, Target } from '../packages/core/src/types.js'
@@ -30,7 +30,7 @@ test('a single question renders header, text, options and descriptions', () => {
   assert.match(prompt, /喝什么/)
   assert.match(prompt, /只能选一个/)
   assert.match(prompt, /1\. 咖啡 — 热的/)
-  assert.match(prompt, /2\. 茶/)
+  assert.match(prompt, /\n\n1\. 咖啡 — 热的\n\n2\. 茶\n\n回复一个序号/)
   assert.match(prompt, /2 分钟内有效/)
 })
 
@@ -39,6 +39,35 @@ test('several questions are numbered and say how to answer', () => {
   assert.match(prompt, /第 1 题/)
   assert.match(prompt, /第 2 题/)
   assert.match(prompt, /一题一行/)
+})
+
+test('a free-text question tells the chat to reply in words', async () => {
+  const { instance, sent } = queue()
+  const answer = answerUserQuestion({
+    queue: instance, target, questions: [{ id: 'q', question: '写什么？' }],
+    request: {}, next: () => new Promise(() => {}), logger: silent,
+  })
+  await tick()
+  assert.equal(instance.claim(target, '周报').status, 'answered')
+  await answer
+  const prompt = sent[0]?.text ?? ''
+  assert.match(prompt, /回复文字/)
+  assert.doesNotMatch(prompt, /回复序号/)
+  assert.match(prompt, /10 秒内有效/)
+})
+
+test('approval decisions display full reply codes without bare numbered choices', async () => {
+  const { instance, sent } = queue()
+  const entry = approvalEntry({ target, request: { toolName: 'bash', reason: '安装依赖' } })
+  const answer = instance.ask(entry)
+  await tick()
+  const prompt = sent[0]?.text ?? ''
+  const code = prompt.match(/[a-f0-9]{6}/)?.[0]
+  assert.ok(code)
+  assert.equal(instance.claim(target, `${code} 3`).status, 'answered')
+  assert.equal(await answer, 'cancelled')
+  assert.ok(prompt.includes(`「${code} 1」允许一次\n\n「${code} 2」拒绝\n\n「${code} 3」取消审批`))
+  assert.doesNotMatch(prompt, /^1\./m)
 })
 
 test('an option answer keeps the host vocabulary: id + selected', () => {
@@ -84,7 +113,7 @@ test('several questions need one line each, and both separators work', () => {
 test('the approval prompt names the tool and the decision numbers', () => {
   const prompt = formatApprovalPrompt({ toolName: 'bash', reason: '安装依赖' })
   assert.match(prompt, /【需要批准】/)
-  assert.match(prompt, /bash 想要执行/)
+  assert.match(prompt, /工具：bash/)
   assert.match(prompt, /安装依赖/)
 
   const { instance, sent } = queue()

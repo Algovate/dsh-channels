@@ -15,8 +15,17 @@
  * @module @derekluo/dsh-channels/interaction/queue
  */
 import type { Outgoing, SendResult, Target } from '../types.js'
+import { chatParagraphs } from '../outbound.js'
 
 export const DEFAULT_INTERACTION_TIMEOUT_MS = 10 * 60_000
+
+export function interactionValidity(timeoutMs: number): string {
+  const seconds = Math.max(1, Math.ceil(timeoutMs / 1000))
+  const minutes = Math.floor(seconds / 60)
+  const remainder = seconds % 60
+  const duration = [minutes ? `${minutes} 分钟` : '', remainder ? `${remainder} 秒` : ''].filter(Boolean).join(' ')
+  return `${duration}内有效`
+}
 
 export type InteractionKind = 'question' | 'approval'
 
@@ -178,21 +187,15 @@ export class InteractionQueue {
     })
   }
 
-  /**
-   * The prompt text. The numbering IS the answer syntax, so it is generated in
-   * one place (here) rather than by each seam.
-   */
+  /** Add the deadline to the reply instructions provided by each interaction. */
   #renderText(entry: InteractionEntry): string {
-    const lines = [entry.view.title]
-    if (entry.view.options.length > 0) {
-      entry.view.options.forEach((option, index) => {
-        lines.push(`${index + 1}. ${option.label}`)
-      })
-    }
-    if (entry.view.hint !== undefined && entry.view.hint !== '') lines.push('', entry.view.hint)
-    const minutes = Math.max(1, Math.round(this.#timeoutMs() / 60_000))
-    lines.push('', `（${entry.kind === 'approval' ? '请按上述验证码答复' : '回复序号即可'}，${minutes} 分钟内有效）`)
-    return lines.join('\n')
+    const { title, options, hint } = entry.view
+    return chatParagraphs(
+      title,
+      ...options.map((option, index) => `${index + 1}. ${option.label}`),
+      hint ?? (options.length > 0 ? '回复序号即可。' : ''),
+      `【回复时限】${interactionValidity(this.#timeoutMs())}`,
+    )
   }
 
   #isHead(pending: Pending): boolean {
@@ -217,7 +220,7 @@ export class InteractionQueue {
     }
     const sender = head.entry.target
     if (sender.group && sender.senderId !== undefined && (target as { senderId?: string }).senderId !== sender.senderId) {
-      return { status: 'invalid', hint: '请由发起这次请求的人答复。' }
+      return { status: 'invalid', hint: '请由任务发起者回复。' }
     }
     const parsed = head.entry.parse(text)
     if (parsed === null) return { status: 'none' }

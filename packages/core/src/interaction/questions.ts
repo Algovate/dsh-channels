@@ -15,7 +15,8 @@
  * @module @derekluo/dsh-channels/interaction/questions
  */
 import { withinLifetime } from './lifetime.js'
-import type { InteractionEntry, InteractionQueue } from './queue.js'
+import { interactionValidity, type InteractionEntry, type InteractionQueue } from './queue.js'
+import { chatParagraphs } from '../outbound.js'
 import type { Target } from '../types.js'
 
 /** A plan or permission detail longer than this is cut with an ellipsis. */
@@ -44,7 +45,7 @@ export function formatQuestionPrompt(questions: readonly AskUserQuestionItem[], 
   const lines = ['【提问】']
   const several = list.length > 1
   list.forEach((question, index) => {
-    if (several) lines.push('', `第 ${index + 1} 题`)
+    if (several) lines.push(`第 ${index + 1} 题`)
     const header = typeof question?.header === 'string' ? question.header.trim() : ''
     if (header !== '') lines.push(`【${header}】`)
     const text = typeof question?.question === 'string' ? question.question.trim() : ''
@@ -57,12 +58,13 @@ export function formatQuestionPrompt(questions: readonly AskUserQuestionItem[], 
       const description = typeof option === 'object' && option !== null && typeof option.description === 'string' ? option.description.trim() : ''
       lines.push(`${optionIndex + 1}. ${label}${description === '' ? '' : ` — ${description}`}`)
     })
-    if (options.length === 0) lines.push('（直接回复文字即可）')
-    if (question.multiple === true && options.length > 0) lines.push('（可选多个，用逗号分隔序号）')
+    if (options.length === 0) lines.push('回复文字，或回复「跳过」。')
+    else if (question.multiple === true) lines.push('回复序号，可用逗号分隔多个序号。也可回复「跳过」。')
+    else lines.push('回复一个序号，或回复「跳过」。')
   })
-  if (several) lines.push('', '（一题一行回复；也可以只用分号分隔）')
-  if (waitMs !== undefined) lines.push('', `（${Math.max(1, Math.round(waitMs / 60_000))} 分钟内有效）`)
-  return lines.join('\n')
+  if (several) lines.push('请在同一条消息里按顺序回答，一题一行，也可以用分号分隔。')
+  if (waitMs !== undefined) lines.push(`【回复时限】${interactionValidity(waitMs)}`)
+  return chatParagraphs(...lines)
 }
 
 /** `1` / `1.` / `１` / `1,3` → option numbers; `undefined` when it is free text. */
@@ -128,7 +130,7 @@ export function parseAnswers(text: string, questions: readonly AskUserQuestionIt
     .map((line) => line.trim())
     .filter((line) => line !== '')
   if (lines.length !== list.length) {
-    return { ok: false, hint: `一共 ${list.length} 题，请一题一行回复。` }
+    return { ok: false, hint: `共 ${list.length} 题。请在同一条消息里按顺序回答，一题一行或用分号分隔。` }
   }
   const answers: QuestionAnswer[] = []
   for (const [index, question] of list.entries()) {
@@ -151,8 +153,8 @@ export function questionEntry({ target, questions, hint }: { target: Target; que
       const parsed = parseAnswers(text, questions)
       return parsed.ok === true ? { ok: true, value: JSON.stringify({ answers: parsed.answers }) } : { ok: false, hint: parsed.hint }
     },
-    expiredNotice: '（这个问题等太久了，先在电脑上答一下吧。）',
-    retiredNotice: '（问题已经在电脑上答过了。）',
+    expiredNotice: '聊天答复已超时。请在 DSH 查看任务是否仍在等待回答。',
+    retiredNotice: '问题已在 DSH 处理。',
     retireValue: JSON.stringify({ answers: [] }),
   }
 }

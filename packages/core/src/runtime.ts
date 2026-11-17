@@ -24,7 +24,7 @@ import { Outbox } from './store/outbox.js'
 import { Tasks, type TaskRecord } from './store/tasks.js'
 import { Journal, receiptKey } from './store/journal.js'
 import { TurnDriver } from './turns.js'
-import { plainText, splitIntoBubbles } from './outbound.js'
+import { chatParagraphs, plainText, splitIntoBubbles } from './outbound.js'
 import { listProducedFiles } from './produced.js'
 import type { ChannelAdapter, InboundMessage, Outgoing, SendResult, Target } from './types.js'
 
@@ -364,7 +364,7 @@ export class ChannelsRuntime {
     this.#queuedReservations.set(entry.id, reservation)
     if (saved === undefined) {
       const ahead = this.pendingInputs(message) - 1 + (this.#activeTasks.has(lineKey(message)) ? 1 : 0)
-      void this.send(message, { text: ahead > 0 ? `已接收，前面有 ${ahead} 个任务。` : '已接收，准备处理。', kind: 'notice' }).catch((error) => this.logger.warn(`receipt notice failed: ${String(error)}`))
+      void this.send(message, { text: ahead > 0 ? `已接收，前面有 ${ahead} 个任务。发 /status 查看队列。` : '已接收，准备处理。', kind: 'notice' }).catch((error) => this.logger.warn(`receipt notice failed: ${String(error)}`))
     }
     const id = message.platformMessageId === undefined ? undefined : receiptKey(message, message.platformMessageId)
     if (id !== undefined) this.#queuedReceipts.add(id)
@@ -440,12 +440,13 @@ export class ChannelsRuntime {
     }
     if (name === 'whoami') {
       await this.send(message, {
-        text: [
-          `发送者 id：${message.senderId}`,
-          `会话 id：${message.conversationId}`,
+        text: chatParagraphs(
+          '【当前聊天】',
+          `发送者 ID：${message.senderId}`,
+          `聊天 ID：${message.conversationId}`,
           `通道：${message.channel}（账号 ${message.accountId}）`,
-          `会话线：${this.#sessionIdFor(message)}`,
-        ].join('\n'),
+          `DSH 会话：${this.#sessionIdFor(message)}`,
+        ),
         kind: 'notice',
       })
       return
@@ -457,21 +458,25 @@ export class ChannelsRuntime {
         return
       }
       if (active.record.senderId !== message.senderId) {
-        await this.send(message, { text: '请由任务发起者停止这次任务。', kind: 'notice' })
+        await this.send(message, { text: '只有任务发起者可以停止当前任务。', kind: 'notice' })
         return
       }
       active.record = { ...active.record, execution: 'stopping' }
       this.#tasks.update(message, active.record.id, { execution: 'stopping' })
-      const notice = this.send(message, { text: '已请求停止当前任务；已完成的操作不会自动撤销。排队消息保留。', kind: 'notice' })
+      const notice = this.send(message, { text: '已请求停止当前任务。排队消息会保留。', kind: 'notice' })
       active.controller.abort('user-cancel')
       await notice
       return
     }
     if (name === 'clear') {
       const entries = this.#inbox.list().filter((entry) => sameTarget(entry.message, message) && entry.message.senderId === message.senderId)
+      if (entries.length === 0) {
+        await this.send(message, { text: '你没有尚未开始的排队消息。', kind: 'notice' })
+        return
+      }
       try { this.#inbox.clear(new Set(entries.map((entry) => entry.id))) }
       catch {
-        await this.send(message, { text: '无法保存清除结果，排队消息保持原样。请检查状态目录后重试。', kind: 'notice' })
+        await this.send(message, { text: '未能清除排队消息。请在 DSH 检查通道状态后重试。', kind: 'notice' })
         return
       }
       for (const entry of entries) {
@@ -479,11 +484,11 @@ export class ChannelsRuntime {
         this.#queuedReservations.delete(entry.id)
         this.#acceptInbound(entry.message)
       }
-      await this.send(message, { text: `已清除 ${entries.length} 条自己的排队消息；当前任务继续执行。`, kind: 'notice' })
+      await this.send(message, { text: `已清除 ${entries.length} 条你的排队消息。`, kind: 'notice' })
       return
     }
     if (name === 'status') {
-      const paragraphs = [`【任务状态 · ${message.channel}】`]
+      const paragraphs = [`【任务状态 · ${this.#adapters.get(message.channel)?.label.zh ?? message.channel}】`]
       const outbox = this.#outbox.list().filter((entry) => sameTarget(entry.target, message))
       const active = this.#activeTasks.get(lineKey(message))
       const saved = this.#tasks.latest(message)
@@ -491,17 +496,17 @@ export class ChannelsRuntime {
       if (task !== undefined) {
         const interaction = this.#interactions.active(message)
         const execution = task.execution === 'running' && interaction !== undefined ? (interaction === 'approval' ? '等待审批' : '等待回答') : {
-          running: '执行中', stopping: '正在停止', completed: '完成', failed: '失败', cancelled: '已取消', unknown: '未知（执行结束未确认，请先核对再重试）',
+          running: '执行中', stopping: '正在停止', completed: '完成', failed: '失败', cancelled: '已取消', unknown: '未知（请在 DSH 核对后再重试）',
         }[task.execution]
         const pending = outbox.some((entry) => entry.taskId === task.id)
-        const delivery = task.delivery === 'pending' && !pending ? '未知（待重发记录已不在队列，请核对）' : {
-          none: '尚无结果', sending: '发送中', sent: '已发送', pending: task.filesUnsent ? '文字待重发（附件请到桌面取回）' : '待重发', unknown: '投递结果未知', failed: '发送失败（请到桌面取回文件）',
+        const delivery = task.delivery === 'pending' && !pending ? '未知（请在 DSH 核对发送记录）' : {
+          none: '尚无结果', sending: '发送中', sent: '已发送', pending: task.filesUnsent ? '文字待重发（附件可在 DSH 取回）' : '待重发', unknown: '未获平台确认', failed: '发送失败（可在 DSH 查看结果）',
         }[task.delivery]
         const seconds = Math.max(0, Math.floor(((task.endedAt ?? Date.now()) - task.startedAt) / 1000))
         paragraphs.push(
           `${active === undefined ? '最近任务' : '当前任务'}：${statusPreview(task.summary, 42)}`,
           `执行状态：${execution}　｜　已用时：${seconds} 秒`,
-          `结果投递：${delivery}`,
+          `结果发送：${delivery}`,
         )
       } else paragraphs.push('当前任务：无')
       paragraphs.push(`【队列】排队：${this.pendingInputs(message)} 条　｜　待重发：${outbox.length} 条`)
@@ -519,8 +524,7 @@ export class ChannelsRuntime {
           paragraphs.push(count > 1 ? `· ${preview}（${count} 条）` : `· ${preview}`)
         }
       }
-      // WeChat renders single line breaks as spaces and preserves paragraph breaks.
-      await this.send(message, { text: paragraphs.join('\n\n'), kind: 'notice' })
+      await this.send(message, { text: chatParagraphs(...paragraphs), kind: 'notice' })
       return
     }
     if (name !== 'new') {
@@ -531,11 +535,11 @@ export class ChannelsRuntime {
     const key = lineKey(message)
     const next = (this.#lines.get(key) ?? this.#options.counters?.get(`line:${key}`) ?? 0) + 1
     if (!this.#lines.set(key, next)) {
-      await this.send(message, { text: '无法保存新会话，仍使用原会话。请检查状态目录后重试。', kind: 'notice' })
+      await this.send(message, { text: '未能开新会话。后续消息仍会进入原会话，请在 DSH 检查通道状态。', kind: 'notice' })
       return
     }
     this.#options.logger.info(`${key} starts session line ${next}`)
-    await this.send(message, { text: `好，这条聊天从这里开新会话（第 ${next} 条）。上一条还留在 GUI 里。`, kind: 'notice' })
+    await this.send(message, { text: `已开新会话（第 ${next} 条）。下一条任务会使用新会话，原会话可在 DSH 查看。`, kind: 'notice' })
   }
 
   async #runTurn(message: InboundMessage, sessionId: string, queueSignal: AbortSignal, record: TaskRecord): Promise<void> {
@@ -554,7 +558,7 @@ export class ChannelsRuntime {
       let reply
       const progressNotice = setTimeout(() => {
         if (signal.aborted || this.#disposed || this.#interactions.busy(message)) return
-        void this.send(message, { text: '任务仍在处理。发 /status 查看当前状态，或发 /cancel 请求停止。', kind: 'notice' })
+        void this.send(message, { text: chatParagraphs('任务仍在处理。', '/status 查看状态　｜　/cancel 请求停止'), kind: 'notice' })
           .catch((error: unknown) => this.logger.warn(`progress notice failed for ${key}: ${String(error)}`))
       }, 60_000)
       progressNotice.unref()
@@ -565,7 +569,7 @@ export class ChannelsRuntime {
       if (controller.signal.aborted && (reply.cancelled === true || reply.settled !== true)) {
         const confirmed = reply.cancelled === true
         this.#tasks.update(message, taskId, { execution: confirmed ? 'cancelled' : 'unknown', endedAt: Date.now() })
-        await this.send(message, { text: confirmed ? '当前任务已取消；已完成的操作不会自动撤销。' : '停止尚未得到宿主确认，请在桌面核对；已完成的操作不会自动撤销。', kind: 'notice' })
+        await this.send(message, { text: confirmed ? '当前任务已取消。已完成的操作不会自动撤销。' : '停止尚未得到宿主确认。请在 DSH 核对任务状态和已完成的操作。', kind: 'notice' })
         return
       }
       this.#activeTasks.delete(key)
@@ -573,14 +577,14 @@ export class ChannelsRuntime {
       this.logger.info(`turn for ${key} settled in ${Date.now() - record.startedAt}ms (${reply.text.length} chars)`)
       if (reply.failed === true) {
         this.logger.warn(`turn failed for ${key}: ${reply.text}`)
-        await this.send(message, { text: reply.interrupted === true ? '任务等待超时，执行结束未确认。请先在桌面核对，再决定是否重试。可用 /status 查看状态。' : '任务执行失败，执行是否已产生效果请先核对，再决定是否重试。可用 /status 查看状态。', kind: 'notice' })
+        await this.send(message, { text: reply.interrupted === true ? '任务等待超时，执行结果未确认。请在 DSH 核对后再决定是否重试。' : '任务执行失败。请在 DSH 核对已经完成的操作，可发 /status 查看状态。', kind: 'notice' })
         return
       }
       const results: SendResult[] = []
       if (reply.text.trim() !== '') results.push(...await this.send(message, { text: reply.text, kind: 'reply' }, taskId))
       // Preserve files even when the text is waiting for retry; do not claim they were sent.
       if (!results.some((result) => !result.ok) && outputDir !== undefined && !this.#disposed) results.push(...await this.#sendProducedFiles(message, outputDir, taskId))
-      if (results.length === 0) results.push(...await this.send(message, { text: '任务已完成，没有返回文字或文件。', kind: 'reply' }, taskId))
+      if (results.length === 0) results.push(...await this.send(message, { text: '任务已完成。没有可发送的文字或文件。', kind: 'reply' }, taskId))
       const pending = this.#outbox.list().some((entry) => entry.taskId === taskId)
       const unconfirmed = results.some((result) => result.ok && result.unconfirmed)
       let filesUnsent = false

@@ -153,7 +153,7 @@ test('clear write failure preserves queue and never reports successful removal',
     fs.renameSync(file, `${file}.saved`)
     fs.mkdirSync(file)
     runtime.dispatch(inbound({ text: '/clear' }))
-    await until(() => /无法保存清除/.test(text()))
+    await until(() => /未能清除排队消息/.test(text()))
     assert.equal(runtime.pendingInputs(), 1)
     assert.doesNotMatch(text(), /已清除/)
   } finally { await runtime.dispose() }
@@ -185,7 +185,7 @@ test('unconfirmed platform acceptance is never shown as a delivered result', asy
     await until(() => h.followedUp.length > 0)
     await tick(20)
     runtime.dispatch(inbound({ text: '/status' }))
-    await until(() => adapter.sent.some((item) => item.outgoing.text?.includes('结果投递：投递结果未知')))
+    await until(() => adapter.sent.some((item) => item.outgoing.text?.includes('结果发送：未获平台确认')))
   } finally { await runtime.dispose() }
 })
 

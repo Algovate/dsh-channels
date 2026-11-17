@@ -268,6 +268,8 @@ test('the output instruction travels on the identified followup, not the active 
   const message = h.followedUp[0]?.message as { content: Array<{ text: string }>; source: Record<string, unknown> }
   assert.equal(h.injected.length, 0)
   assert.match(message.content[0]?.text ?? '', /\/tmp\/chat-unique/)
+  assert.match(message.content[0]?.text ?? '', /copy.*output directory/i)
+  assert.match(message.content[0]?.text ?? '', /Markdown.*does not send/i)
   assert.equal(message.content[1]?.text, 'make a file')
   assert.equal(message.source['hasOutputInstruction'], true)
 })

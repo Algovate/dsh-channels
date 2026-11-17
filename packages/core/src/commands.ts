@@ -13,17 +13,17 @@
  *
  * @module @derekluo/dsh-channels/commands
  */
-import type { InboundMessage } from './types.js'
+import { chatParagraphs } from './outbound.js'
 
 export type CommandName = 'help' | 'status' | 'whoami' | 'new' | 'cancel' | 'clear'
 
 export const TASK_CONTROLS: ReadonlySet<CommandName> = new Set(['status', 'cancel', 'clear'])
 
 export const COMMANDS: Record<CommandName, { usage: string; summary: { en: string; zh: string } }> = {
+  status: { usage: '/status', summary: { en: 'current task, execution, delivery and queues', zh: '查看任务、排队和发送状态' } },
   cancel: { usage: '/cancel', summary: { en: 'stop the current task', zh: '停止当前任务，保留排队消息' } },
   clear: { usage: '/clear', summary: { en: 'clear your queued messages', zh: '清除自己的排队消息' } },
   help: { usage: '/help', summary: { en: 'list the commands', zh: '列出可用命令' } },
-  status: { usage: '/status', summary: { en: 'current task, execution, delivery and queues', zh: '当前任务、执行与投递状态、排队情况' } },
   whoami: { usage: '/whoami', summary: { en: 'your sender id and this conversation', zh: '你的发送者 id 和当前会话' } },
   new: { usage: '/new', summary: { en: 'start a fresh session here', zh: '在这里开一个新会话' } },
 }
@@ -42,10 +42,9 @@ export function parseCommand(text: string): { name: CommandName; args: string } 
 
 /** The `/help` text, one line per command. */
 export function helpText(): string {
-  const lines = ['可用命令：']
-  for (const [name, entry] of Object.entries(COMMANDS)) {
-    lines.push(`/${name} — ${entry.summary.zh}`)
-  }
-  lines.push('', '直接发消息就是和 agent 对话。')
-  return lines.join('\n')
+  return chatParagraphs(
+    '【可用命令】',
+    ...Object.values(COMMANDS).map(({ usage, summary }) => `${usage}　｜　${summary.zh}`),
+    '直接发消息即可交给助手处理。',
+  )
 }
