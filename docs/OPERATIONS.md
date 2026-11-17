@@ -2,9 +2,11 @@
 
 ## 安装
 
-需要 Node.js 22.13 或更高版本。已验证的 DSH 版本见[验证状态](STATUS.md)。
+需要一台装有 DSH 的机器（桌面版或 CLI）和 Node.js 22.13 或更高版本。已验证的 DSH 版本见[验证状态](STATUS.md)。
 
 ### 从 npm 安装
+
+先确认 npm 上有要装的版本，例如 `npm view @derekluo/dsh-channels versions`；只有占位版本时，改用下一节的源码构建。
 
 在终端安装核心和微信适配器。将 `default` 换成实际的 DSH profile 名：
 
@@ -13,6 +15,8 @@ dsh plugin --profile default add @derekluo/dsh-channels@0.1.0 @derekluo/dsh-chan
 ```
 
 使用 Telegram 时，把微信适配器换成 `@derekluo/dsh-channels-telegram@0.1.0`。安装后按下文配置凭证和白名单，再重启宿主。
+
+`dsh plugin` 只是把参数转给 profile 目录里的 pnpm，所以装完要确认 profile 的 `dsh.profile.bundles` 有 `@derekluo/dsh-channels`，没有就补上。`desktop` profile 只能由桌面版自带的 `dsh` 管理，用 npm 装的 CLI 执行 `dsh plugin` 会被拒绝。升级时用新版本号重跑同一条命令，确认 bundle 行仍在，再重启宿主。
 
 如果安装过发布前的本地构建，请把 profile 的依赖和 bundle 列表，以及配置中的 `adapters` 与 `adapterConfig`，都改成本文中的包名。
 
@@ -46,6 +50,17 @@ printf '%s\n' "$package_dir"
 ```
 
 在 profile 目录运行 `pnpm install`。适配器是核心加载的库，只将核心登记为 bundle。升级本地构建时，给新归档不同的文件名、更新 `file:` 路径并重新安装，然后重启宿主。
+
+## 卸载与停用
+
+临时停用：在 `config.json` 写 `"enabled": false` 并重启宿主，插件不再启动适配器。状态目录原样保留，白名单、会话线号、待重发和流水都还在；改回 `true` 即恢复。
+
+彻底移除：
+
+1. 从 profile 的 `dependencies` 和 `dsh.profile.bundles` 中删掉 `@derekluo/dsh-channels`。可以先运行 `dsh plugin --profile <名字> remove @derekluo/dsh-channels`，但它只转给 pnpm，bundle 行是否清掉以 `package.json` 为准。
+2. 不再使用某个通道时，一并删掉对应的适配器包，以及 `adapters`、`adapterConfig` 里的条目。
+3. 在 profile 目录运行 `pnpm install`，重启宿主。
+4. `~/.dsh/channels` 不会被自动删除。确认不再需要后再移走；里面有凭证和聊天内容，按敏感数据处理。
 
 ## 配置
 
