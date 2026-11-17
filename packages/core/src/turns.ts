@@ -166,8 +166,8 @@ export class TurnDriver {
    *  4. if create says the session already exists (a resume race), resume again.
    * Skipping step 2 is what made a restart fail with `session already exists`.
    */
-  async attach(target: Target, options: { system?: string } = {}): Promise<Attached> {
-    const sessionId = sessionIdFor(target)
+  async attach(target: Target, options: { system?: string; sessionId?: string } = {}): Promise<Attached> {
+    const sessionId = options.sessionId ?? sessionIdFor(target)
     const known = this.#attached.get(sessionId)
     if (known !== undefined) return known
 
@@ -253,9 +253,12 @@ export class TurnDriver {
   }
 
   /** Run one turn and return its reply once the session log carries it. */
-  async run(request: TurnRequest): Promise<TurnReply> {
+  async run(request: TurnRequest & { sessionId?: string }): Promise<TurnReply> {
     const { message } = request
-    const attached = await this.attach(message, { ...(request.system === undefined ? {} : { system: request.system }) })
+    const attached = await this.attach(message, {
+      ...(request.system === undefined ? {} : { system: request.system }),
+      ...(request.sessionId === undefined ? {} : { sessionId: request.sessionId }),
+    })
     await this.#nameSession(attached, message)
     const factory = await this.#factory()
     const agent = attached.handle.agent

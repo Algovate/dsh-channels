@@ -13,7 +13,8 @@ import { ConversationQueue } from './inbound/queue.js'
 import { createDurableRateLimiter, createRateLimiter, gateMessage, type GateContext, type GateDecision } from './inbound/gates.js'
 import type { CounterStore } from './store/counters.js'
 import { allowlistFor, type ChannelsConfig } from './config.js'
-import { lineKey } from './ids.js'
+import { lineKey, sessionIdFor } from './ids.js'
+import { helpText, parseCommand } from './commands.js'
 import { Outbox } from './store/outbox.js'
 import { Journal } from './store/journal.js'
 import { TurnDriver } from './turns.js'
@@ -53,6 +54,8 @@ export class ChannelsRuntime {
   readonly #targets = new Map<string, Target>()
   /** Sessions already reported to the host's workspace grouping. */
   readonly #grouped = new Set<string>()
+  /** conversation line → session line number chosen by `/new`. */
+  readonly #lines = new Map<string, number>()
   readonly #stopTimers: Array<() => void> = []
 
   constructor(options: RuntimeOptions) {
@@ -225,12 +228,79 @@ export class ChannelsRuntime {
       void this.send(message, { text: claim.hint, kind: 'notice' })
       return gate
     }
+    const command = parseCommand(message.text)
+    if (command !== null) {
+      void this.#runCommand(message, command.name).catch((error: unknown) => {
+        this.#options.logger.warn(`command /${command.name} failed: ${String((error as Error)?.message ?? error)}`)
+      })
+      return gate
+    }
     void this.#queue
       .push(lineKey(message), { run: (signal: AbortSignal) => this.#runTurn(message, signal) })
       .catch((error: unknown) => {
         this.#options.logger.warn(`turn failed for ${lineKey(message)}: ${String((error as Error)?.message ?? error)}`)
       })
     return gate
+  }
+
+  /**
+   * The session id this conversation is on.
+   *
+   * Line 0 is the deterministic id every existing conversation already uses;
+   * `/new` moves the conversation to line 1, 2, … so the old session stays
+   * intact (and visible in the GUI) while the next message starts clean. The
+   * line is persisted in the counter store, so a restart does not walk back.
+   */
+  #sessionIdFor(message: InboundMessage): string {
+    const key = lineKey(message)
+    const stored = this.#options.counters?.get(`line:${key}`)
+    const line = this.#lines.get(key) ?? (stored !== undefined && stored > 0 ? Math.floor(stored) : 0)
+    if (line === 0) return sessionIdFor(message)
+    return sessionIdFor({ ...message, conversationId: `${message.conversationId}#${line}` })
+  }
+
+  /** Run one chat command and answer in the chat. Never starts a turn. */
+  async #runCommand(message: InboundMessage, name: 'help' | 'status' | 'whoami' | 'new'): Promise<void> {
+    if (name === 'help') {
+      await this.send(message, { text: helpText(), kind: 'notice' })
+      return
+    }
+    if (name === 'whoami') {
+      await this.send(message, {
+        text: [
+          `发送者 id：${message.senderId}`,
+          `会话 id：${message.conversationId}`,
+          `通道：${message.channel}（账号 ${message.accountId}）`,
+          `会话线：${this.#sessionIdFor(message)}`,
+        ].join('\n'),
+        kind: 'notice',
+      })
+      return
+    }
+    if (name === 'status') {
+      const config = this.#options.config
+      const lines = [
+        `通道：${[...this.#adapters.keys()].join(', ') || '（没有）'}`,
+        `状态目录：${this.#options.stateRoot}`,
+        `允许的发送者：${config.allowedSenders.length}`,
+        `待重发：${this.#outbox.list().length}`,
+        `等待答复：${this.#interactions.pendingCount() > 0 ? '有' : '无'}`,
+      ]
+      const recent = this.#journal.outbound().slice(-3)
+      if (recent.length > 0) {
+        lines.push('最近发出：')
+        for (const entry of recent) lines.push(`· ${entry.state} ${entry.text.slice(0, 40)}`)
+      }
+      await this.send(message, { text: lines.join('\n'), kind: 'notice' })
+      return
+    }
+    // `/new`: the next message goes to a fresh session, the old one stays.
+    const key = lineKey(message)
+    const next = (this.#lines.get(key) ?? this.#options.counters?.get(`line:${key}`) ?? 0) + 1
+    this.#options.counters?.set(`line:${key}`, next)
+    this.#lines.set(key, next)
+    this.#options.logger.info(`${key} starts session line ${next}`)
+    await this.send(message, { text: `好，这条聊天从这里开新会话（第 ${next} 条）。上一条还留在 GUI 里。`, kind: 'notice' })
   }
 
   /** Answer a pending interaction out of band (never queued behind its own turn). */
@@ -246,7 +316,7 @@ export class ChannelsRuntime {
     }
     if (typeof adapter.typing === 'function') void adapter.typing(message).catch(() => {})
     const startedAt = Date.now()
-    const reply = await this.#driver.run({ message, signal })
+    const reply = await this.#driver.run({ message, signal, sessionId: this.#sessionIdFor(message) })
     this.#options.logger.info(`turn for ${lineKey(message)} settled in ${Date.now() - startedAt}ms (${reply.text.length} chars${reply.failed === true ? ', failed' : ''})`)
     if (reply.failed === true) {
       // The failure text is for the log, not for the person: it names host
