@@ -14,6 +14,7 @@
  *
  * @module @derekluo/dsh-channels/store/journal
  */
+import { statePath } from './layout.js'
 import fs from 'node:fs'
 import path from 'node:path'
 import { sameTarget } from '../ids.js'
@@ -53,7 +54,7 @@ export class Journal {
   readonly #receipts = new Map<string, Set<string>>()
 
   constructor({ stateRoot, warn = () => {}, now = Date.now }: { stateRoot: string; warn?: (line: string) => void; now?: () => number }) {
-    this.#root = path.join(stateRoot, 'journal')
+    this.#root = statePath(stateRoot, 'journal')
     this.#warn = warn
     this.#now = now
   }

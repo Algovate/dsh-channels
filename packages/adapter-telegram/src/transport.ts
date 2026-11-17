@@ -56,8 +56,12 @@ export class TelegramTransport {
   readonly #options: TransportOptions
   readonly #fetch: FetchLike
   readonly #apiBase: string
-  readonly #lifecycle = new AbortController()
-  readonly signal: AbortSignal = this.#lifecycle.signal
+  #lifecycle = new AbortController()
+  get signal(): AbortSignal { return this.#lifecycle.signal }
+
+  start(): void {
+    if (this.#lifecycle.signal.aborted) this.#lifecycle = new AbortController()
+  }
   #offset = 0
 
   constructor(options: TransportOptions) {

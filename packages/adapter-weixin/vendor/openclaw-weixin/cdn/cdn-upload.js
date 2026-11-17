@@ -1,3 +1,4 @@
+import { readBoundedResponse } from "../util/bounded-response.js";
 import { encryptAesEcb } from "./aes-ecb.js";
 import { buildCdnUploadUrl } from "./cdn-url.js";
 import { logger } from "../util/logger.js";
@@ -11,6 +12,9 @@ const UPLOAD_MAX_RETRIES = 3;
  */
 export async function uploadBufferToCdn(params) {
     const { buf, uploadFullUrl, uploadParam, filekey, cdnBaseUrl, label, aeskey } = params;
+    const timeout = AbortSignal.timeout(params.timeoutMs ?? 60_000);
+    const signal = params.signal ? AbortSignal.any([params.signal, timeout]) : timeout;
+    signal.throwIfAborted();
     const ciphertext = encryptAesEcb(buf, aeskey);
     const trimmedFull = uploadFullUrl?.trim();
     let cdnUrl;
@@ -27,14 +31,18 @@ export async function uploadBufferToCdn(params) {
     let downloadParam;
     let lastError;
     for (let attempt = 1; attempt <= UPLOAD_MAX_RETRIES; attempt++) {
+        signal.throwIfAborted();
+        let response;
         try {
             const res = await fetch(cdnUrl, {
                 method: "POST",
+                signal,
                 headers: { "Content-Type": "application/octet-stream" },
                 body: new Uint8Array(ciphertext),
             });
+            response = res;
             if (res.status >= 400 && res.status < 500) {
-                const errMsg = res.headers.get("x-error-message") ?? (await res.text());
+                const errMsg = res.headers.get("x-error-message") ?? (await readBoundedResponse(res, 4096)).toString("utf8");
                 logger.error(`${label}: CDN client error attempt=${attempt} status=${res.status} errMsg=${errMsg}`);
                 throw new Error(`CDN upload client error ${res.status}: ${errMsg}`);
             }
@@ -52,8 +60,9 @@ export async function uploadBufferToCdn(params) {
             break;
         }
         catch (err) {
+            signal.throwIfAborted();
             lastError = err;
-            if (err instanceof Error && err.message.includes("client error"))
+            if ((response?.status >= 400 && response?.status < 500) || (err instanceof Error && err.message.includes("client error")))
                 throw err;
             const cause = err.cause ?? err.code ?? "";
             if (attempt < UPLOAD_MAX_RETRIES) {
@@ -62,6 +71,10 @@ export async function uploadBufferToCdn(params) {
             else {
                 logger.error(`${label}: all ${UPLOAD_MAX_RETRIES} attempts failed url=${redactUrl(cdnUrl)} error=${String(err)}${cause ? ` cause=${cause}` : ""}`);
             }
+        }
+        finally {
+            // Success and header-only errors also release the response stream.
+            void response?.body?.cancel().catch(() => {});
         }
     }
     if (!downloadParam) {

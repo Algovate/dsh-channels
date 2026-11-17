@@ -18,6 +18,7 @@ import type { CounterStore } from './store/counters.js'
 import { allowlistFor, type ChannelsConfig } from './config.js'
 import { lineKey, sameTarget, sessionIdFor } from './ids.js'
 import { helpText, parseCommand } from './commands.js'
+import { SessionLines } from './store/lines.js'
 import { Outbox } from './store/outbox.js'
 import { Journal, receiptKey } from './store/journal.js'
 import { TurnDriver } from './turns.js'
@@ -53,12 +54,10 @@ export class ChannelsRuntime {
   readonly #journal: Journal
   readonly #driver: TurnDriver
   readonly #interactions: InteractionQueue
-  /** session id → the conversation it answers for; the interaction seams need it. */
-  readonly #targets = new Map<string, Target>()
   /** Sessions already reported to the host's workspace grouping. */
   readonly #grouped = new Set<string>()
   /** conversation line → session line number chosen by `/new`. */
-  readonly #lines = new Map<string, number>()
+  readonly #lines: SessionLines
   /** Built once: a limiter recreated per message would never accumulate. */
   readonly #minute: GateContext['minute']
   readonly #day: GateContext['day']
@@ -69,6 +68,7 @@ export class ChannelsRuntime {
 
   constructor(options: RuntimeOptions) {
     this.#options = options
+    this.#lines = new SessionLines(options.stateRoot, options.logger.warn)
     this.#outbox = new Outbox({ stateRoot: options.stateRoot, warn: options.logger.warn })
     this.#journal = new Journal({ stateRoot: options.stateRoot, warn: options.logger.warn })
     const counters = options.counters
@@ -101,7 +101,7 @@ export class ChannelsRuntime {
         if (words === '') return `${who}（${message.media.length} 个附件）`
         return `${who.slice(0, 12)}: ${words}`
       },
-      onAttach: (target, sessionId) => {
+      onAttach: (_target, sessionId) => {
         if (!this.#grouped.has(sessionId)) {
           this.#grouped.add(sessionId)
           try {
@@ -110,13 +110,7 @@ export class ChannelsRuntime {
             // Grouping is cosmetic; a callback cannot fail a turn.
           }
         }
-        // Keep only the addressing fields: a Target is what the seams need, and
-        // holding the whole message would keep its text (and media paths) alive.
-        this.#targets.set(sessionId, {
-          channel: target.channel,
-          accountId: target.accountId,
-          conversationId: target.conversationId,
-        })
+
       },
     })
   }
@@ -147,10 +141,12 @@ export class ChannelsRuntime {
    * `undefined` means "not this channel's business" — a session created in the
    * desktop UI, or a side session — so the desktop answerer stays in charge.
    */
+  interactionForAgent(agent: unknown): ReturnType<TurnDriver['interactionForAgent']> {
+    return this.#driver.interactionForAgent(agent)
+  }
+
   targetForAgent(agent: unknown): Target | undefined {
-    const sessionId = (agent as { session?: { id?: unknown } } | undefined)?.session?.id
-    if (typeof sessionId !== 'string' || sessionId === '') return undefined
-    return this.#targets.get(sessionId)
+    return this.#driver.targetForAgent(agent)
   }
 
   /**
@@ -200,11 +196,11 @@ export class ChannelsRuntime {
 
   /** Forget a conversation (tests, or after the adapter is removed). */
   forgetTarget(sessionId: string): void {
-    this.#targets.delete(sessionId)
+    this.#driver.forgetTarget(sessionId)
   }
 
   register(adapter: ChannelAdapter): () => void {
-    if (this.#adapters.has(adapter.id)) return () => {}
+    if (this.#adapters.has(adapter.id)) throw new Error(`duplicate channel id: ${adapter.id}`)
     this.#adapters.set(adapter.id, adapter)
     this.#options.logger.info(`channel '${adapter.id}' registered`)
     return () => {
@@ -332,6 +328,11 @@ export class ChannelsRuntime {
       .push(lineKey(message), async (signal) => {
         started = true
         if (id !== undefined) this.#queuedReceipts.delete(id)
+        const access = authorizeMessage(message, this.gateContext())
+        if (!access.allow || signal.aborted || this.#disposed) {
+          reservation(false)
+          return
+        }
         this.#acceptInbound(message, reservation)
         await this.#runTurn(message, sessionId, signal)
       })
@@ -411,11 +412,17 @@ export class ChannelsRuntime {
       await this.send(message, { text: lines.join('\n'), kind: 'notice' })
       return
     }
-    // `/new`: the next message goes to a fresh session, the old one stays.
+    if (name !== 'new') {
+      const unknown: never = name
+      throw new Error(`unknown command: ${String(unknown)}`)
+    }
+    // `/new`: commit identity before changing the live conversation.
     const key = lineKey(message)
     const next = (this.#lines.get(key) ?? this.#options.counters?.get(`line:${key}`) ?? 0) + 1
-    this.#options.counters?.set(`line:${key}`, next)
-    this.#lines.set(key, next)
+    if (!this.#lines.set(key, next)) {
+      await this.send(message, { text: '无法保存新会话，仍使用原会话。请检查状态目录后重试。', kind: 'notice' })
+      return
+    }
     this.#options.logger.info(`${key} starts session line ${next}`)
     await this.send(message, { text: `好，这条聊天从这里开新会话（第 ${next} 条）。上一条还留在 GUI 里。`, kind: 'notice' })
   }
@@ -435,18 +442,30 @@ export class ChannelsRuntime {
     if (typeof adapter.typing === 'function') void adapter.typing(message).catch(() => {})
     const startedAt = Date.now()
     const outputDir = this.#turnOutputDirectory()
-    const reply = await this.#driver.run({ message, signal, sessionId, outputDirectory: outputDir })
-    if (signal.aborted || this.#disposed) return
-    this.#options.logger.info(`turn for ${lineKey(message)} settled in ${Date.now() - startedAt}ms (${reply.text.length} chars${reply.failed === true ? ', failed' : ''})`)
-    if (reply.failed === true) {
-      // The failure text is for the log, not for the person: it names host
-      // internals and cannot be acted on from a phone.
-      this.#options.logger.warn(`turn failed for ${lineKey(message)}: ${reply.text}`)
-      await this.send(message, { text: '（这边出了点问题，这条没答上来。稍后再发一次，或者看 /diag。）', kind: 'notice' })
-      return
+    try {
+      let reply
+      try {
+        reply = await this.#driver.run({ message, signal, sessionId, outputDirectory: outputDir })
+      } catch (error) {
+        reply = { text: String(error), failed: true }
+      }
+      if (signal.aborted || this.#disposed) return
+      this.#options.logger.info(`turn for ${lineKey(message)} settled in ${Date.now() - startedAt}ms (${reply.text.length} chars${reply.failed === true ? ', failed' : ''})`)
+      if (reply.failed === true) {
+        // The failure text is for the log, not for the person: it names host
+        // internals and cannot be acted on from a phone.
+        this.#options.logger.warn(`turn failed for ${lineKey(message)}: ${reply.text}`)
+        await this.send(message, { text: '（这边出了点问题，这条没答上来。稍后再发一次，或者看 /status。）', kind: 'notice' })
+        return
+      }
+      if (reply.text.trim() !== '') await this.send(message, { text: reply.text, kind: 'reply' })
+      if (outputDir !== undefined && !this.#disposed) await this.#sendProducedFiles(message, outputDir)
+    } finally {
+      // Keep user artifacts; remove only empty directories, never recursively.
+      if (outputDir !== undefined) {
+        try { fs.rmdirSync(outputDir) } catch { /* Nonempty output remains available to the user. */ }
+      }
     }
-    if (reply.text.trim() !== '') await this.send(message, { text: reply.text, kind: 'reply' })
-    if (outputDir !== undefined && !this.#disposed) await this.#sendProducedFiles(message, outputDir)
   }
 
   /** Send one outgoing message, split to the channel's capability, with outbox fallback. */
@@ -573,11 +592,11 @@ export class ChannelsRuntime {
   }
 
   /** Stop every timer this runtime started, and reject every pending interaction. */
-  dispose(): void {
+  dispose(): Promise<void> {
     this.#disposed = true
     this.#queue.dispose()
     for (const stop of this.#stopTimers.splice(0)) stop()
     this.#interactions.dispose()
-    this.#targets.clear()
+    return this.#driver.dispose()
   }
 }

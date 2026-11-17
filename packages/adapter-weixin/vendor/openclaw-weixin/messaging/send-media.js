@@ -15,7 +15,7 @@ import { uploadFileAttachmentToWeixin, uploadFileToWeixin, uploadVideoToWeixin, 
 export async function sendWeixinMediaFile(params) {
     const { filePath, to, text, opts, cdnBaseUrl } = params;
     const mime = getMimeFromFilename(filePath);
-    const uploadOpts = { baseUrl: opts.baseUrl, token: opts.token };
+    const uploadOpts = { baseUrl: opts.baseUrl, token: opts.token, signal: opts.signal };
     if (mime.startsWith("video/")) {
         logger.info(`[weixin] sendWeixinMediaFile: uploading video filePath=${filePath} to=${to}`);
         const uploaded = await uploadVideoToWeixin({

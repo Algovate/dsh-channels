@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url'
 
 import { STORE, STATE_LAYOUT, declaredTopLevel, isInsideStateRoot, keyedStatePath, statePath, statePaths } from '../packages/core/src/store/layout.js'
 
-const CORE_SRC = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'packages', 'core', 'src')
+const CORE_SRC = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', 'packages', 'core', 'src')
 
 function sourceFiles(dir = CORE_SRC, out: string[] = []): string[] {
   for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
@@ -58,7 +58,9 @@ test('no module writes a top-level state path the table does not declare', () =>
   const tops = declaredTopLevel()
   const patterns = [/join\(\s*stateRoot\s*,\s*'([^']*)'/g, /join\(\s*root\s*,\s*'([^']*)'/g]
   const offenders: string[] = []
-  for (const file of sourceFiles()) {
+  const files = sourceFiles()
+  assert.ok(files.length > 20, 'the guard must inspect real source files')
+  for (const file of files) {
     const lines = fs.readFileSync(file, 'utf8').split('\n')
     lines.forEach((line, index) => {
       const trimmed = line.trim()
@@ -74,4 +76,26 @@ test('no module writes a top-level state path the table does not declare', () =>
     })
   }
   assert.deepEqual(offenders, [], `undeclared state paths: ${offenders.join(', ')}`)
+})
+
+test('real core writers keep every generated path in the declared inventory', async () => {
+  const os = await import('node:os')
+  const { FileCounterStore } = await import('../packages/core/src/store/counters.js')
+  const { SessionLines } = await import('../packages/core/src/store/lines.js')
+  const { Journal } = await import('../packages/core/src/store/journal.js')
+  const { Outbox } = await import('../packages/core/src/store/outbox.js')
+  const { createLogger } = await import('../packages/core/src/log.js')
+  const { saveConfigOverlay } = await import('../packages/core/src/store/root.js')
+  const { stateInventory } = await import('../packages/core/src/store/inventory.js')
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'channels-layout-writes-'))
+  try {
+    new FileCounterStore({ stateRoot: root }).set('line:conversation', 1)
+    assert.equal(new SessionLines(root, () => {}).set('conversation', 2), true)
+    new Journal({ stateRoot: root }).append({ direction: 'in', phase: 'received', id: 'test', channel: 'fake', accountId: 'a', conversationId: 'c', kind: 'message', text: 'hi' })
+    new Outbox({ stateRoot: root }).add({ channel: 'fake', accountId: 'a', conversationId: 'c' }, { kind: 'reply', text: 'hi' }, {})
+    createLogger({ stateRoot: root }).info('test')
+    assert.equal(saveConfigOverlay(root, { allowedSenders: ['sender'] }), true)
+    assert.deepEqual(fs.readdirSync(root).sort(), ['config.json', 'counters.json', 'journal', 'lines.json', 'logs', 'outbox.json'])
+    assert.deepEqual(stateInventory(root).unlisted, [])
+  } finally { fs.rmSync(root, { recursive: true }) }
 })

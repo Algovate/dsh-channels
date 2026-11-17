@@ -23,6 +23,8 @@
  */
 import type { InboundMessage, Target } from './types.js'
 import { setTimeout as delay } from 'node:timers/promises'
+import { TurnProgress } from './turn-progress.js'
+export { assistantTextOf } from './turn-progress.js'
 import { sessionIdFor } from './ids.js'
 import { inboundTextWithMedia } from './media.js'
 import { extractDocumentText } from './documents.js'
@@ -35,6 +37,8 @@ export interface AgentHandle {
     inject?: (message: unknown) => void
     followup?: (message: unknown) => void
     steer?: (message: unknown) => void
+    cancel?: (cause: { kind: 'user' }, options: { keepInbox: true }) => void
+    inbox?: { remove?: (messageId: string) => boolean }
   }
   dispose?: () => Promise<void> | void
 }
@@ -91,24 +95,48 @@ type MessageFactory = (fields: Record<string, unknown>) => unknown
 interface Attached {
   handle: AgentHandle
   sessionId: string
-}
-
-/** The reply text carried by one `assistant/message` event, or undefined. */
-export function assistantTextOf(event: Record<string, unknown>): string | undefined {
-  if (event['type'] !== 'assistant/message') return undefined
-  const data = event['data'] as Record<string, unknown> | undefined
-  const message = (data?.['message'] ?? data) as Record<string, unknown> | undefined
-  const content = message?.['content']
-  if (!Array.isArray(content)) return undefined
-  const texts = content
-    .filter((block): block is { type: string; text: string } => (block as { type?: unknown })?.type === 'text' && typeof (block as { text?: unknown }).text === 'string')
-    .map((block) => block.text)
-  return texts.length === 0 ? undefined : texts.join('\n').trim()
+  created?: boolean
+  named?: boolean
 }
 
 export class TurnDriver {
   readonly #options: TurnDriverOptions
   readonly #attached = new Map<string, Attached>()
+  readonly #owned = new Set<AgentHandle>()
+  readonly #running = new Map<AgentHandle['agent'], { message: InboundMessage; progress: TurnProgress; signal: AbortSignal }>()
+  #disposed = false
+  readonly #shutdown = new AbortController()
+
+  /** Only the host turn consuming this exact input may export its interactions. */
+  interactionForAgent(value: unknown): { target: InboundMessage; signal: AbortSignal } | undefined {
+    const agent = value as AgentHandle['agent']
+    const running = this.#running.get(agent)
+    if (running === undefined || running.signal.aborted) return undefined
+    running.progress.update(agent.session?.snapshotEvents?.() ?? [])
+    return running.progress.ownsActiveTurn ? { target: running.message, signal: running.signal } : undefined
+  }
+
+  targetForAgent(value: unknown): InboundMessage | undefined {
+    return this.interactionForAgent(value)?.target
+  }
+
+  forgetTarget(sessionId: string): void {
+    for (const agent of this.#running.keys()) {
+      if (agent.session?.id === sessionId) this.#running.delete(agent)
+    }
+  }
+
+  async dispose(): Promise<void> {
+    this.#disposed = true
+    this.#shutdown.abort()
+    this.#running.clear()
+    const handles = [...this.#owned]
+    this.#owned.clear()
+    this.#attached.clear()
+    await Promise.all(handles.map(async (handle) => {
+      try { await handle.dispose?.() } catch (error) { this.logger.warn(`agent disposal failed: ${String(error)}`) }
+    }))
+  }
 
   constructor(options: TurnDriverOptions) {
     this.#options = options
@@ -169,13 +197,21 @@ export class TurnDriver {
    *  4. if create says the session already exists (a resume race), resume again.
    * Skipping step 2 is what made a restart fail with `session already exists`.
    */
-  async attach(target: Target, options: { system?: string; sessionId?: string } = {}): Promise<Attached> {
+  async attach(target: Target, options: { system?: string; sessionId?: string; signal?: AbortSignal } = {}): Promise<Attached> {
     const sessionId = options.sessionId ?? sessionIdFor(target)
     const known = this.#attached.get(sessionId)
-    if (known !== undefined) return known
 
     const agents = this.#agents()
+    if (this.#disposed) throw new Error('the turn driver is disposed')
     if (agents === undefined) throw new Error('the agents service is not available')
+    const live = agents.get?.(sessionId)
+    if (known !== undefined && (typeof agents.get !== 'function' || known.handle.agent === live)) return known
+    if (live !== undefined) {
+      const attached = { handle: { agent: live as AgentHandle['agent'] }, sessionId }
+      this.#attached.set(sessionId, attached)
+      this.#options.onAttach?.(target, sessionId)
+      return attached
+    }
 
     // The preset is what gives the agent its tool set. A session created
     // without one gets the bare default (a working-directory tool and little
@@ -211,19 +247,19 @@ export class TurnDriver {
       ...routeOptions,
       meta: { cwd: this.#options.workingDirectory },
       setup,
-      signal: AbortSignal.timeout(30_000),
+      signal: options.signal === undefined ? AbortSignal.timeout(30_000) : AbortSignal.any([options.signal, AbortSignal.timeout(30_000)]),
     }
 
     const adopt = (agent: unknown): AgentHandle => ({ agent: agent as AgentHandle['agent'], dispose: () => {} })
 
     let handle: AgentHandle | undefined
-    const live = agents.get?.(sessionId)
-    if (live !== undefined) handle = adopt(live)
+    let created = false
 
     if (handle === undefined && typeof agents.resume === 'function') {
       try {
-        handle = await agents.resume({ resumeSessionId: sessionId, setup, ...routeOptions })
+        handle = await agents.resume({ resumeSessionId: sessionId, setup, signal: createOptions.signal, ...routeOptions })
       } catch (error) {
+        options.signal?.throwIfAborted()
         this.#options.logger.info(`resume of ${sessionId} failed (${String((error as Error)?.message ?? error)}); will create it`)
       }
     }
@@ -231,11 +267,12 @@ export class TurnDriver {
     if (handle === undefined && typeof agents.create === 'function') {
       try {
         handle = await agents.create(createOptions)
+        created = true
       } catch (error) {
         if (!/already exists/i.test(String((error as Error)?.message ?? error))) throw error
         // A resume raced us (the GUI resumed the same session); try again.
         if (typeof agents.resume === 'function') {
-          handle = await agents.resume({ resumeSessionId: sessionId, setup, ...routeOptions })
+          handle = await agents.resume({ resumeSessionId: sessionId, setup, signal: createOptions.signal, ...routeOptions })
         } else {
           const again = agents.get?.(sessionId)
           if (again === undefined) throw error
@@ -245,7 +282,12 @@ export class TurnDriver {
     }
     if (handle === undefined) throw new Error('the agents service can neither resume nor create sessions')
 
-    const attached = { handle, sessionId }
+    if (this.#disposed || options.signal?.aborted) {
+      await handle.dispose?.()
+      throw new Error('the turn driver is disposed')
+    }
+    this.#owned.add(handle)
+    const attached = { handle, sessionId, created }
     this.#attached.set(sessionId, attached)
     try {
       this.#options.onAttach?.(target, sessionId)
@@ -257,18 +299,40 @@ export class TurnDriver {
 
   /** Run one turn and return its reply after the matching turn ends. */
   async run(request: TurnRequest & { sessionId?: string }): Promise<TurnReply> {
+    const deadline = new AbortController()
+    const signal = AbortSignal.any([deadline.signal, this.#shutdown.signal, ...(request.signal === undefined ? [] : [request.signal])])
+    const timer = setTimeout(() => deadline.abort(new Error('the turn timed out')), this.#options.maxTurnWaitMs ?? 20 * 60_000)
+    let onAbort!: () => void
+    const aborted = new Promise<TurnReply>((resolve) => {
+      onAbort = () => resolve({ text: '回合已取消或超时', failed: true, sessionId: request.sessionId ?? sessionIdFor(request.message) })
+      if (signal.aborted) onAbort()
+      else signal.addEventListener('abort', onAbort, { once: true })
+    })
+    try {
+      return await Promise.race([this.#run({ ...request, signal }), aborted])
+    } finally {
+      clearTimeout(timer)
+      deadline.abort() // Withdraw prompts on success, failure and timeout alike.
+      signal.removeEventListener('abort', onAbort)
+    }
+  }
+
+  async #run(request: TurnRequest & { sessionId?: string; signal: AbortSignal }): Promise<TurnReply> {
     const { message, signal } = request
     const sessionId = request.sessionId ?? sessionIdFor(message)
     if (signal?.aborted) return { text: '', failed: true, sessionId }
     const attached = await this.attach(message, {
       ...(request.system === undefined ? {} : { system: request.system }),
       sessionId,
+      ...(signal === undefined ? {} : { signal }),
     })
+    signal?.throwIfAborted()
     await this.#nameSession(attached, message)
+    signal?.throwIfAborted()
     const factory = await this.#factory()
     const agent = attached.handle.agent
     if (typeof agent.followup !== 'function') throw new Error('the agent cannot accept a followup message')
-    const enriched = await this.#enrichDocuments(message)
+    const enriched = await this.#enrichDocuments(message, signal)
     if (signal?.aborted) return { text: '', failed: true, sessionId }
 
     const blocks = (request.context ?? []).filter((block) => typeof block.text === 'string' && block.text.trim() !== '')
@@ -304,9 +368,25 @@ export class TurnDriver {
     if (typeof messageId !== 'string' || messageId === '') throw new Error('the user message has no identity')
     const before = this.#lastSeq(agent)
     if (signal?.aborted) return { text: '', failed: true, sessionId }
-    agent.followup(input)
-    const reply = await this.#awaitReply(agent, before, messageId, signal)
-    return { ...reply, sessionId }
+    const progress = new TurnProgress(before, messageId)
+    const running = { message, progress, signal }
+    this.#running.set(agent, running)
+    const cancel = (): void => {
+      try {
+        progress.update(agent.session?.snapshotEvents?.() ?? [])
+        if (progress.ownsActiveTurn) agent.cancel?.({ kind: 'user' }, { keepInbox: true })
+        else if (progress.result === undefined) agent.inbox?.remove?.(messageId)
+      } catch (error) { this.logger.warn(`could not cancel channel input: ${String(error)}`) }
+    }
+    signal.addEventListener('abort', cancel, { once: true })
+    try {
+      agent.followup(input)
+      const reply = await this.#awaitReply(agent, progress, signal)
+      return { ...reply, sessionId }
+    } finally {
+      signal.removeEventListener('abort', cancel)
+      if (this.#running.get(agent) === running) this.#running.delete(agent)
+    }
   }
 
   /**
@@ -318,7 +398,8 @@ export class TurnDriver {
    * (found on the device). `rename` is a no-op when the host has no such
    * service, and a failure is a log line.
    */
-  async #nameSession(attached: { handle: AgentHandle; sessionId: string }, message: InboundMessage): Promise<void> {
+  async #nameSession(attached: Attached, message: InboundMessage): Promise<void> {
+    if (!attached.created || attached.named) return
     const title = this.#options.titleFor?.(message)
     if (title === undefined || title.trim() === '') return
     const service = this.#options.ctx.get?.('sessionTitle') as { rename?: (session: unknown, title: string) => unknown } | undefined
@@ -330,6 +411,7 @@ export class TurnDriver {
     if (session === undefined || session === null) return
     try {
       await service.rename(session, title.trim().slice(0, 80))
+      attached.named = true
     } catch (error) {
       this.#options.logger.warn(`could not name the session: ${String((error as Error)?.message ?? error)}`)
     }
@@ -342,20 +424,20 @@ export class TurnDriver {
    * already transcribed by the adapter when ASR is available, a video has no
    * text. An extraction failure is a log line; the path still reaches the model.
    */
-  async #enrichDocuments(message: TurnRequest['message']): Promise<InboundMedia[]> {
+  async #enrichDocuments(message: TurnRequest['message'], signal: AbortSignal): Promise<InboundMedia[]> {
     const media = Array.isArray(message.media) ? message.media : []
     if (media.length === 0) return media
-    return Promise.all(
-      media.map(async (item) => {
-        if (item.kind !== 'file' || item.text !== undefined) return item
-        const result = await extractDocumentText(item.path, { maxChars: this.#options.documentChars ?? 4000 })
-        if (result.ok !== true) {
-          this.#options.logger.info(`document text not extracted from ${item.name ?? item.path}: ${result.reason}`)
-          return item
-        }
-        return { ...item, text: result.truncated ? `${result.text}\n…（已截断）` : result.text }
-      }),
-    )
+    const enriched: InboundMedia[] = []
+    for (const item of media) {
+      signal.throwIfAborted()
+      if (item.kind !== 'file' || item.text !== undefined) { enriched.push(item); continue }
+      const result = await extractDocumentText(item.path, { maxChars: this.#options.documentChars ?? 4000, signal })
+      if (!result.ok) {
+        this.logger.info(`document text not extracted from ${item.name ?? item.path}: ${result.reason}`)
+        enriched.push(item)
+      } else enriched.push({ ...item, text: result.truncated ? `${result.text}\n…（已截断）` : result.text })
+    }
+    return enriched
   }
 
   #lastSeq(agent: AgentHandle['agent']): number {
@@ -364,69 +446,14 @@ export class TurnDriver {
     return typeof last?.['seq'] === 'number' ? (last['seq'] as number) : -1
   }
 
-  async #awaitReply(agent: AgentHandle['agent'], before: number, messageId: string, signal?: AbortSignal): Promise<{ text: string; failed?: boolean }> {
-    const deadline = Date.now() + (this.#options.maxTurnWaitMs ?? 20 * 60_000)
-    const pollMs = this.#options.pollMs ?? 120
-    let lastSeq = before
-    let activeTurn: number | undefined
-    let matchingTurn: number | undefined
-    let inboxIndex: number | undefined
-    let text = ''
-    while (Date.now() < deadline) {
-      if (signal?.aborted) return { text: '', failed: true }
-      const events = agent.session?.snapshotEvents?.() ?? []
-      for (const event of events) {
-        const seq = event['seq']
-        if (typeof seq !== 'number' || seq <= lastSeq) continue
-        lastSeq = seq
-        const data = event['data'] as Record<string, unknown> | undefined
-        const turn = data?.['turn']
-        switch (event['type']) {
-          case 'turn/start':
-            activeTurn = typeof turn === 'number' ? turn : undefined
-            break
-          case 'agent/inbox/spliced': {
-            // A failure before the first model step can consume the inbox entry without a user/message event.
-            const start = data?.['start']
-            const inserted = data?.['inserted']
-            if (data?.['target'] !== 'next-turn' || typeof start !== 'number' || !Array.isArray(inserted)) break
-            const index = inserted.findIndex((item: { id?: unknown } | null) => item?.id === messageId)
-            const removed = typeof data['removedCount'] === 'number' ? data['removedCount'] : 0
-            if (index >= 0) inboxIndex = start + index
-            else if (inboxIndex !== undefined && start <= inboxIndex) {
-              if (inboxIndex < start + removed) {
-                if (data['outcome'] === 'canceled') return { text: '', failed: true }
-                matchingTurn = activeTurn
-                inboxIndex = undefined
-              } else inboxIndex += inserted.length - removed
-            }
-            break
-          }
-          case 'user/message':
-            if (data?.['id'] === messageId) matchingTurn = activeTurn
-            break
-          case 'assistant/message':
-            if (matchingTurn !== undefined && turn === matchingTurn) text = assistantTextOf(event) ?? ''
-            break
-          case 'turn/end': {
-            if (turn === activeTurn) activeTurn = undefined
-            if (matchingTurn === undefined || turn !== matchingTurn) break
-            const reason = data?.['reason'] as { kind?: string; error?: { message?: unknown } } | undefined
-            if (reason?.kind === 'completed' || (reason?.kind === 'max-tokens' && text !== '')) return { text }
-            if (reason?.kind === 'aborted') return { text: '', failed: true }
-            const error = reason?.error?.message
-            return { text: typeof error === 'string' && error !== '' ? error : '回合失败', failed: true }
-          }
-        }
-      }
-      try {
-        await delay(Math.min(pollMs, deadline - Date.now()), undefined, { signal })
-      } catch {
-        return { text: '', failed: true }
-      }
+  async #awaitReply(agent: AgentHandle['agent'], progress: TurnProgress, signal: AbortSignal): Promise<{ text: string; failed?: boolean }> {
+    while (!signal.aborted) {
+      progress.update(agent.session?.snapshotEvents?.() ?? [])
+      if (progress.result !== undefined) return progress.result
+      try { await delay(this.#options.pollMs ?? 120, undefined, { signal }) }
+      catch { return { text: '', failed: true } }
     }
-    this.#options.logger.warn('the turn did not settle before the timeout')
-    return { text: '（这个回合超时了，没有拿到回复。）', failed: true }
+    return { text: '', failed: true }
   }
 
   /** Forget one attached session (tests, or after a dispose). */

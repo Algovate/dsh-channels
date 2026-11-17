@@ -13,7 +13,9 @@
  *
  * @module @derekluo/dsh-channels/interaction/approval
  */
+import { withinLifetime } from './lifetime.js'
 import type { InteractionEntry, InteractionQueue } from './queue.js'
+import { randomBytes } from 'node:crypto'
 import type { Target } from '../types.js'
 
 export type ApprovalOutcome = 'allowed-once' | 'rejected' | 'cancelled' | 'unavailable'
@@ -44,6 +46,8 @@ export function parseApprovalOutcome(text: string): ApprovalOutcome | null {
 }
 
 export function approvalEntry({ target, request }: { target: Target; request: { toolName?: string; reason?: string; displayReason?: unknown } }): InteractionEntry {
+  const code = randomBytes(3).toString('hex')
+  const hint = `回复「${code} 1」允许、「${code} 2」拒绝；「${code} 3」取消。`
   return {
     kind: 'approval',
     target,
@@ -53,11 +57,12 @@ export function approvalEntry({ target, request }: { target: Target; request: { 
         { id: 'allowed-once', label: '允许（只这一次）' },
         { id: 'rejected', label: '拒绝' },
       ],
-      hint: '回复 1 允许、2 拒绝；回复「取消」表示这次不处理。',
+      hint,
     },
     parse(text: string) {
-      const outcome = parseApprovalOutcome(text)
-      return outcome === null ? { ok: false, hint: '回复 1 允许、2 拒绝；回复「取消」结束这次请求。' } : { ok: true, value: outcome }
+      const parts = text.trim().split(/\s+/)
+      const outcome = parts.length === 2 && parts[0]?.toLowerCase() === code ? parseApprovalOutcome(parts[1]!) : null
+      return outcome === null ? { ok: false, hint } : { ok: true, value: outcome }
     },
     expiredNotice: '（这个审批等太久了，先在电脑上处理一下吧。）',
     retiredNotice: '（这个审批已经在电脑上处理过了。）',
@@ -98,7 +103,7 @@ export async function answerApproval({
   // A decision is anything except "unavailable" — that one only means "nobody
   // answered here", and the chat may still answer. So this waits for the first
   // real decision, or for both surfaces to finish without one.
-  const decision = await new Promise<{ side: 'remote' | 'local'; value: ApprovalOutcome } | undefined>((resolve) => {
+  const decision = await withinLifetime(new Promise<{ side: 'remote' | 'local'; value: ApprovalOutcome } | undefined>((resolve) => {
     let settled = false
     let finished = 0
     const settle = (value: { side: 'remote' | 'local'; value: ApprovalOutcome } | undefined): void => {
@@ -115,7 +120,11 @@ export async function answerApproval({
         if (result.ok === true && result.value !== 'unavailable') settle({ side, value: result.value })
       }).finally(finishOne)
     }
+  }), request.signal).catch((error: unknown) => {
+    if (request.signal?.aborted) return undefined
+    throw error
   })
+  if (request.signal?.aborted) return 'unavailable'
   if (decision !== undefined) {
     if (decision.side === 'local') queue.retire(entry)
     return decision.value

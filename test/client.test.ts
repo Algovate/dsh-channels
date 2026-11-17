@@ -86,7 +86,7 @@ test('the row claims weixin user messages exclusively and nothing else', async (
   const definitions: Array<Record<string, any>> = []
   const seats: Array<Record<string, any>> = []
   const scope = {
-    uiConversation: { events: { register: (definition: Record<string, any>) => definitions.push(definition) } },
+    uiConversation: { events: { register: (definition: Record<string, any>) => { definitions.push(definition); return () => {} } } },
     slots: {
       inject: (_name: string, callback: () => unknown) => callback(),
       register: (seat: Record<string, any>) => seats.push(seat),
@@ -131,7 +131,7 @@ test('the renderer shows the channel badge, the sender and the words', async () 
   const renderers: Array<(props: unknown) => any> = []
   const scope = {
     remote: {},
-    uiConversation: { events: { register: (definition: Record<string, any>) => definitions.push(definition) } },
+    uiConversation: { events: { register: (definition: Record<string, any>) => { definitions.push(definition); return () => {} } } },
     slots: {
       inject: (_name: string, callback: () => unknown) => callback(),
       register: (_seat: Record<string, any>, renderer: (props: unknown) => any) => renderers.push(renderer),

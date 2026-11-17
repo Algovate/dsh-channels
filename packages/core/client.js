@@ -188,7 +188,7 @@ window.__ModuleLoader__.load({
      * happens once on mount, and a failure is rendered where the table would be
      * rather than blanking the page.
      */
-    function createCard(t, remoteOf) {
+    function createCard(t) {
       const text = (value, fallback) => (typeof value === 'string' && value !== '' ? value : fallback)
       const cell = { padding: '8px 10px', borderBottom: '1px solid var(--dsw-alias-divider, rgba(128,128,128,0.2))', fontSize: 13, verticalAlign: 'top' }
       const headCell = { ...cell, fontSize: 12, fontWeight: 600, color: 'var(--dsw-label-secondary, rgba(128,128,128,1))' }
@@ -208,20 +208,8 @@ window.__ModuleLoader__.load({
         const [state, setState] = React.useState({ phase: 'loading', data: null, error: '' })
         const load = React.useCallback(() => {
           setState((current) => ({ ...current, phase: 'loading', error: '' }))
-          const remote = remoteOf()
           const fail = (error) => setState({ phase: 'error', data: null, error: String((error && error.message) || error) })
           const accept = (payload) => setState({ phase: 'ready', data: payload, error: '' })
-          if (remote && typeof remote.status === 'function') {
-            remote.status().then((result) => {
-              // A Remote call resolves `{ ok, value }` or `{ ok: false, error }`.
-              if (result && result.ok === false) return fail(result.error)
-              accept((result && result.value) || result)
-            }, fail)
-            return
-          }
-          // No generated `/remote` artifact for this namespace (it is built into
-          // the client bundle at build time), so read the Host's own route on the
-          // page's origin instead.
           fetch('/channels/status', { credentials: 'same-origin', headers: { accept: 'application/json' } })
             .then((response) => {
               if (!response.ok) throw new Error(`${response.status} ${response.statusText}`)
@@ -284,8 +272,8 @@ window.__ModuleLoader__.load({
                   h('tbody', null,
                     (data.channels || []).map((channel) => h('tr', { key: channel.id },
                       h('td', { style: cell }, text(channel.label && channel.label.zh, channel.id)),
-                      h('td', { style: cell }, text(channel.account, t('saved account', '已保存账号'))),
-                      h('td', { style: cell }, String((data.allowlist || []).length)),
+                      h('td', { style: cell }, (channel.accounts || []).map((account) => `${account.label || account.accountId}${account.expired ? t(' (expired)', '（已过期）') : ''}`).join(' · ') || '—'),
+                      h('td', { style: cell }, (channel.accounts || []).map((account) => `${account.accountId}: ${account.allowedSenders}`).join(' · ') || '—'),
                       h('td', { style: cell }, ['image', 'file', 'voice', 'video'].filter((kind) => channel.media && channel.media[kind]).join(' · ') || '—'),
                     )),
                     (data.channels || []).length === 0
@@ -568,7 +556,7 @@ window.__ModuleLoader__.load({
     }
 
     return {
-      inject: ['remote', 'slots'],
+      inject: ['slots'],
       apply(ctx) {
         // `uiConversation` is not in the module-level inject on purpose: a host
         // without the Conversation registry should lose the row, not keep the
@@ -588,12 +576,12 @@ window.__ModuleLoader__.load({
             disposeRows = () => {}
           }
         })
-        // The status card needs only `slots` and the remote, so it is registered
+        // The status card needs only `slots`, so it is registered
         // on its own: a host without the Conversation registry still gets it.
         const card = ctx.inject(['slots'], (scope) => {
           try {
             const disposer = scope.slots.inject('plugins.bundle.config', () =>
-              scope.slots.register({ name: 'plugins.bundle.config', key: PKG }, createCard(translator(), () => ctx.remote?.channels)))
+              scope.slots.register({ name: 'plugins.bundle.config', key: PKG }, createCard(translator())))
             // `slots.inject` returns the callback's own disposer on some hosts and
             // the registration result on others; only a function is worth keeping.
             disposeCard = typeof disposer === 'function' ? disposer : undefined

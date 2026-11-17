@@ -12,7 +12,7 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import { CDN_BASE_URL, listIndexedWeixinAccountIds } from '../vendor/openclaw-weixin/auth/accounts.js'
-import type { AccountInfo, AdapterRuntime, ChannelAdapter, InboundMessage, InteractionReply, InteractionView, Outgoing, SendResult, Target } from '@derekluo/dsh-channels'
+import type { AccountInfo, AdapterRuntime, ChannelAdapter, InboundMessage, Outgoing, SendResult, Target } from '@derekluo/dsh-channels'
 import { mediaItemsOf, normalizeInbound, type NormalizedInbound, type RawMediaItem, type RawMessage } from './normalize.js'
 import { MAX_INBOUND_MEDIA, saveInboundItem } from './media.js'
 import { AsrBridge } from './asr.js'
@@ -169,48 +169,21 @@ export async function createAdapter({ runtime, config = {}, stateRoot }: WeixinA
     id: CHANNEL_ID,
     label: { zh: '微信', en: 'WeChat' },
     capabilities: {
-      text: true,
       // Voice outbound stays false on purpose: the server accepts it and never
       // delivers it, so audio goes out as a file.
       media: { image: true, file: true, voice: false, video: true },
-      stickers: false,
-      typing: false,
-      buttons: false,
-      edit: false,
       maxTextChars: 600,
     },
     accounts: {
       async list(): Promise<AccountInfo[]> {
-        return (listIndexedWeixinAccountIds() as string[]).map((id) => ({
-          accountId: id,
-          expired: expired.has(id),
-        }))
+        return [{ accountId, expired: expired.has(accountId) }]
       },
       markExpired(id: string, value = true): void {
         if (value) expired.add(id)
         else expired.delete(id)
       },
     },
-    interactions: {
-      // WeChat has no buttons worth relying on: numbered text is the contract.
-      format: 'numbered',
-      render(view: InteractionView): Outgoing {
-        const lines = [view.title, '']
-        view.options.forEach((option, index) => {
-          lines.push(`${index + 1}. ${option.label}`)
-        })
-        if (view.hint !== undefined && view.hint !== '') lines.push('', view.hint)
-        const minutes = Math.max(1, Math.round((view.expiresAt - Date.now()) / 60_000))
-        lines.push('', `（回复序号即可，${minutes} 分钟内有效）`)
-        return { text: lines.join('\n'), kind: 'question' }
-      },
-      parse(reply: string, view: InteractionView): InteractionReply | null {
-        const match = /^\s*(\d{1,2})\s*[.、。]?\s*$/.exec(reply)
-        if (match === null) return null
-        const option = view.options[Number(match[1]) - 1]
-        return option === undefined ? null : { value: option.id }
-      },
-    },
+
     async start(): Promise<void> {
       if (inbound !== undefined) return
       inbound = new AbortController()

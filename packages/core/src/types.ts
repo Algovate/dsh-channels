@@ -54,7 +54,7 @@ export interface OutgoingMedia {
 
 export interface Outgoing {
   text?: string
-  /** Soft limit the core applies per channel capability. */
+  /** @deprecated Ignored. Configure maxTextChars and bubbleGapMs on the core. */
   bubbles?: { maxChars: number; gapMs: number }
   media?: OutgoingMedia[]
   kind: 'reply' | 'notice' | 'question'
@@ -71,12 +71,17 @@ export type SendResult =
   | { ok: false; code: string; detail?: string; retryAfterMs?: number }
 
 export interface Capabilities {
-  text: boolean
+  /** @deprecated Core requires text sends; this flag is not consulted. */
+  text?: boolean
   media: { image: boolean; file: boolean; voice: boolean; video: boolean }
-  stickers: boolean
-  typing: boolean
-  buttons: boolean
-  edit: boolean
+  /** @deprecated Reserved flags are ignored; omit them on new adapters. */
+  stickers?: boolean
+  /** @deprecated Provide the optional adapter.typing method instead. */
+  typing?: boolean
+  /** @deprecated Native buttons are not implemented by core. */
+  buttons?: boolean
+  /** @deprecated Message editing is not implemented by core. */
+  edit?: boolean
   /** 0 means "no limit the core needs to enforce". */
   maxTextChars: number
 }
@@ -111,7 +116,8 @@ export interface ChannelAdapter {
   readonly label: { zh: string; en: string }
   readonly capabilities: Capabilities
   readonly accounts: AccountSurface
-  readonly interactions: {
+  /** @deprecated Core renders and parses interactions. Optional for older adapters. */
+  readonly interactions?: {
     format: 'numbered' | 'native'
     render(view: InteractionView): Outgoing
     parse(reply: string, view: InteractionView): InteractionReply | null

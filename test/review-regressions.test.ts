@@ -102,6 +102,7 @@ test('failed overlay write is not reported as a saved revocation', async () => {
   const routes = new Map<string, { handler: (req: unknown, res: unknown) => void }>()
   const ctx = {
     get: () => ({
+      requestRejection: () => undefined,
       getOrigin: () => 'http://localhost:9000',
       register: (route: { path: string; handler: (req: unknown, res: unknown) => void }) => {
         routes.set(route.path, route)
@@ -120,7 +121,7 @@ test('failed overlay write is not reported as a saved revocation', async () => {
     })
     req.emit('data', '{"remove":"sender"}')
     req.emit('end')
-    assert.ok(status >= 500)
+    assert.equal(status, 500)
     assert.deepEqual(plugin.runtime.config.allowedSenders, ['sender'])
     await plugin.dispose()
   } finally {

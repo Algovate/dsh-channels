@@ -15,9 +15,12 @@
 import fs from 'node:fs'
 import path from 'node:path'
 
+import { statePath } from './store/layout.js'
+import { readManagementBody } from './management.js'
+
 import { Config as CoreConfig, resolveConfig, type ChannelsConfig } from './config.js'
 import { answerApproval } from './interaction/approval.js'
-import { createChannelsRemote, type StatusPayload, type StatusSource } from './remote.js'
+import type { StatusPayload, StatusSource } from './status.js'
 import { saveConfigOverlay } from './store/root.js'
 import { DomainCounterStore, FileCounterStore, type CounterStore } from './store/counters.js'
 import { loadChannelsDomainSpec } from './store/domain.js'
@@ -45,6 +48,12 @@ export interface ChannelPlugin {
   runtime: ChannelsRuntime
   adapters: ChannelAdapter[]
   dispose(): Promise<void>
+}
+
+export function managementRejection(ctx: PluginContext, headers: Record<string, string | string[] | undefined>): number | undefined {
+  const connection = ctx.get?.('connection') as { requestRejection?: (request: { headers: typeof headers }) => number | undefined } | undefined
+  if (typeof connection?.requestRejection !== 'function') return 503
+  try { return connection.requestRejection({ headers }) } catch { return 503 }
 }
 
 function ensureDirectories(root: string): void {
@@ -109,10 +118,15 @@ export async function startChannels({ ctx, config }: { ctx: PluginContext; confi
         stateRoot: root,
         config: config.adapterConfig[spec] ?? {},
       })
+      if (runtime.adapters().some((existing) => existing.id === adapter.id)) throw new Error(`duplicate channel id: ${adapter.id}`)
       const disposer = runtime.register(adapter)
-      const off = adapter.onInbound((message) => {
-        runtime.dispatch(message)
-      })
+      let off: () => void
+      try {
+        off = adapter.onInbound((message) => runtime.dispatch(message))
+      } catch (error) {
+        disposer()
+        throw error
+      }
       loaded.push({ adapter, disposer: () => {
         off()
         disposer()
@@ -123,16 +137,18 @@ export async function startChannels({ ctx, config }: { ctx: PluginContext; confi
     }
   }
 
-  for (const { adapter } of loaded) {
+  const offSeams = registerInteractionSeams({ ctx, config, runtime, logger })
+  for (const { adapter, disposer } of loaded) {
     try {
       await adapter.start()
     } catch (error) {
+      disposer()
+      try { await adapter.stop() } catch (error) { logger.warn(`failed adapter cleanup: ${String(error)}`) }
+      adapters.splice(adapters.indexOf(adapter), 1)
       logger.warn(`adapter '${adapter.id}' could not start: ${String((error as Error)?.message ?? error)}`)
     }
   }
   const stopOutbox = runtime.startOutboxRetry()
-  const offSeams = registerInteractionSeams({ ctx, config, runtime, logger })
-  const remote = await registerRemote({ ctx, config, runtime, root, logger })
   const offStatusRoute = registerStatusRoute({ ctx, config, runtime, root, logger })
   const offAllowlistRoute = registerAllowlistRoute({ ctx, config, runtime, root, logger })
   const offSettingsRoute = registerSettingsRoute({ ctx, config, runtime, root, logger })
@@ -144,7 +160,6 @@ export async function startChannels({ ctx, config }: { ctx: PluginContext; confi
       offSettingsRoute()
       offAllowlistRoute()
       offStatusRoute()
-      remote?.dispose?.()
       offSeams()
       stopOutbox()
       const stopping = loaded.map(async ({ adapter }) => {
@@ -154,7 +169,7 @@ export async function startChannels({ ctx, config }: { ctx: PluginContext; confi
           logger.warn(`adapter '${adapter.id}' did not stop cleanly: ${String((error as Error)?.message ?? error)}`)
         }
       })
-      runtime.dispose()
+      await runtime.dispose()
       await Promise.all(stopping)
       for (const { disposer } of loaded) disposer()
     },
@@ -171,7 +186,7 @@ export async function startChannels({ ctx, config }: { ctx: PluginContext; confi
  * overridable is a design mistake, not a merge rule.
  */
 export function readConfigOverlay(root: string): Partial<ChannelsConfig> {
-  const file = path.join(root, 'config.json')
+  const file = statePath(root, 'config')
   try {
     const parsed = JSON.parse(fs.readFileSync(file, 'utf8')) as Record<string, unknown>
     return parsed !== null && typeof parsed === 'object' ? (parsed as Partial<ChannelsConfig>) : {}
@@ -206,7 +221,8 @@ function registerInteractionSeams({
     ctx.on(
       'user-questions/request',
       ((request: { agent?: unknown; questions?: unknown[]; signal?: AbortSignal }, next: () => Promise<unknown>) => {
-        const target = runtime.targetForAgent(request?.agent)
+        const interaction = runtime.interactionForAgent(request?.agent)
+        const target = interaction?.target
         // One line per seam call: "the listener never ran" and "it ran for a
         // session this channel does not own" look identical from the phone.
         logger.info(`user-questions/request: target=${target === undefined ? 'none' : `${target.channel}|${target.conversationId}`}`)
@@ -214,7 +230,7 @@ function registerInteractionSeams({
           queue: runtime.interactions,
           target,
           questions: (Array.isArray(request?.questions) ? request.questions : []) as AskUserQuestionItem[],
-          request: request ?? {},
+          request: { ...request, ...(interaction === undefined ? {} : { signal: request?.signal === undefined ? interaction.signal : AbortSignal.any([request.signal, interaction.signal]) }) },
           next,
           enabled: config.questionsEnabled,
           logger,
@@ -227,12 +243,13 @@ function registerInteractionSeams({
     ctx.on(
       'approval/request',
       ((request: { agent?: unknown; toolName?: string; reason?: string; displayReason?: unknown; signal?: AbortSignal }, next: () => Promise<unknown>) => {
-        const target = runtime.targetForAgent(request?.agent)
+        const interaction = runtime.interactionForAgent(request?.agent)
+        const target = interaction?.target
         logger.info(`approval/request: tool=${String(request?.toolName ?? '?')} target=${target === undefined ? 'none' : `${target.channel}|${target.conversationId}`}`)
         return answerApproval({
           queue: runtime.interactions,
           target,
-          request: request ?? {},
+          request: { ...request, ...(interaction === undefined ? {} : { signal: request?.signal === undefined ? interaction.signal : AbortSignal.any([request.signal, interaction.signal]) }) },
           next,
           enabled: config.approvalsEnabled,
           logger,
@@ -316,45 +333,6 @@ async function registerWorkspace({
 }
 
 /**
- * Publish the card's read-only namespace.
- *
- * A Host without the typert protocol (a bare test context) simply gets no card
- * data; the plugin keeps working, because a status page is not a capability.
- */
-async function registerRemote({
-  ctx,
-  config,
-  runtime,
-  root,
-  logger,
-}: {
-  ctx: PluginContext
-  config: ChannelsConfig
-  runtime: ChannelsRuntime
-  root: string
-  logger: { info: (line: string) => void; warn: (line: string) => void }
-}): Promise<{ dispose?: () => void } | undefined> {
-  try {
-    const remote = await createChannelsRemote(ctx, statusSource({ config, runtime, root }))
-    logger.info('status remote registered as channels.status()')
-    return remote as unknown as { dispose?: () => void }
-  } catch (error) {
-    logger.warn(`status remote not registered: ${String((error as Error)?.message ?? error)}`)
-    return undefined
-  }
-}
-
-/**
- * The same status payload over one HTTP route.
- *
- * The card needs host data, and a Client only reaches a Remote namespace whose
- * `/remote` artifact was generated into its own bundle — a plugin cannot add
- * one at runtime. A named route is the supported way for a Host plugin to
- * answer the page it already serves, so the card works today without a code
- * generator. The route is a plain GET, same origin as the GUI, and returns only
- * what the card shows: no tokens, no message bodies beyond the journal tail.
- */
-/**
  * Where the rate counters live: the host's `channels` storage domain when it is
  * mounted, the plugin's own file otherwise.
  *
@@ -430,6 +408,8 @@ function registerAllowlistRoute({
           res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
           res.end(JSON.stringify(body))
         }
+        const rejection = managementRejection(ctx, req.headers)
+        if (rejection !== undefined) return json(rejection, { ok: false, code: 'authentication' })
         if (req.method !== 'POST') return json(405, { ok: false, code: 'method', detail: 'POST only' })
         // A grant must come from the page itself: browsers send Origin on POST,
         // and a cross-site form post must not be able to widen the allowlist.
@@ -437,13 +417,7 @@ function registerAllowlistRoute({
         if (origin === '' || origin !== allowedOrigin) {
           return json(403, { ok: false, code: 'origin', detail: origin })
         }
-        let body = ''
-        req.on('data', (chunk) => {
-          if (typeof chunk === 'string') body += chunk
-          else if (chunk instanceof Uint8Array) body += Buffer.from(chunk).toString('utf8')
-          if (body.length > 4096) body = body.slice(0, 4096)
-        })
-        req.on('end', () => {
+        readManagementBody(req, (body) => {
           try {
             const parsed = JSON.parse(body === '' ? '{}' : body) as { add?: unknown; remove?: unknown }
             const add = typeof parsed.add === 'string' ? parsed.add.trim() : undefined
@@ -463,7 +437,7 @@ function registerAllowlistRoute({
           } catch (error) {
             json(400, { ok: false, code: 'parse', detail: String((error as Error)?.message ?? error) })
           }
-        })
+        }, (status) => json(status, { ok: false, code: 'body' }))
       },
     })
     logger.info('allowlist route registered at POST /channels/allowlist')
@@ -519,16 +493,12 @@ function registerSettingsRoute({
           res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
           res.end(JSON.stringify(body))
         }
+        const rejection = managementRejection(ctx, req.headers)
+        if (rejection !== undefined) return json(rejection, { ok: false, code: 'authentication' })
         if (req.method !== 'POST') return json(405, { ok: false, code: 'method', detail: 'POST only' })
         const origin = typeof req.headers['origin'] === 'string' ? req.headers['origin'] : ''
         if (origin === '' || origin !== allowedOrigin) return json(403, { ok: false, code: 'origin', detail: origin })
-        let body = ''
-        req.on('data', (chunk) => {
-          if (typeof chunk === 'string') body += chunk
-          else if (chunk instanceof Uint8Array) body += Buffer.from(chunk).toString('utf8')
-          if (body.length > 4096) body = body.slice(0, 4096)
-        })
-        req.on('end', () => {
+        readManagementBody(req, (body) => {
           try {
             const parsed = JSON.parse(body === '' ? '{}' : body) as Record<string, unknown>
             const patch: { senderPerMinute?: number; senderPerDay?: number; autoSendFiles?: boolean; questionsEnabled?: boolean; approvalsEnabled?: boolean } = {}
@@ -561,7 +531,7 @@ function registerSettingsRoute({
           } catch (error) {
             json(400, { ok: false, code: 'invalid', detail: String((error as Error)?.message ?? error) })
           }
-        })
+        }, (status) => json(status, { ok: false, code: 'body' }))
       },
     })
     logger.info('settings route registered at POST /channels/settings')
@@ -600,11 +570,13 @@ function registerStatusRoute({
     const off = webServer.register({
       path: '/channels/status',
       kind: 'exact',
-      resource: (request: Request) => {
+      resource: async (request: Request) => {
+        const rejection = managementRejection(ctx, Object.fromEntries(request.headers))
+        if (rejection !== undefined) return new Response(null, { status: rejection })
         if (request.method !== 'GET' && request.method !== 'HEAD') {
           return new Response('method not allowed', { status: 405, headers: { allow: 'GET, HEAD' } })
         }
-        const body = JSON.stringify(buildStatus(source))
+        const body = JSON.stringify(await buildStatus(source))
         return new Response(body, {
           status: 200,
           headers: { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' },
@@ -625,11 +597,11 @@ function registerStatusRoute({
   }
 }
 
-/** Assemble the payload once, for both the route and the Remote. */
-function buildStatus(source: StatusSource): StatusPayload {
+/** Assemble the authenticated status response. */
+async function buildStatus(source: StatusSource): Promise<StatusPayload> {
   return {
     stateRoot: source.stateRoot,
-    channels: source.channels(),
+    channels: await source.channels(),
     allowlist: source.allowlist(),
     outboxPending: source.outboxPending(),
     journal: source.journalTail(8),
@@ -649,10 +621,14 @@ function statusSource({
 }): StatusSource {
   return {
     stateRoot: root,
-    channels: () =>
-      runtime.adapters().map((adapter) => ({
+    channels: async () =>
+      Promise.all(runtime.adapters().map(async (adapter) => ({
         id: adapter.id,
         label: adapter.label,
+        accounts: await adapter.accounts.list().then((accounts) => accounts.map((account) => ({
+          ...account,
+          allowedSenders: (config.allowlistPerAccount[account.accountId] ?? config.allowedSenders).length,
+        }))).catch(() => []),
         maxTextChars: adapter.capabilities.maxTextChars ?? config.maxTextChars,
         media: {
           image: adapter.capabilities.media?.image === true,
@@ -660,7 +636,7 @@ function statusSource({
           voice: adapter.capabilities.media?.voice === true,
           video: adapter.capabilities.media?.video === true,
         },
-      })),
+      }))),
     allowlist: () => [...config.allowedSenders],
     outboxPending: () => runtime.outbox.list().length,
     journalTail: (limit) =>

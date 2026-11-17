@@ -14,7 +14,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
 
-import type { AccountInfo, AdapterRuntime, ChannelAdapter, InboundMedia, InboundMessage, InteractionReply, InteractionView, Outgoing, SendResult, Target } from '@derekluo/dsh-channels'
+import type { AccountInfo, AdapterRuntime, ChannelAdapter, InboundMedia, InboundMessage, Outgoing, SendResult, Target } from '@derekluo/dsh-channels'
 import { DEFAULT_API_BASE, MAX_TEXT_CHARS, TelegramTransport, type FetchLike } from './transport.js'
 import { CHANNEL_ID, mediaOf, normalizeInbound, type NormalizedInbound, type TelegramUpdate } from './normalize.js'
 
@@ -127,15 +127,7 @@ export async function createAdapter({ runtime, config = {}, stateRoot = '' }: Te
     id: CHANNEL_ID,
     label: { zh: '电报', en: 'Telegram' },
     capabilities: {
-      text: true,
       media: { image: true, file: true, voice: false, video: true },
-      // Telegram has stickers, a typing action and inline keyboards, but this
-      // adapter only uses the last two indirectly: a sticker is not a message a
-      // turn can answer, and the core's interactions are numbered text.
-      stickers: false,
-      typing: true,
-      buttons: false,
-      edit: false,
       maxTextChars: MAX_TEXT_CHARS,
     },
     accounts: {
@@ -143,24 +135,10 @@ export async function createAdapter({ runtime, config = {}, stateRoot = '' }: Te
         return [{ accountId, label, expired: false }]
       },
     },
-    interactions: {
-      format: 'numbered',
-      render(view: InteractionView): Outgoing {
-        const lines = [view.title]
-        view.options.forEach((option, index) => lines.push(`${index + 1}. ${option.label}`))
-        if (view.hint !== undefined && view.hint !== '') lines.push('', view.hint)
-        return { text: lines.join('\n'), kind: 'question' }
-      },
-      parse(reply: string, view: InteractionView): InteractionReply | null {
-        const normalized = reply.trim().replace(/[０-９]/g, (digit) => String.fromCharCode(digit.charCodeAt(0) - 0xfee0))
-        if (!/^\d{1,2}$/.test(normalized)) return null
-        const index = Number(normalized) - 1
-        const option = view.options[index]
-        return option === undefined ? null : { value: option.id }
-      },
-    },
+
     async start(): Promise<void> {
-      if (loop !== undefined || transport.signal.aborted) return
+      if (loop !== undefined) return
+      transport.start()
       logger.info(`telegram adapter polling bot ${accountId}`)
       loop = (async () => {
         while (!transport.signal.aborted) {

@@ -9,7 +9,7 @@
  */
 import { createHash } from 'node:crypto'
 
-import type { ChannelId, Target } from './types.js'
+import type { Target } from './types.js'
 
 /** Identity of one conversation line, as used by queues and stores. */
 export function lineKey(target: Target): string {
@@ -25,15 +25,4 @@ export function sameTarget(left: Target, right: Target): boolean {
 export function sessionIdFor(target: Pick<Target, 'channel' | 'accountId' | 'conversationId'>): string {
   const digest = createHash('sha1').update(lineKey({ channel: target.channel, accountId: target.accountId, conversationId: target.conversationId })).digest('hex').slice(0, 16)
   return `chan-${target.channel}-${digest}`
-}
-
-/** Side sessions (summaries, digests) must never share the conversation's line. */
-export function sideSessionIdFor(target: Pick<Target, 'channel' | 'accountId' | 'conversationId'>, kind: string): string {
-  const digest = createHash('sha1').update(`${lineKey({ channel: target.channel, accountId: target.accountId, conversationId: target.conversationId })}|${kind}`).digest('hex').slice(0, 16)
-  return `chan-${target.channel}-${kind}-${digest}`
-}
-
-/** `weixin` + account, used by rate limiters that are per account. */
-export function accountKey(channel: ChannelId, accountId: string): string {
-  return `${channel}|${accountId}`
 }

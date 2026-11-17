@@ -22,7 +22,7 @@ export type InteractionKind = 'question' | 'approval'
 
 export interface InteractionEntry {
   kind: InteractionKind
-  target: Target
+  target: Target & { group?: boolean; senderId?: string }
   /** The prompt, as the adapter wants it rendered. */
   view: {
     title: string
@@ -191,7 +191,7 @@ export class InteractionQueue {
     }
     if (entry.view.hint !== undefined && entry.view.hint !== '') lines.push('', entry.view.hint)
     const minutes = Math.max(1, Math.round(this.#timeoutMs() / 60_000))
-    lines.push('', `（回复序号即可，${minutes} 分钟内有效）`)
+    lines.push('', `（${entry.kind === 'approval' ? '请按上述验证码答复' : '回复序号即可'}，${minutes} 分钟内有效）`)
     return lines.join('\n')
   }
 
@@ -214,6 +214,10 @@ export class InteractionQueue {
       const isAnswer = (entry: InteractionEntry) => entry.freeText !== true && entry.parse(text)?.ok === true
       const stale = this.#transmissions.get(key)?.retired
       return { status: (head !== undefined && isAnswer(head.entry)) || stale?.some(isAnswer) ? 'waiting' : 'none' }
+    }
+    const sender = head.entry.target
+    if (sender.group && sender.senderId !== undefined && (target as { senderId?: string }).senderId !== sender.senderId) {
+      return { status: 'invalid', hint: '请由发起这次请求的人答复。' }
     }
     const parsed = head.entry.parse(text)
     if (parsed === null) return { status: 'none' }

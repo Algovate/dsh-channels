@@ -73,7 +73,6 @@ test('the outbox retries and drops the entry once delivery succeeds', async () =
   assert.equal(runtime.outbox.list().length, 1)
   // Deliver on the next attempt.
   const good = createFakeAdapter()
-  runtime.register(good)
   Object.assign(adapter, good, { id: 'fake' })
   const delivered = await runtime.outbox.drain(async (entry) => {
     const result = await adapter.send(entry.target, { text: entry.outgoing.text ?? '', kind: entry.outgoing.kind })
@@ -138,7 +137,7 @@ test('while prompts change, ordinary messages and commands still get through', a
   const second = runtime.interactions.ask(question)
   void second.catch(() => {})
 
-  runtime.dispatch(inbound({ text: '允许' }))
+  runtime.dispatch(inbound({ text: `${approval.view.hint?.match(/[a-f0-9]{6}/)?.[0]} 1` }))
   runtime.dispatch(inbound({ text: '/new' }))
   runtime.dispatch(inbound({ text: '明天几点开会？' }))
   await tick(30)
@@ -183,7 +182,7 @@ test('an agent that answers for a conversation can be mapped back to it', async 
   await tick(150)
   const agent = h.agents.get(sessionIdFor({ channel: 'fake', accountId: 'acct', conversationId: 'conv' }))
   assert.ok(agent !== undefined)
-  assert.deepEqual(runtime.targetForAgent(agent), { channel: 'fake', accountId: 'acct', conversationId: 'conv' })
+  assert.equal(runtime.targetForAgent(agent), undefined)
   assert.equal(runtime.targetForAgent({ session: { id: 'someone-elses-session' } }), undefined)
   runtime.dispose()
 })

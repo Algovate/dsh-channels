@@ -17,7 +17,10 @@
  *
  * @module @derekluo/dsh-channels/documents
  */
-import fs from 'node:fs'
+import fs from 'node:fs/promises'
+import { constants } from 'node:fs'
+import { Worker } from 'node:worker_threads'
+import { promisify } from 'node:util'
 import path from 'node:path'
 import zlib from 'node:zlib'
 
@@ -33,7 +36,7 @@ export type DocumentResult =
   | { ok: false; kind: 'text' | 'docx' | 'pdf' | 'unsupported'; reason: string }
 
 /** Read one file out of a zip's central directory; undefined when absent. */
-function readZipEntry(buffer: Buffer, wanted: string): Buffer | undefined {
+async function readZipEntry(buffer: Buffer, wanted: string): Promise<Buffer | undefined> {
   const minEocd = 22
   for (let i = buffer.length - minEocd; i >= Math.max(0, buffer.length - 65_536 - minEocd); i -= 1) {
     if (buffer.readUInt32LE(i) !== 0x06054b50) continue
@@ -49,12 +52,14 @@ function readZipEntry(buffer: Buffer, wanted: string): Buffer | undefined {
       const localOffset = buffer.readUInt32LE(offset + 42)
       const name = buffer.subarray(offset + 46, offset + 46 + nameLength).toString('utf8')
       if (name === wanted) {
+        if (localOffset + 30 > buffer.length || buffer.readUInt32LE(localOffset) !== 0x04034b50) return undefined
         const localNameLength = buffer.readUInt16LE(localOffset + 26)
         const localExtraLength = buffer.readUInt16LE(localOffset + 28)
         const start = localOffset + 30 + localNameLength + localExtraLength
+        if (start + compressedSize > buffer.length) return undefined
         const data = buffer.subarray(start, start + compressedSize)
         if (method === 0 && data.length <= MAX_DOCUMENT_XML_BYTES) return data
-        if (method === 8) return zlib.inflateRawSync(data, { maxOutputLength: MAX_DOCUMENT_XML_BYTES })
+        if (method === 8) return promisify(zlib.inflateRaw)(data, { maxOutputLength: MAX_DOCUMENT_XML_BYTES })
         return undefined
       }
       offset += 46 + nameLength + extraLength + commentLength
@@ -86,51 +91,123 @@ function truncate(text: string, maxChars: number): { text: string; truncated: bo
   return { text: text.slice(0, maxChars), truncated: true }
 }
 
-/** PDF text through the optional parser; a missing parser is a reason, not a crash. */
-async function extractPdf(filePath: string): Promise<string> {
-  let pdfjs: { getDocument?: (options: { data: Uint8Array; isEvalSupported: boolean }) => { promise: Promise<any> } }
-  try {
-    const moduleName = 'pdfjs-dist/legacy/build/pdf.mjs'
-    pdfjs = (await import(moduleName)) as typeof pdfjs
-  } catch {
-    throw new Error(PDF_HINT)
+/** Minimal PDF contract, kept internal to the binary-document worker. */
+export interface PdfLoader {
+  getDocument(options: { data: Uint8Array; isEvalSupported: boolean }): {
+    promise: Promise<{
+      numPages: number
+      getPage(page: number): Promise<{ getTextContent(): Promise<{ items: Array<{ str?: string }> }>; cleanup(): void }>
+    }>
+    destroy(): Promise<void>
   }
-  if (typeof pdfjs.getDocument !== 'function') throw new Error(PDF_HINT)
-  const data = new Uint8Array(fs.readFileSync(filePath))
-  const document = await pdfjs.getDocument({ data, isEvalSupported: false }).promise
-  const pages: string[] = []
-  for (let page = 1; page <= document.numPages; page += 1) {
-    const content = await (await document.getPage(page)).getTextContent()
-    pages.push((content.items as Array<{ str?: string }>).map((item) => item.str ?? '').join(' '))
-  }
-  return pages.join('\n\n')
 }
 
-/**
- * Extract what can be extracted. Never throws: an unsupported or unreadable
- * document is a reason the caller logs, and the attachment still travels.
- */
+/** Bound page work and text accumulation, and release PDF resources even after parsing fails. */
+export async function pdfText(pdfjs: PdfLoader, data: Uint8Array, maxChars: number): Promise<{ text: string; truncated: boolean }> {
+  const task = pdfjs.getDocument({ data, isEvalSupported: false })
+  try {
+    const document = await task.promise
+    let text = ''
+    let visited = 0
+    for (let page = 1; page <= Math.min(document.numPages, 20); page++) {
+      const current = await document.getPage(page)
+      try {
+        const content = await current.getTextContent()
+        if (text !== '') text += '\n\n'
+        for (const item of content.items) {
+          if (typeof item.str !== 'string') continue
+          text += item.str.slice(0, Math.max(0, maxChars + 1 - text.length)) + ' '
+          if (text.length > maxChars) break
+        }
+        visited = page
+      } finally { current.cleanup() }
+      if (text.length > maxChars) break
+    }
+    return { ...truncate(text.trim(), maxChars), truncated: text.length > maxChars || visited < document.numPages }
+  } finally { await task.destroy() }
+}
+
+/** Runs in a worker: parser CPU and memory do not block the host's turn deadline. */
+export async function parseBinaryDocument(bytes: Uint8Array, extension: string, maxChars: number): Promise<DocumentResult> {
+  if (extension === '.docx') {
+    const xml = await readZipEntry(Buffer.from(bytes), 'word/document.xml')
+    if (xml === undefined) return { ok: false, kind: 'docx', reason: 'no word/document.xml in the archive' }
+    return { ok: true, kind: 'docx', ...truncate(docxXmlToText(xml.toString('utf8')), maxChars) }
+  }
+  const moduleName = 'pdfjs-dist/legacy/build/pdf.mjs'
+  let pdfjs: PdfLoader
+  try { pdfjs = await import(moduleName) as PdfLoader } catch { throw new Error(PDF_HINT) }
+  return { ok: true, kind: 'pdf', ...await pdfText(pdfjs, bytes, maxChars) }
+}
+
+const MAX_BINARY_BYTES = 8 * 1024 * 1024
+
+/** Read at most a fixed budget, even if a file grows while it is being read. */
+async function readBounded(filePath: string, budget: number, signal?: AbortSignal): Promise<{ bytes: Buffer; more: boolean }> {
+  signal?.throwIfAborted()
+  const file = await fs.open(filePath, constants.O_RDONLY | constants.O_NONBLOCK)
+  try {
+    const stat = await file.stat()
+    if (!stat.isFile()) throw new Error('document is not a regular file')
+    const buffer = Buffer.alloc(Math.min(stat.size, budget) + 1)
+    let size = 0
+    while (size < buffer.length) {
+      signal?.throwIfAborted()
+      const { bytesRead } = await file.read(buffer, size, buffer.length - size, size)
+      if (bytesRead === 0) break
+      size += bytesRead
+    }
+    return { bytes: buffer.subarray(0, Math.min(size, budget)), more: size > budget }
+  } finally { await file.close() }
+}
+
+async function parseInWorker(bytes: Buffer, extension: string, maxChars: number, signal?: AbortSignal): Promise<DocumentResult> {
+  signal?.throwIfAborted()
+  const worker = new Worker(new URL('./document-worker.js', import.meta.url), {
+    workerData: { bytes, extension, maxChars },
+    resourceLimits: { maxOldGenerationSizeMb: 128 },
+  })
+  let abort!: () => void
+  let timer!: ReturnType<typeof setTimeout>
+  try {
+    return await new Promise<DocumentResult>((resolve, reject) => {
+      abort = () => reject(signal?.reason ?? new Error('document parsing aborted'))
+      worker.once('message', (result: DocumentResult) => resolve(result))
+      worker.once('error', reject)
+      worker.once('exit', (code) => reject(new Error(`document parser exited before answering (${code})`)))
+      timer = setTimeout(() => reject(new Error('document parsing timed out')), 5000)
+      if (signal?.aborted) abort()
+      else signal?.addEventListener('abort', abort, { once: true })
+    })
+  } finally {
+    clearTimeout(timer)
+    signal?.removeEventListener('abort', abort)
+    await worker.terminate()
+  }
+}
+
+/** Extract a bounded prefix; failures preserve the original attachment for the agent. */
 export async function extractDocumentText(
   filePath: string,
-  { maxChars = DEFAULT_DOCUMENT_CHARS }: { maxChars?: number } = {},
+  { maxChars = DEFAULT_DOCUMENT_CHARS, signal }: { maxChars?: number; signal?: AbortSignal } = {},
 ): Promise<DocumentResult> {
   const extension = path.extname(filePath).toLowerCase()
+  const budget = Number.isFinite(maxChars) ? Math.max(1, Math.min(100_000, Math.floor(maxChars))) : DEFAULT_DOCUMENT_CHARS
   try {
+    signal?.throwIfAborted()
     if (TEXT_EXTENSIONS.has(extension)) {
-      const raw = fs.readFileSync(filePath, 'utf8')
-      return { ok: true, kind: 'text', ...truncate(raw, maxChars) }
+      const { bytes, more } = await readBounded(filePath, budget * 4 + 4, signal)
+      const decoder = new TextDecoder()
+      const raw = decoder.decode(bytes, { stream: more })
+      return { ok: true, kind: 'text', ...truncate(raw, budget), truncated: more || raw.length > budget }
     }
-    if (extension === '.docx') {
-      const xml = readZipEntry(fs.readFileSync(filePath), 'word/document.xml')
-      if (xml === undefined) return { ok: false, kind: 'docx', reason: 'no word/document.xml in the archive' }
-      return { ok: true, kind: 'docx', ...truncate(docxXmlToText(xml.toString('utf8')), maxChars) }
-    }
-    if (extension === '.pdf') {
-      return { ok: true, kind: 'pdf', ...truncate(await extractPdf(filePath), maxChars) }
+    if (extension === '.docx' || extension === '.pdf') {
+      const { bytes, more } = await readBounded(filePath, MAX_BINARY_BYTES, signal)
+      if (more) throw new Error(`document exceeds ${MAX_BINARY_BYTES} bytes`)
+      return await parseInWorker(bytes, extension, budget, signal)
     }
     return { ok: false, kind: 'unsupported', reason: `unsupported document type ${extension || '(none)'}` }
   } catch (error) {
-    const kind = extension === '.pdf' ? 'pdf' : extension === '.docx' ? 'docx' : 'text'
-    return { ok: false, kind, reason: String((error as Error)?.message ?? error) }
+    return { ok: false, kind: extension === '.pdf' ? 'pdf' : extension === '.docx' ? 'docx' : 'text', reason: String((error as Error)?.message ?? error) }
   }
 }

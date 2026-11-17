@@ -419,3 +419,18 @@ test('custom Telegram servers cannot share a scope with a different backend issu
   const scopes = await Promise.all([official, first, second].map(async (adapter) => (await adapter.accounts.list())[0]?.accountId))
   assert.equal(new Set(scopes).size, 3)
 })
+
+test('a stopped Telegram transport can start again without discarding its cursor', async () => {
+  const offsets: Array<number | undefined> = []
+  const transport = new TelegramTransport({ token: '123:test', logger: { info() {}, warn() {} }, fetchImpl: async (_url, init) => {
+    offsets.push(JSON.parse(String(init?.body)).offset)
+    return { ok: true, status: 200, json: async () => ({ ok: true, result: [{ update_id: 12 }] }) }
+  } })
+  await transport.pollOnce()
+  transport.stop()
+  assert.deepEqual(await transport.pollOnce(), [])
+  transport.start()
+  await transport.pollOnce()
+  assert.deepEqual(offsets, [undefined, 13])
+  transport.stop()
+})

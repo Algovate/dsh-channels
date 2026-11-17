@@ -17,15 +17,16 @@ export function splitIntoBubbles(text: string, maxChars: number): string[] {
   const source = String(text ?? '')
   if (!Number.isFinite(maxChars) || maxChars <= 0 || source.length <= maxChars) return source === '' ? [] : [source]
   const out: string[] = []
-  let rest = source
-  while (rest.length > maxChars) {
-    const window = rest.slice(0, maxChars)
+  const limit = Math.max(1, Math.floor(maxChars))
+  let rest = Array.from(source)
+  while (rest.length > limit) {
+    const window = rest.slice(0, limit).join('')
     const cut = Math.max(window.lastIndexOf('\n\n'), window.lastIndexOf('\n'), window.lastIndexOf('。'), window.lastIndexOf('. '), window.lastIndexOf(' '))
-    const at = cut > maxChars * 0.4 ? cut + (window[cut] === '\n' ? 0 : 1) : maxChars
-    out.push(rest.slice(0, at).trimEnd())
-    rest = rest.slice(at).trimStart()
+    const at = cut > window.length * 0.4 ? Array.from(window.slice(0, cut + (window[cut] === '\n' ? 0 : 1))).length : limit
+    out.push(rest.slice(0, at).join('').trimEnd())
+    rest = Array.from(rest.slice(at).join('').trimStart())
   }
-  if (rest !== '') out.push(rest)
+  if (rest.length > 0) out.push(rest.join(''))
   return out.filter((piece) => piece !== '')
 }
 

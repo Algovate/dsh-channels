@@ -308,6 +308,7 @@ export class WeixinTransport {
         to: conversationId,
         text,
         opts: {
+          signal: this.#abort.signal,
           baseUrl: this.#options.baseUrl,
           token: this.#options.token,
           ...(contextToken === '' ? {} : { contextToken }),
@@ -335,6 +336,7 @@ export class WeixinTransport {
  */
 export class SendPacer {
   #lastAt = 0
+  #tail: Promise<unknown> = Promise.resolve()
   #failures = 0
   #cooldownUntil = 0
   readonly #minIntervalMs: number
@@ -348,11 +350,18 @@ export class SendPacer {
   }
 
   /** Wait until a send is allowed; resolves false when a cooldown is active. */
-  async take(): Promise<boolean> {
+  take(): Promise<boolean> {
+    const turn = this.#tail.then(() => this.#take())
+    this.#tail = turn.catch(() => {})
+    return turn
+  }
+
+  async #take(): Promise<boolean> {
     const now = this.#now()
     if (now < this.#cooldownUntil) return false
     const wait = this.#minIntervalMs - (now - this.#lastAt)
     if (wait > 0) await new Promise((resolve) => setTimeout(resolve, wait))
+    if (this.#now() < this.#cooldownUntil) return false
     this.#lastAt = this.#now()
     return true
   }

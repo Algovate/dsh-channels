@@ -123,9 +123,8 @@ export function createRateLimiter({ limit, windowMs, now = Date.now }: { limit: 
 /**
  * A fixed-window limiter whose counts survive a restart.
  *
- * The window key is the window's start instant, so yesterday's count can never
- * be read as today's: a new window means a new key and the old row is simply
- * never read again (the file keeps a handful of keys).
+ * The limiter addresses each reservation by its window start. Durable stores
+ * compact those addresses into one timestamped row per subject and limit type.
  */
 export function createDurableRateLimiter({
   limit,
@@ -149,7 +148,10 @@ export function createDurableRateLimiter({
     const pending = held.get(windowKey) ?? 0
     if (store.get(windowKey) + pending >= current) return undefined
     held.set(windowKey, pending + 1)
+    let finished = false
     return (commit) => {
+      if (finished) return
+      finished = true
       const remaining = (held.get(windowKey) ?? 1) - 1
       if (remaining === 0) held.delete(windowKey)
       else held.set(windowKey, remaining)

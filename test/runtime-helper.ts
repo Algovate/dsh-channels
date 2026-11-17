@@ -45,11 +45,6 @@ export function createFakeAdapter(options: FakeAdapterOptions = {}): ChannelAdap
         return [{ accountId: 'acct', expired: false }]
       },
     },
-    interactions: {
-      format: 'numbered' as const,
-      render: (view: { title: string }) => ({ text: view.title, kind: 'question' as const }),
-      parse: () => null,
-    },
     async start() {},
     async stop() {},
     onInbound(handler: (message: InboundMessage) => void) {

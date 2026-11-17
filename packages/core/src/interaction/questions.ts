@@ -14,8 +14,9 @@
  *
  * @module @derekluo/dsh-channels/interaction/questions
  */
+import { withinLifetime } from './lifetime.js'
 import type { InteractionEntry, InteractionQueue } from './queue.js'
-import type { Outgoing, Target } from '../types.js'
+import type { Target } from '../types.js'
 
 /** A plan or permission detail longer than this is cut with an ellipsis. */
 const MAX_DETAIL_CHARS = 800
@@ -186,12 +187,12 @@ export async function answerUserQuestion({
     .then(() => next())
     .then((value) => ({ side: 'local' as const, ok: true as const, value }), (error: unknown) => ({ side: 'local' as const, ok: false as const, error }))
 
-  const first = await Promise.race([remote, local])
+  const first = await withinLifetime(Promise.race([remote, local]), request.signal)
   if (first.ok === true) {
     if (first.side === 'local') queue.retire(entry)
     return first.value
   }
-  const other = first.side === 'remote' ? await local : await remote
+  const other = await withinLifetime<Awaited<typeof local> | Awaited<typeof remote>>(first.side === 'remote' ? local : remote, request.signal)
   if (other.ok === true) {
     if (other.side === 'local') queue.retire(entry)
     return other.value
@@ -199,9 +200,4 @@ export async function answerUserQuestion({
   const error = first.side === 'local' ? first.error : other.error
   logger.warn(`no answer to the agent's question: ${String((error as Error)?.message ?? error)}`)
   throw error instanceof Error ? error : new Error(String(error))
-}
-
-/** Render-only helper used by tests and the card preview. */
-export function questionOutgoing(prompt: string): Outgoing {
-  return { text: prompt, kind: 'question' }
 }

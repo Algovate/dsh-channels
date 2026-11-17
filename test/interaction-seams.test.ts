@@ -188,7 +188,7 @@ test('a desktop answer retires only its own queued question', async () => {
   assert.deepEqual(second, { answers: [{ id: 'other', selected: [], custom: 'desktop reply' }] })
   assert.equal(instance.active(target), 'approval')
   assert.equal(sent.length, 1)
-  assert.equal(instance.claim(target, '1').status, 'answered')
+  assert.equal(instance.claim(target, `${sent.find((item) => /需要批准/.test(item.text ?? ''))?.text?.match(/[a-f0-9]{6}/)?.[0]} 1`).status, 'answered')
   assert.equal(await first, 'allowed-once')
 })
 
@@ -249,7 +249,7 @@ test('an approval decided in the chat wins, and the desktop may still say unavai
   })
   await tick(10)
   assert.ok(sent.some((outgoing) => /需要批准/.test(outgoing.text ?? '')))
-  assert.equal(instance.claim(target, '1').status, 'answered')
+  assert.equal(instance.claim(target, `${sent.find((item) => /需要批准/.test(item.text ?? ''))?.text?.match(/[a-f0-9]{6}/)?.[0]} 1`).status, 'answered')
   assert.equal(await answer, 'allowed-once')
 })
 

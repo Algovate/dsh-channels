@@ -70,6 +70,7 @@ async function uploadMediaToCdn(params) {
     }
     const { downloadParam: downloadEncryptedQueryParam } = await uploadBufferToCdn({
         buf: plaintext,
+        signal: opts.signal,
         uploadFullUrl: uploadFullUrl || undefined,
         uploadParam: uploadParam ?? undefined,
         filekey,

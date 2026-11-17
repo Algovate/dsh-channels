@@ -7,6 +7,7 @@
  *
  * @module @derekluo/dsh-channels/store/outbox
  */
+import { statePath } from './layout.js'
 import path from 'node:path'
 
 import { atomicWriteJson, readJsonFile } from './atomic.js'
@@ -41,7 +42,7 @@ export class Outbox {
   #draining = false
 
   constructor({ stateRoot, max = 50, warn = () => {}, now = Date.now }: { stateRoot: string; max?: number; warn?: (line: string) => void; now?: () => number }) {
-    this.#file = path.join(stateRoot, 'outbox.json')
+    this.#file = statePath(stateRoot, 'outbox')
     this.#max = max
     this.#warn = warn
     this.#now = now

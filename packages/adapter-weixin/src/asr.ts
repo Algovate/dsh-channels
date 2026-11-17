@@ -16,6 +16,7 @@
  */
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import fs from 'node:fs'
+import { StringDecoder } from 'node:string_decoder'
 import path from 'node:path'
 
 export type Transcription = { ok: true; text: string } | { ok: false; reason: string }
@@ -62,6 +63,7 @@ export class AsrBridge {
     }
     try {
       const child = (this.#options.spawnImpl ?? spawn)(command, [this.#options.scriptPath], { env, stdio: 'pipe' }) as ChildProcessWithoutNullStreams
+      child.stdin.on('error', () => {}) // A closed pipe must not crash the host.
       child.stderr.on('data', (chunk: Buffer) => this.#options.logger.info(`asr: ${String(chunk).trim().slice(0, 200)}`))
       child.on('exit', (code) => {
         this.#options.logger.info(`asr bridge exited (${String(code)})`)
@@ -105,15 +107,32 @@ export class AsrBridge {
           }
           resolve({ ok: false, reason: 'transcription timed out' })
         }, this.#options.timeoutMs ?? 60_000)
-        const onData = (chunk: Buffer): void => {
-          const line = String(chunk).split('\n').find((entry) => entry.trim() !== '')
-          if (line === undefined) return
+        const decoder = new StringDecoder('utf8')
+        let buffered = ''
+        let bytes = 0
+        const protocolError = (reason: string): void => {
           cleanup()
-          try {
-            const parsed = JSON.parse(line) as { ok?: boolean; text?: string; error?: string }
-            resolve(parsed.ok === true && typeof parsed.text === 'string' ? { ok: true, text: parsed.text } : { ok: false, reason: parsed.error ?? 'no text' })
-          } catch {
-            resolve({ ok: false, reason: `unreadable answer: ${line.slice(0, 120)}` })
+          // Discard the stream so a partial/oversized answer cannot become the next request's reply.
+          if (this.#child === child) this.#child = undefined
+          try { child.kill('SIGKILL') } catch { /* Already exited. */ }
+          resolve({ ok: false, reason })
+        }
+        const onData = (chunk: Buffer): void => {
+          bytes += chunk.length
+          if (bytes > 256 * 1024) return protocolError('ASR answer exceeds 262144 bytes')
+          buffered += decoder.write(chunk)
+          let newline: number
+          while ((newline = buffered.indexOf('\n')) >= 0) {
+            const line = buffered.slice(0, newline).trim()
+            buffered = buffered.slice(newline + 1)
+            if (line === '') continue
+            if (buffered.trim() !== '') return protocolError('unexpected extra ASR answer')
+            try {
+              const parsed = JSON.parse(line) as { ok?: boolean; text?: string; error?: string }
+              cleanup()
+              resolve(parsed.ok === true && typeof parsed.text === 'string' ? { ok: true, text: parsed.text } : { ok: false, reason: parsed.error ?? 'no text' })
+            } catch { protocolError(`unreadable answer: ${line.slice(0, 120)}`) }
+            return
           }
         }
         const onExit = (): void => {
@@ -124,9 +143,13 @@ export class AsrBridge {
           clearTimeout(timeout)
           child.stdout.off('data', onData)
           child.off('exit', onExit)
+          child.off('error', onExit)
+          child.stdin.off('error', onExit)
         }
         child.stdout.on('data', onData)
         child.on('exit', onExit)
+        child.on('error', onExit)
+        child.stdin.on('error', onExit)
         child.stdin.write(`${JSON.stringify({ wav: path.resolve(wavPath) })}\n`)
       })
     }

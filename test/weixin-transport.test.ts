@@ -5,7 +5,7 @@ import path from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
 import test from 'node:test'
 
-import { WeixinTransport, readAccount } from '../packages/adapter-weixin/src/transport.js'
+import { WeixinTransport, readAccount, SendPacer } from '../packages/adapter-weixin/src/transport.js'
 
 type TransportOptions = ConstructorParameters<typeof WeixinTransport>[0]
 
@@ -240,4 +240,12 @@ test('media is sent with a caption on the first attachment only', async () => {
   assert.equal(seen.length, 2)
   assert.equal(seen[0]?.['text'], '看图')
   assert.equal(seen[1]?.['text'], '')
+})
+
+test('concurrent pacer requests reserve separate send slots', async () => {
+  const pacer = new SendPacer({ minIntervalMs: 25 })
+  const times: number[] = []
+  await Promise.all([0, 1, 2].map(async () => { assert.equal(await pacer.take(), true); times.push(Date.now()) }))
+  assert.ok(times[1]! - times[0]! >= 15)
+  assert.ok(times[2]! - times[1]! >= 15)
 })

@@ -8,6 +8,7 @@
  *
  * @module @derekluo/dsh-channels/log
  */
+import { statePath } from './store/layout.js'
 import fs from 'node:fs'
 import path from 'node:path'
 
@@ -46,7 +47,7 @@ function dayStamp(now: number): string {
 }
 
 export function createLogger({ stateRoot, ctx, now = Date.now, write }: LoggerOptions): Logger {
-  const file = (): string => path.join(stateRoot, 'logs', `channels-${dayStamp(now())}.log`)
+  const file = (): string => path.join(statePath(stateRoot, 'logs'), `channels-${dayStamp(now())}.log`)
   const emit = (level: 'info' | 'warn', line: string): void => {
     const text = redact(line)
     const prefixed = `dsh-channels: ${text}`

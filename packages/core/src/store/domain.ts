@@ -34,8 +34,8 @@ export async function loadChannelsDomainSpec(): Promise<ChannelsDomainSpec | und
     const zodObject = z.object
     const zodNumber = z.number
     if (typeof defineDomain !== 'function' || typeof domainTable !== 'function' || typeof zodObject !== 'function' || typeof zodNumber !== 'function') return undefined
-    const number = (zodNumber as () => { int: () => { nonnegative: () => unknown } })()
-    const counterRecord = (zodObject as (shape: Record<string, unknown>) => unknown)({ count: number.int().nonnegative() })
+    const number = (zodNumber as () => { int: () => { nonnegative: () => { optional: () => unknown } } })()
+    const counterRecord = (zodObject as (shape: Record<string, unknown>) => unknown)({ count: number.int().nonnegative(), windowStart: number.int().nonnegative().optional() })
     return defineDomain({ name: 'channels', version: 1, tables: { counters: domainTable(counterRecord) } })
   } catch {
     return undefined

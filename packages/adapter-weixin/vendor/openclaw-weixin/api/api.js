@@ -372,6 +372,7 @@ export async function getUploadUrl(params) {
         token: params.token,
         timeoutMs: params.timeoutMs ?? DEFAULT_API_TIMEOUT_MS,
         label: "getUploadUrl",
+        abortSignal: params.signal,
     });
     const resp = JSON.parse(rawText);
     return resp;

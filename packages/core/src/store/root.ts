@@ -7,6 +7,7 @@
  *
  * @module @derekluo/dsh-channels/store/root
  */
+import { statePath } from './layout.js'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
@@ -31,7 +32,7 @@ export function stateRoot(): string {
  * the previous settings intact instead of a half-written JSON.
  */
 export function saveConfigOverlay(root: string, patch: Record<string, unknown>, options: { warn?: (line: string) => void } = {}): boolean {
-  const file = path.join(root, 'config.json')
+  const file = statePath(root, 'config')
   const current = (() => {
     try {
       const parsed = JSON.parse(fs.readFileSync(file, 'utf8')) as unknown

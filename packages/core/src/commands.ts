@@ -32,7 +32,7 @@ export function parseCommand(text: string): { name: CommandName; args: string } 
   const name = (rawName ?? '').toLowerCase()
   // Telegram appends `@botname` to commands in groups.
   const bare = name.includes('@') ? name.slice(0, name.indexOf('@')) : name
-  if (!(bare in COMMANDS)) return null
+  if (!Object.hasOwn(COMMANDS, bare)) return null
   return { name: bare as CommandName, args: rest.join(' ').trim() }
 }
 

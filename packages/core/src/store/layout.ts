@@ -44,6 +44,13 @@ export const STATE_LAYOUT: Readonly<Record<string, LayoutEntry>> = Object.freeze
     store: STORE.DOMAIN,
     reason: '正常存宿主的 channels 存储域；这台宿主没有存储域时才落到这个文件',
   },
+  lines: {
+    kind: 'file',
+    relative: 'lines.json',
+    label: '会话线号',
+    store: STORE.FILE,
+    reason: '身份变更须原子保存成功后确认；旧 counters 的线号按需兼容读取',
+  },
   outbox: {
     kind: 'file',
     relative: 'outbox.json',
