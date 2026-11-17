@@ -144,3 +144,34 @@ test('the host preset is mounted during setup, which is what brings the tools', 
   await driver.run({ message: inbound() })
   assert.deepEqual(mounted, ['coder'])
 })
+
+test('a new session is named once so the GUI lists it', async () => {
+  const h = createHarness({ reply: '在' })
+  const renamed: Array<{ sessionId: string; title: string }> = []
+  const ctx = {
+    get: (name: string) => {
+      if (name === 'agents') return h.agentsService
+      if (name === 'sessionTitle') {
+        return {
+          // The host's signature is rename(session, title) with a live session.
+          rename: async (session: { id?: string }, title: string) => {
+            renamed.push({ sessionId: String(session?.id), title })
+          },
+        }
+      }
+      return undefined
+    },
+  }
+  const driver = new TurnDriver({
+    ctx,
+    logger: { info: () => {}, warn: () => {} },
+    workingDirectory: '/tmp',
+    pollMs: 5,
+    createUserMessage: h.createUserMessage,
+    titleFor: (message) => `${message.senderId.split('@')[0]}: ${message.text.slice(0, 10)}`,
+  })
+  await driver.run({ message: inbound({ text: '明天几点开会' }) })
+  assert.equal(renamed.length, 1)
+  assert.match(renamed[0]?.title ?? '', /^sender: 明天几点开会$/)
+  assert.match(renamed[0]?.sessionId ?? '', /^chan-fake-[0-9a-f]{16}$/, 'a live session object is passed')
+})

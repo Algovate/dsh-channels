@@ -64,6 +64,14 @@ export class ChannelsRuntime {
       maxTurnWaitMs: options.config.maxTurnWaitMs,
       pollMs: options.config.turnPollMs,
       ...(options.createUserMessage === undefined ? {} : { createUserMessage: options.createUserMessage }),
+      // The GUI lists titled sessions; `<sender>: <first words>` reads the way
+      // the reference implementation's titles did on the phone.
+      titleFor: (message) => {
+        const who = message.senderId.split('@')[0] ?? message.senderId
+        const words = message.text.trim().replace(/\s+/g, ' ').slice(0, 24)
+        if (words === '') return `${who}（${message.media.length} 个附件）`
+        return `${who.slice(0, 12)}: ${words}`
+      },
       onAttach: (target, sessionId) => {
         // Keep only the addressing fields: a Target is what the seams need, and
         // holding the whole message would keep its text (and media paths) alive.

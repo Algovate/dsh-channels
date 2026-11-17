@@ -79,6 +79,8 @@ export interface TurnDriverOptions {
   onAttach?: (target: Target, sessionId: string) => void
   /** Extract document text for inbound files; a failure keeps the path-only note. */
   documentChars?: number
+  /** The name this conversation's session gets in the GUI list, once. */
+  titleFor?: (message: InboundMessage) => string
 }
 
 type MessageFactory = (fields: Record<string, unknown>) => unknown
@@ -254,6 +256,7 @@ export class TurnDriver {
   async run(request: TurnRequest): Promise<TurnReply> {
     const { message } = request
     const attached = await this.attach(message, { ...(request.system === undefined ? {} : { system: request.system }) })
+    await this.#nameSession(attached, message)
     const factory = await this.#factory()
     const agent = attached.handle.agent
 
@@ -286,6 +289,32 @@ export class TurnDriver {
     )
     const reply = await this.#awaitReply(agent, before, request.signal)
     return { ...reply, sessionId: attached.sessionId }
+  }
+
+  /**
+   * Give the session a name once.
+   *
+   * The GUI's conversation list is built from titled sessions; an untitled one
+   * created through `agents.create` does not appear there, which made the whole
+   * conversation invisible in the very window that is supposed to show it
+   * (found on the device). `rename` is a no-op when the host has no such
+   * service, and a failure is a log line.
+   */
+  async #nameSession(attached: { handle: AgentHandle; sessionId: string }, message: InboundMessage): Promise<void> {
+    const title = this.#options.titleFor?.(message)
+    if (title === undefined || title.trim() === '') return
+    const service = this.#options.ctx.get?.('sessionTitle') as { rename?: (session: unknown, title: string) => unknown } | undefined
+    if (typeof service?.rename !== 'function') return
+    // The host takes the live SESSION OBJECT, not the id: passing the id made
+    // it read `undefined.id` and answer `session "undefined" is not live`
+    // (observed on the device).
+    const session = (attached.handle.agent as { session?: unknown }).session
+    if (session === undefined || session === null) return
+    try {
+      await service.rename(session, title.trim().slice(0, 80))
+    } catch (error) {
+      this.#options.logger.warn(`could not name the session: ${String((error as Error)?.message ?? error)}`)
+    }
   }
 
   /**

@@ -88,6 +88,24 @@ M2b 文档正文（正文进了 prompt；该回合随后因 API 余额不足失�
 竞速本身是对的（先真答者胜），但"桌面答空"与"用户跳过"在 seam 词汇里无法区分。
 后续可选：把空答案集当成"还没决定"，继续等微信（像 approval 对 `unavailable` 那样）。
 
+## M3 进展与阻塞：频道会话在 GUI 列表里不可见
+
+Chat 行已实现并部署（`client.js`，host 的 boot 条目里已经列出 `@rodin/dsh-channels`，
+`plugins/??@rodin/dsh-channels/client.js` 返回 200），但**还没能在 GUI 里验到**，原因是更根本的一层：
+频道会话不在 GUI 的会话列表里。
+
+已排除的两条（都部署到 mini 试过，无效）：
+
+1. **没有标题**：`sessionTitle.rename` 的签名是 `rename(session 对象, title)`，我先前传的是 id 字符串，
+   宿主答 `session "undefined" is not live`。改成传活会话对象后不再报错，但列表仍不出现。
+2. **工作目录**：频道会话原先跑在 `~/.dsh/channels/workspace`（GUI 没打开过这个目录），
+   改成 GUI 的默认工作区 `~/Documents/deepseek-harness-default-workspace` 后仍不出现。
+
+剩下的最可能原因：GUI 的列表按**已打开的工作区**分组，会话必须挂在一条 workspace 记录上；
+旧插件的会话能出现，可能是因为那个目录曾被当作工作区打开过。
+下一步：通过宿主的 workspace 服务登记/复用一个工作区（或在创建会话时带上 workspace id），
+然后重验 Chat 行。这一步要在宿主的 workspace API 上做，不能靠猜。
+
 ## 已知边界
 
 - 语音**微信端到端**未验：ASR 引擎与桥在 mini 上已单独验证（见下），但用户发出的一条语音没有到达 iLink。
