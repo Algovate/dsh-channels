@@ -1,0 +1,80 @@
+/**
+ * One raw iLink message → one normalized inbound message.
+ *
+ * Deliberately total: anything surprising returns `null` (the loop drops it)
+ * rather than throwing, and the plugin's own echoes are dropped first — a bot
+ * that answers itself is the classic infinite loop.
+ *
+ * Text only in 0.1.0: an image/file/voice message has no text and is dropped
+ * with a log line. Media lands in the next milestone, where the core learns
+ * `InboundMedia` and the adapter learns upload/download.
+ *
+ * @module @rodin/dsh-channels-weixin/normalize
+ */
+import { MessageItemType, MessageState, MessageType } from '../vendor/openclaw-weixin/api/types.js'
+import type { InboundMessage } from '@rodin/dsh-channels'
+
+const TEXT_ITEM = MessageItemType.TEXT
+
+function blankToUndefined(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined
+  return value.trim() === '' ? undefined : value
+}
+
+/** Fields of a raw iLink `msgs[]` entry that this module reads. */
+export interface RawMessage {
+  message_type?: number
+  message_state?: number
+  from_user_id?: string
+  group_id?: string
+  message_id?: string | number
+  client_id?: string
+  create_time_ms?: number
+  context_token?: string
+  item_list?: Array<{ type?: number; text_item?: { text?: string } }>
+}
+
+export interface NormalizedInbound extends InboundMessage {
+  /** iLink routes a reply by this token; the adapter keeps the latest per conversation. */
+  contextToken: string
+}
+
+export function normalizeInbound(raw: RawMessage, accountId: string): NormalizedInbound | null {
+  if (raw === null || typeof raw !== 'object') return null
+  // Our own outbound echoes come back through getUpdates.
+  if (raw.message_type === MessageType.BOT) return null
+  if (raw.message_state !== undefined && raw.message_state !== MessageState.FINISH && raw.message_state !== MessageState.NEW) return null
+
+  const senderId = typeof raw.from_user_id === 'string' ? raw.from_user_id : ''
+  if (senderId === '') return null
+  // A 1:1 message carries `group_id: ""`; `??` alone would make the conversation
+  // id empty and every reply would be addressed to nobody.
+  const conversationId = blankToUndefined(raw.group_id) ?? senderId
+  const group = conversationId !== senderId
+
+  const items = Array.isArray(raw.item_list) ? raw.item_list : []
+  const texts: string[] = []
+  let unsupported = 0
+  for (const item of items) {
+    if (item?.type === TEXT_ITEM && typeof item.text_item?.text === 'string' && item.text_item.text !== '') {
+      texts.push(item.text_item.text)
+    } else if (item !== undefined && item !== null) {
+      unsupported += 1
+    }
+  }
+  const text = texts.join('\n').trim()
+  if (text === '') return null
+
+  return {
+    channel: 'weixin',
+    accountId,
+    conversationId,
+    senderId,
+    text,
+    media: [],
+    group,
+    at: typeof raw.create_time_ms === 'number' ? raw.create_time_ms : Date.now(),
+    contextToken: typeof raw.context_token === 'string' ? raw.context_token : '',
+    ...(unsupported > 0 ? { raw: { unsupportedItems: unsupported } } : {}),
+  }
+}

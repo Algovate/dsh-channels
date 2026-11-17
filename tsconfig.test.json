@@ -1,0 +1,16 @@
+{
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": ".",
+    "outDir": "dist-test",
+    "composite": false,
+    "declaration": false,
+    "sourceMap": false
+  },
+  "include": [
+    "test/**/*.ts",
+    "packages/core/src/**/*.ts",
+    "packages/adapter-weixin/src/**/*.ts",
+    "packages/adapter-weixin/vendor/**/*.js"
+  ]
+}
