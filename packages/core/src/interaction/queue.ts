@@ -90,6 +90,13 @@ export class InteractionQueue {
     return this.#queues.get(keyOf(target))?.[0]?.entry.kind
   }
 
+  /** How many conversations currently have a prompt on screen. */
+  pendingCount(): number {
+    let total = 0
+    for (const list of this.#queues.values()) total += list.length > 0 ? 1 : 0
+    return total
+  }
+
   /** True when a prompt is on screen for this conversation. */
   busy(target: Target): boolean {
     return this.active(target) !== undefined

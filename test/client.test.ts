@@ -126,6 +126,7 @@ test('the renderer shows the channel badge, the sender and the words', async () 
   const definitions: Array<Record<string, any>> = []
   const renderers: Array<(props: unknown) => any> = []
   const scope = {
+    remote: {},
     uiConversation: { events: { register: (definition: Record<string, any>) => definitions.push(definition) } },
     slots: {
       inject: (_name: string, callback: () => unknown) => callback(),
@@ -156,6 +157,7 @@ test('an English page gets English labels', async () => {
   const module = client.factory((name: string) => (name === 'react' ? react : undefined))
   const renderers: Array<(props: unknown) => any> = []
   const scope = {
+    remote: {},
     uiConversation: { events: { register: () => {} } },
     slots: {
       inject: (_name: string, callback: () => unknown) => callback(),
@@ -172,5 +174,39 @@ test('an English page gets English labels', async () => {
   const text = JSON.stringify(node)
   assert.match(text, /WeChat/)
   assert.match(text, /\(empty message\)/)
+  })
+})
+
+test('the card asks the host for status through the channels namespace', async () => {
+  await withClient('zh-CN', (client) => {
+    const module = client.factory((name: string) => (name === 'react' ? react : undefined))
+    const seats: Array<Record<string, any>> = []
+    const calls: string[] = []
+    const scope = {
+      remote: {
+        channels: {
+          status: async () => {
+            calls.push('status')
+            return { ok: true, value: { stateRoot: '/s', channels: [], allowlist: ['a'], outboxPending: 0, journal: [], interactions: { pending: false } } }
+          },
+        },
+      },
+      uiConversation: { events: { register: () => {} } },
+      slots: {
+        inject: (_name: string, callback: () => unknown) => callback(),
+        register: (seat: Record<string, any>) => seats.push(seat),
+      },
+    }
+    const dispose = module.apply({
+      inject: (_services: string[], callback: (scope: unknown) => unknown) => {
+        callback(scope)
+        return { dispose: () => {} }
+      },
+    })
+    const card = seats.find((seat) => seat.name === 'plugins.bundle.config')
+    assert.ok(card !== undefined, 'the card registers in the plugin page seat')
+    assert.equal(card?.key, '@rodin/dsh-channels')
+    assert.equal(typeof dispose, 'function')
+    assert.equal(calls.length, 0, 'nothing is fetched until the card mounts')
   })
 })

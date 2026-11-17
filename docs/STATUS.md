@@ -117,6 +117,23 @@ GUI 侧栏 → Channels 分组展开后出现 "o9cq807BqQ0x: proceed"，点开�
 顺带修掉一个真 bug：`startChannels` 之前**忽略了 `config.workingDirectory`**（写死状态目录下的
 `workspace`），所以上一轮"改到默认工作区"的实验其实没生效。
 
+### 设置卡片（M3b 已完成：状态可读）
+
+插件页（Plugins → `@rodin/dsh-channels`）里有一张「通道」卡片：通道、媒体能力、允许的发送者数量、
+待重发数、是否在等答复、最近 8 条发出的状态（accepted / unconfirmed / failed / pending），带刷新。
+
+数据来源按优先级两级：
+
+1. **`channels.status()` Remote**（`TypertRemoteService`，namespace `channels`）。宿主侧注册成功
+   （日志有 `status remote registered`），但客户端**拿不到** `ctx.remote.channels`：`api-remotes` 的
+   客户端半边只挂载**构建期生成**的 `/remote` 工件，插件在运行期新增 namespace 不会出现在浏览器里。
+2. 所以卡片回退到宿主自己注册的 **HTTP 路由 `GET /channels/status`**（`ctx.webServer.register`），
+   同源、`no-store`、只返回卡片要显示的东西。真机验证（页面里直接 fetch）：
+
+```
+{"status":200,"channels":["weixin"],"allowlist":1,"journal":8,"outbox":0}
+```
+
 ### 这一层踩到的几个坑
 
 1. **`apply` 必须返回 disposer 函数**：我先把 `ctx.inject(...)` 的返回值直接返回，boot 直接

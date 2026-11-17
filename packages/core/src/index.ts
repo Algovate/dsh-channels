@@ -17,6 +17,7 @@ import path from 'node:path'
 
 import { Config as CoreConfig, resolveConfig, type ChannelsConfig } from './config.js'
 import { answerApproval } from './interaction/approval.js'
+import { ChannelsRemote, type StatusPayload, type StatusSource } from './remote.js'
 import { answerUserQuestion, type AskUserQuestionItem } from './interaction/questions.js'
 import { createLogger } from './log.js'
 import { ChannelsRuntime } from './runtime.js'
@@ -126,11 +127,15 @@ export async function startChannels({ ctx, config }: { ctx: PluginContext; confi
   }
   const stopOutbox = runtime.startOutboxRetry()
   const offSeams = registerInteractionSeams({ ctx, config, runtime, logger })
+  const remote = registerRemote({ ctx, config, runtime, root, logger })
+  const offStatusRoute = registerStatusRoute({ ctx, config, runtime, root, logger })
 
   return {
     runtime,
     adapters,
     async dispose() {
+      offStatusRoute()
+      remote?.dispose?.()
       offSeams()
       stopOutbox()
       runtime.dispose()
@@ -291,6 +296,138 @@ async function registerWorkspace({
     }
   }
   return register(ctx.get?.('workspaceRegistry') as Registry | undefined)
+}
+
+/**
+ * Publish the card's read-only namespace.
+ *
+ * A Host without the typert protocol (a bare test context) simply gets no card
+ * data; the plugin keeps working, because a status page is not a capability.
+ */
+function registerRemote({
+  ctx,
+  config,
+  runtime,
+  root,
+  logger,
+}: {
+  ctx: PluginContext
+  config: ChannelsConfig
+  runtime: ChannelsRuntime
+  root: string
+  logger: { info: (line: string) => void; warn: (line: string) => void }
+}): { dispose?: () => void } | undefined {
+  try {
+    const remote = new ChannelsRemote(ctx, statusSource({ config, runtime, root }))
+    logger.info('status remote registered as channels.status()')
+    return remote as unknown as { dispose?: () => void }
+  } catch (error) {
+    logger.warn(`status remote not registered: ${String((error as Error)?.message ?? error)}`)
+    return undefined
+  }
+}
+
+/**
+ * The same status payload over one HTTP route.
+ *
+ * The card needs host data, and a Client only reaches a Remote namespace whose
+ * `/remote` artifact was generated into its own bundle — a plugin cannot add
+ * one at runtime. A named route is the supported way for a Host plugin to
+ * answer the page it already serves, so the card works today without a code
+ * generator. The route is a plain GET, same origin as the GUI, and returns only
+ * what the card shows: no tokens, no message bodies beyond the journal tail.
+ */
+function registerStatusRoute({
+  ctx,
+  config,
+  runtime,
+  root,
+  logger,
+}: {
+  ctx: PluginContext
+  config: ChannelsConfig
+  runtime: ChannelsRuntime
+  root: string
+  logger: { info: (line: string) => void; warn: (line: string) => void }
+}): () => void {
+  const webServer = ctx.get?.('webServer') as
+    | { register?: (route: unknown) => () => void }
+    | undefined
+  if (typeof webServer?.register !== 'function') return () => {}
+  const source = statusSource({ config, runtime, root })
+  try {
+    const off = webServer.register({
+      path: '/channels/status',
+      kind: 'exact',
+      resource: (request: Request) => {
+        if (request.method !== 'GET' && request.method !== 'HEAD') {
+          return new Response('method not allowed', { status: 405, headers: { allow: 'GET, HEAD' } })
+        }
+        const body = JSON.stringify(buildStatus(source))
+        return new Response(body, {
+          status: 200,
+          headers: { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' },
+        })
+      },
+    })
+    logger.info('status route registered at /channels/status')
+    return () => {
+      try {
+        off()
+      } catch {
+        // Unregistering cannot fail an unload.
+      }
+    }
+  } catch (error) {
+    logger.warn(`status route not registered: ${String((error as Error)?.message ?? error)}`)
+    return () => {}
+  }
+}
+
+/** Assemble the payload once, for both the route and the Remote. */
+function buildStatus(source: StatusSource): StatusPayload {
+  return {
+    stateRoot: source.stateRoot,
+    channels: source.channels(),
+    allowlist: source.allowlist(),
+    outboxPending: source.outboxPending(),
+    journal: source.journalTail(8),
+    interactions: { pending: source.interactionsPending() },
+  }
+}
+
+function statusSource({
+  config,
+  runtime,
+  root,
+}: {
+  config: ChannelsConfig
+  runtime: ChannelsRuntime
+  root: string
+}): StatusSource {
+  return {
+    stateRoot: root,
+    channels: () =>
+      runtime.adapters().map((adapter) => ({
+        id: adapter.id,
+        label: adapter.label,
+        maxTextChars: adapter.capabilities.maxTextChars ?? config.maxTextChars,
+        media: {
+          image: adapter.capabilities.media?.image === true,
+          file: adapter.capabilities.media?.file === true,
+          voice: adapter.capabilities.media?.voice === true,
+          video: adapter.capabilities.media?.video === true,
+        },
+      })),
+    allowlist: () => [...config.allowedSenders],
+    outboxPending: () => runtime.outbox.list().length,
+    journalTail: (limit) =>
+      runtime.journal
+        .outbound()
+        .slice(-limit)
+        .map((entry) => ({ at: Date.now(), kind: 'reply', state: entry.state, text: entry.text.slice(0, 160) })),
+    interactionsPending: () => runtime.interactions.pendingCount() > 0,
+  }
 }
 
 export async function apply(ctx: PluginContext, raw: Partial<ChannelsConfig> = {}): Promise<() => Promise<void>> {

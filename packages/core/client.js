@@ -26,6 +26,9 @@ window.__ModuleLoader__.load({
     const React = require('react')
     const h = React.createElement
 
+    /** The package id the loader and the plugin page key off. */
+    const PKG = '@rodin/dsh-channels'
+
     /** The channels this row knows how to label. */
     const CHANNELS = [
       { id: 'weixin', row: 'weixin-user', badge: { en: 'WeChat', zh: '微信' }, accent: '#07C160', accentSoft: 'rgba(7, 193, 96, 0.12)' },
@@ -171,6 +174,147 @@ window.__ModuleLoader__.load({
       }
     }
 
+
+    //#region status card
+
+    /**
+     * The plugin's page in Plugins → this bundle.
+     *
+     * Everything it shows comes from the host's `channels.status()` Remote: the
+     * browser cannot read a config file or a journal, and a card of static prose
+     * would be worse than no card. The first paint is a placeholder, the fetch
+     * happens once on mount, and a failure is rendered where the table would be
+     * rather than blanking the page.
+     */
+    function createCard(t, remoteOf) {
+      const text = (value, fallback) => (typeof value === 'string' && value !== '' ? value : fallback)
+      const cell = { padding: '8px 10px', borderBottom: '1px solid var(--dsw-alias-divider, rgba(128,128,128,0.2))', fontSize: 13, verticalAlign: 'top' }
+      const headCell = { ...cell, fontSize: 12, fontWeight: 600, color: 'var(--dsw-label-secondary, rgba(128,128,128,1))' }
+      const cardStyle = {
+        display: 'flex',
+        flexDirection: 'column',
+        gap: 16,
+        padding: 20,
+        borderRadius: 'var(--dsw-radius-l, 14px)',
+        background: 'var(--dsw-alias-panel, rgba(128,128,128,0.06))',
+        color: 'var(--dsw-alias-label, inherit)',
+      }
+      const row = (cells) => h('tr', null, ...cells.map((value, index) => h('td', { key: index, style: cell }, value)))
+      const stateColor = (state) => (state === 'accepted' ? '#2f9e44' : state === 'pending' ? '#b08900' : state === 'unconfirmed' ? '#b08900' : '#c92a2a')
+
+      return function ChannelsStatusCard() {
+        const [state, setState] = React.useState({ phase: 'loading', data: null, error: '' })
+        const load = React.useCallback(() => {
+          setState((current) => ({ ...current, phase: 'loading', error: '' }))
+          const remote = remoteOf()
+          const fail = (error) => setState({ phase: 'error', data: null, error: String((error && error.message) || error) })
+          const accept = (payload) => setState({ phase: 'ready', data: payload, error: '' })
+          if (remote && typeof remote.status === 'function') {
+            remote.status().then((result) => {
+              // A Remote call resolves `{ ok, value }` or `{ ok: false, error }`.
+              if (result && result.ok === false) return fail(result.error)
+              accept((result && result.value) || result)
+            }, fail)
+            return
+          }
+          // No generated `/remote` artifact for this namespace (it is built into
+          // the client bundle at build time), so read the Host's own route on the
+          // page's origin instead.
+          fetch('/channels/status', { credentials: 'same-origin', headers: { accept: 'application/json' } })
+            .then((response) => {
+              if (!response.ok) throw new Error(`${response.status} ${response.statusText}`)
+              return response.json()
+            })
+            .then(accept, fail)
+        }, [])
+        React.useEffect(() => {
+          load()
+        }, [load])
+
+        const data = state.data
+        return h(
+          'div',
+          { 'data-channels-card': '', style: cardStyle },
+          h(
+            'div',
+            { style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 } },
+            h('div', { style: { display: 'flex', flexDirection: 'column', gap: 4 } },
+              h('div', { style: { fontSize: 15, fontWeight: 600 } }, t('Channels', '通道')),
+              h('div', { style: { fontSize: 12, color: 'var(--dsw-label-secondary, rgba(128,128,128,1))' } },
+                t('Messages from a chat app, answered by this agent.', '来自聊天软件的消息，由这个 agent 来回答。')),
+            ),
+            h('button', {
+              type: 'button',
+              onClick: load,
+              style: {
+                padding: '6px 12px',
+                borderRadius: 'var(--dsw-radius-m, 10px)',
+                border: '1px solid var(--dsw-alias-divider, rgba(128,128,128,0.3))',
+                background: 'transparent',
+                color: 'inherit',
+                fontSize: 13,
+                cursor: 'pointer',
+              },
+            }, state.phase === 'loading' ? t('Refreshing…', '刷新中…') : t('Refresh', '刷新')),
+          ),
+          state.phase === 'error'
+            ? h('div', { 'data-channels-card-error': '', style: { color: '#c92a2a', fontSize: 13 } }, state.error)
+            : null,
+          data === null && state.phase !== 'error'
+            ? h('div', { style: { fontSize: 13, opacity: 0.7 } }, t('Loading…', '加载中…'))
+            : null,
+          data !== null
+            ? h(
+                'div',
+                { style: { display: 'flex', flexDirection: 'column', gap: 14 } },
+                h('div', { style: { fontSize: 12, opacity: 0.75 } }, `${t('State', '状态目录')}: ${text(data.stateRoot, '—')}`),
+                h(
+                  'table',
+                  { style: { width: '100%', borderCollapse: 'collapse' } },
+                  h('thead', null,
+                    h('tr', null,
+                      h('th', { style: { ...headCell, textAlign: 'left' } }, t('Channel', '通道')),
+                      h('th', { style: { ...headCell, textAlign: 'left' } }, t('Account', '账号')),
+                      h('th', { style: { ...headCell, textAlign: 'left' } }, t('Allowed senders', '允许的发送者')),
+                      h('th', { style: { ...headCell, textAlign: 'left' } }, t('Media', '媒体')),
+                    ),
+                  ),
+                  h('tbody', null,
+                    (data.channels || []).map((channel) => h('tr', { key: channel.id },
+                      h('td', { style: cell }, text(channel.label && channel.label.zh, channel.id)),
+                      h('td', { style: cell }, text(channel.account, t('saved account', '已保存账号'))),
+                      h('td', { style: cell }, String((data.allowlist || []).length)),
+                      h('td', { style: cell }, ['image', 'file', 'voice', 'video'].filter((kind) => channel.media && channel.media[kind]).join(' · ') || '—'),
+                    )),
+                    (data.channels || []).length === 0
+                      ? h('tr', null, h('td', { colSpan: 4, style: { ...cell, opacity: 0.7 } }, t('No channel is mounted.', '没有挂载任何通道。')))
+                      : null,
+                  ),
+                ),
+                h('div', { style: { display: 'flex', gap: 18, flexWrap: 'wrap', fontSize: 12, opacity: 0.85 } },
+                  h('span', null, `${t('Outbox', '待重发')}: ${Number(data.outboxPending) || 0}`),
+                  h('span', null, `${t('Waiting for an answer', '等待答复')}: ${data.interactions && data.interactions.pending ? t('yes', '有') : t('no', '无')}`),
+                ),
+                (data.journal || []).length > 0
+                  ? h('div', { style: { display: 'flex', flexDirection: 'column', gap: 6 } },
+                      h('div', { style: { fontSize: 12, fontWeight: 600, opacity: 0.85 } }, t('Recent outbound', '最近的发出')),
+                      ...data.journal.map((entry, index) => h('div', {
+                        key: `${entry.kind}-${index}`,
+                        style: { display: 'flex', gap: 10, fontSize: 12, alignItems: 'baseline' },
+                      },
+                        h('span', { style: { color: stateColor(entry.state), minWidth: 84 } }, String(entry.state)),
+                        h('span', { style: { opacity: 0.85, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, text(entry.text, '—')),
+                      )),
+                    )
+                  : h('div', { style: { fontSize: 12, opacity: 0.7 } }, t('Nothing has been sent yet.', '还没有发出过消息。')),
+              )
+            : null,
+        )
+      }
+    }
+
+    //#endregion
+
     /** Register the Definition and its renderer; returns the disposer for both. */
     function registerRows(ctx, uiConversation) {
       const t = translator()
@@ -204,7 +348,7 @@ window.__ModuleLoader__.load({
     }
 
     return {
-      inject: ['slots'],
+      inject: ['remote', 'slots'],
       apply(ctx) {
         // `uiConversation` is not in the module-level inject on purpose: a host
         // without the Conversation registry should lose the row, not keep the
@@ -215,6 +359,7 @@ window.__ModuleLoader__.load({
         // "TypeError: Invalid effect" and the row never appeared (found on the
         // device; the failure is one console line, easy to miss).
         let disposeRows
+        let disposeCard
         const injection = ctx.inject(['uiConversation', 'slots'], (scope) => {
           try {
             disposeRows = registerRows(scope, scope.uiConversation)
@@ -223,10 +368,29 @@ window.__ModuleLoader__.load({
             disposeRows = () => {}
           }
         })
+        // The status card needs only `slots` and the remote, so it is registered
+        // on its own: a host without the Conversation registry still gets it.
+        const card = ctx.inject(['slots'], (scope) => {
+          try {
+            const disposer = scope.slots.inject('plugins.bundle.config', () =>
+              scope.slots.register({ name: 'plugins.bundle.config', key: PKG }, createCard(translator(), () => ctx.remote?.channels)))
+            // `slots.inject` returns the callback's own disposer on some hosts and
+            // the registration result on others; only a function is worth keeping.
+            disposeCard = typeof disposer === 'function' ? disposer : undefined
+          } catch (error) {
+            console.warn('@rodin/dsh-channels: status card not registered', error)
+          }
+        })
         return () => {
           try {
             disposeRows?.()
+          } catch (error) {
+            console.warn('@rodin/dsh-channels: chat row teardown failed', error)
+          }
+          try {
+            if (typeof disposeCard === 'function') disposeCard()
           } finally {
+            card?.dispose?.()
             injection?.dispose?.()
           }
         }
