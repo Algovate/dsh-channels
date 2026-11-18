@@ -82,6 +82,7 @@ export async function startChannels({ ctx, config }: { ctx: PluginContext; confi
   const workingDirectory = config.workingDirectory !== '' ? config.workingDirectory : path.join(root, 'workspace')
   const counters = await openCounters({ ctx, root, logger })
   const workspace = await registerWorkspace({ ctx, workingDirectory, logger })
+  const workspaces = new Map([[path.resolve(workingDirectory), Promise.resolve(workspace)]])
   const runtime = new ChannelsRuntime({
     ctx,
     config,
@@ -92,12 +93,15 @@ export async function startChannels({ ctx, config }: { ctx: PluginContext; confi
     ...(workspace === undefined
       ? {}
       : {
-          attachToWorkspace: (sessionId: string) => {
-            // Cosmetic grouping: the session already exists by now, and
-            // `attachSession` validates the header cwd against the workspace
-            // path. A rejection costs the row's placement, nothing else.
-            void workspace.attachSession?.(sessionId as never).catch((error: unknown) => {
-              logger.info(`session ${sessionId} not grouped under the channel workspace: ${String((error as Error)?.message ?? error)}`)
+          attachToWorkspace: (sessionId: string, directory = workingDirectory) => {
+            const key = path.resolve(directory)
+            let registered = workspaces.get(key)
+            if (registered === undefined) {
+              registered = registerWorkspace({ ctx, workingDirectory: directory, logger })
+              workspaces.set(key, registered)
+            }
+            void registered.then((group) => group?.attachSession?.(sessionId as never)).catch((error: unknown) => {
+              logger.info(`session ${sessionId} not grouped under its workspace: ${String(error)}`)
             })
           },
         }),

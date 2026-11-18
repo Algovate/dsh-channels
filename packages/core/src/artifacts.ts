@@ -82,12 +82,13 @@ function mediaKind(name: string): OutgoingMedia['kind'] {
   return 'file'
 }
 
-export async function answerArtifactCommand({ message, name, args, tasks, workspace, maxBytes, authorized, send }: {
+export async function answerArtifactCommand({ message, name, args, tasks, workspace, workspaceFor, maxBytes, authorized, send }: {
   message: InboundMessage
   name: 'files' | 'resend'
   args: string
   tasks: Tasks
   workspace: string
+  workspaceFor?: (task: TaskRecord) => string | undefined
   maxBytes: number
   authorized: () => boolean
   send: (outgoing: Outgoing) => Promise<readonly SendResult[]>
@@ -112,9 +113,11 @@ export async function answerArtifactCommand({ message, name, args, tasks, worksp
     await notice('这项任务没有记录可取回的产物。旧版本任务可能未记录产物，请在 DSH 查看。')
     return
   }
+  const directory = workspaceFor === undefined ? workspace : workspaceFor(task)
+  if (directory === undefined) { await notice('任务所属项目已移除或目录已更改，请在 DSH 取回文件。'); return }
   if (name === 'files') {
     const rows = await Promise.all(task.artifacts.map(async (relative, index) => {
-      const file = await artifactFile(workspace, task, relative)
+      const file = await artifactFile(directory, task, relative)
       return file === undefined ? `${index + 1}. 文件不可用（已删除、移动或无法安全读取）`
         : `${index + 1}. ${file.name.replace(/[\r\n\t]/g, ' ')}（${formatBytes(file.bytes)}${file.bytes > maxBytes ? '，超过发送大小上限' : ''}）`
     }))
@@ -123,7 +126,7 @@ export async function answerArtifactCommand({ message, name, args, tasks, worksp
   }
   const index = words[1] ?? '1'
   if (!/^[1-9]\d{0,2}$/.test(index) || Number(index) > task.artifacts.length) { await notice('文件序号无效，请先用 /files <任务ID> 查看。'); return }
-  const file = await artifactFile(workspace, task, task.artifacts[Number(index) - 1]!)
+  const file = await artifactFile(directory, task, task.artifacts[Number(index) - 1]!)
   if (file === undefined) { await notice('文件不可用，可能已删除、移动或无法安全读取。请在 DSH 查看。'); return }
   if (file.bytes === 0 || file.bytes > maxBytes) { await notice('文件为空或超过发送大小上限，请在 DSH 取回。'); return }
   let copy: Awaited<ReturnType<typeof snapshotFile>>

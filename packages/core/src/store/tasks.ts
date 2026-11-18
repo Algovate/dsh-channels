@@ -22,6 +22,7 @@ export interface TaskRecord {
   delivery: DeliveryState
   unconfirmed?: boolean
   filesUnsent?: boolean
+  workingDirectory?: string
   outputDirectory?: string
   artifacts?: string[]
   artifactsIncomplete?: boolean
@@ -99,6 +100,7 @@ function validTask(value: unknown): value is TaskRecord {
   const task = value as Partial<TaskRecord>
   return typeof task.id === 'string' && typeof task.senderId === 'string' && typeof task.summary === 'string'
     && (task.unconfirmed === undefined || typeof task.unconfirmed === 'boolean')
+    && (task.workingDirectory === undefined || typeof task.workingDirectory === 'string')
     && (task.outputDirectory === undefined || typeof task.outputDirectory === 'string')
     && (task.artifacts === undefined || (Array.isArray(task.artifacts) && task.artifacts.length <= 100 && task.artifacts.every((file) => typeof file === 'string')))
     && (task.artifactsIncomplete === undefined || typeof task.artifactsIncomplete === 'boolean')

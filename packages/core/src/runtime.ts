@@ -20,7 +20,7 @@ import type { CounterStore } from './store/counters.js'
 import { allowlistFor, type ChannelsConfig } from './config.js'
 import { lineKey, sameTarget, sessionIdFor } from './ids.js'
 import { helpText, parseCommand, TASK_CONTROLS, type CommandName } from './commands.js'
-import { SessionLines } from './store/lines.js'
+import { SessionLines, type ChatRouting } from './store/lines.js'
 import { Inbox, type InboxEntry } from './store/inbox.js'
 import { Outbox } from './store/outbox.js'
 import { Tasks, type TaskRecord } from './store/tasks.js'
@@ -44,7 +44,7 @@ export interface RuntimeOptions {
   workingDirectory: string
   createUserMessage?: (fields: Record<string, unknown>) => unknown
   /** Put a channel session in the host's workspace grouping (once per session). */
-  attachToWorkspace?: (sessionId: string) => void
+  attachToWorkspace?: (sessionId: string, workingDirectory?: string) => void
   /** Durable rate counters; without one the gates count in memory only. */
   counters?: CounterStore
 }
@@ -111,11 +111,11 @@ export class ChannelsRuntime {
         if (words === '') return `${who}（${message.media.length} 个附件）`
         return `${who.slice(0, 12)}: ${words}`
       },
-      onAttach: (_target, sessionId) => {
+      onAttach: (_target, sessionId, workingDirectory) => {
         if (!this.#grouped.has(sessionId)) {
           this.#grouped.add(sessionId)
           try {
-            this.#options.attachToWorkspace?.(sessionId)
+            this.#options.attachToWorkspace?.(sessionId, workingDirectory)
           } catch {
             // Grouping is cosmetic; a callback cannot fail a turn.
           }
@@ -375,7 +375,10 @@ export class ChannelsRuntime {
 
   #enqueueTurn(message: InboundMessage, reservation: Reservation, saved?: InboxEntry): void {
     let entry: InboxEntry
-    try { entry = saved ?? this.#inbox.add(message, this.#sessionIdFor(message)) }
+    try {
+      const route = saved === undefined ? this.#routeFor(message) : undefined
+      entry = saved ?? this.#inbox.add(message, route!.sessionId, route!.workingDirectory, route!.project)
+    }
     catch (error) { reservation(false); throw error }
     const queued = this.#queuedInputs.get(entry.id) ?? { scheduled: false }
     queued.scheduled = true
@@ -392,7 +395,14 @@ export class ChannelsRuntime {
         if (!this.#inbox.list().some((item) => item.id === entry.id)) return
         const access = authorizeMessage(message, this.gateContext())
         if (!access.allow) { this.#inbox.remove(entry.id); return }
+        const workingDirectory = entry.workingDirectory ?? this.#options.workingDirectory
+        if (!this.#queuedWorkspaceAllowed(entry, workingDirectory)) {
+          if (!queued.blocked) void this.send(message, { kind: 'notice', text: '排队任务所属项目已移除或目录不可用，暂未开始。请在 DSH 恢复配置，或发 /clear 清除自己的排队消息。' }).catch((error) => this.logger.warn(String(error)))
+          queued.blocked = true
+          throw new Error('queued project is unavailable or no longer configured; input retained for /clear')
+        }
         const record: TaskRecord = {
+          workingDirectory,
           id: entry.id, target: { channel: message.channel, accountId: message.accountId, conversationId: message.conversationId },
           senderId: message.senderId, summary: message.text.trim().replace(/\s+/g, ' ').slice(0, 80) || `附件任务（${message.media.length} 个）`,
           startedAt: Date.now(), execution: 'running', delivery: 'none',
@@ -447,20 +457,98 @@ export class ChannelsRuntime {
    * intact (and visible in the GUI) while the next message starts clean. The
    * line is persisted in the session-line store, so a restart does not walk back.
    */
-  #sessionIdFor(message: InboundMessage): string {
-    const key = lineKey(message)
-    const stored = this.#options.counters?.get(`line:${key}`)
-    const line = this.#lines.get(key) ?? (stored !== undefined && stored > 0 ? Math.floor(stored) : 0)
-    if (line === 0) return sessionIdFor(message)
-    return sessionIdFor({ ...message, conversationId: `${message.conversationId}#${line}` })
+  #workspaceFor(project: string): string {
+    if (project === 'default') return path.resolve(this.#options.workingDirectory)
+    const directory = this.config.projects[project]
+    if (!Object.hasOwn(this.config.projects, project) || directory === undefined || !path.isAbsolute(directory)) throw new Error('项目未配置')
+    const canonical = fs.realpathSync(directory)
+    if (!fs.statSync(canonical).isDirectory()) throw new Error('项目目录不可用')
+    return canonical
+  }
+
+  #allowedWorkspace(directory: string): boolean {
+    return ['default', ...Object.keys(this.config.projects)].some((project) => {
+      try { return this.#workspaceFor(project) === directory } catch { return false }
+    })
+  }
+
+  #queuedWorkspaceAllowed(entry: InboxEntry, directory: string): boolean {
+    try { return this.#workspaceFor(entry.project ?? 'default') === directory } catch { return false }
+  }
+
+  #routing(message: InboundMessage): ChatRouting {
+    return this.#lines.routing(lineKey(message), this.#routeKey('default', this.#workspaceFor('default')),
+      Math.floor(this.#options.counters?.get(`line:${lineKey(message)}`) ?? 0))
+  }
+
+  #routeKey(project: string, directory: string): string { return project === 'default' ? 'default' : JSON.stringify([project, directory]) }
+
+  #routeFor(message: InboundMessage): { sessionId: string; workingDirectory: string; project: string } {
+    const state = this.#routing(message)
+    const workingDirectory = this.#workspaceFor(state.project)
+    const line = state.sessions[this.#routeKey(state.project, workingDirectory)]?.current ?? 0
+    const suffix = state.project === 'default' ? (line === 0 ? '' : `#${line}`) : `#project:${this.#routeKey(state.project, workingDirectory)}#${line}`
+    return { sessionId: sessionIdFor({ ...message, conversationId: `${message.conversationId}${suffix}` }), workingDirectory, project: state.project }
+  }
+
+  #sessionIdFor(message: InboundMessage): string { return this.#routeFor(message).sessionId }
+
+  async #routeCommand(message: InboundMessage, name: 'projects' | 'project' | 'sessions' | 'session' | 'new', args: string): Promise<void> {
+    const notice = (text: string) => this.send(message, { text, kind: 'notice' })
+    try {
+      const state = this.#routing(message)
+      if (name === 'projects') {
+        await notice(chatParagraphs('【可用项目】', ...['default', ...Object.keys(this.config.projects)].map((alias) => `${alias}${state.project === alias ? '（当前）' : ''}`), '切换：/project <别名>'))
+        return
+      }
+      if (name === 'project') {
+        if (!args || !['default', ...Object.keys(this.config.projects)].includes(args)) { await notice('项目未配置或别名无效，请用 /projects 查看。'); return }
+        this.#workspaceFor(args)
+        state.project = args
+      } else {
+        const routeKey = this.#routeKey(state.project, this.#workspaceFor(state.project))
+        const selection = state.sessions[routeKey] ?? { current: 0, max: 0 }
+        if (name === 'sessions') {
+          const rows = Array.from({ length: Math.min(selection.max + 1, 20) }, (_, index) => selection.max - index)
+          if (!rows.includes(selection.current)) rows.push(selection.current)
+          await notice(chatParagraphs(`【${state.project} 的会话】`, ...rows.map((line) => `${line}${line === selection.current ? '（当前）' : ''}`), '切换：/session <编号>；新建：/new。显示最近 20 个编号及当前编号。'))
+          return
+        }
+        if (name === 'session') {
+          if (!/^(0|[1-9]\d{0,15})$/.test(args) || !Number.isSafeInteger(Number(args)) || Number(args) > selection.max) { await notice('会话编号不存在或无效，请用 /sessions 查看。'); return }
+          selection.current = Number(args)
+        } else {
+          if (!Number.isSafeInteger(selection.max + 1)) throw new Error('会话编号已达上限')
+          selection.current = ++selection.max
+        }
+        state.sessions[routeKey] = selection
+      }
+      if (!this.#lines.saveRouting(lineKey(message), state)) {
+        await notice(name === 'new' ? '未能开新会话。后续消息仍会进入原会话，请在 DSH 检查通道状态。' : '切换未能保存，后续消息仍使用原选择。请在 DSH 检查通道状态。')
+        return
+      }
+      const line = state.sessions[this.#routeKey(state.project, this.#workspaceFor(state.project))]?.current ?? 0
+      await notice(`${name === 'new' ? '已开新会话' : '已切换'}：${state.project}（第 ${line} 条）。下一条任务使用此选择；已排队任务保持原项目和会话。`)
+    } catch (error) {
+      this.logger.warn(`routing command failed: ${String(error)}`)
+      await notice('切换失败：项目目录或会话状态不可用，未更改选择。请在 DSH 检查配置和 lines.json；可用 /project default 返回默认项目。')
+    }
   }
 
   /** Run one chat command and answer in the chat. Never starts a turn. */
   async #runCommand(message: InboundMessage, name: CommandName, args: string): Promise<void> {
+    if (name === 'projects' || name === 'project' || name === 'sessions' || name === 'session' || name === 'new') {
+      await this.#routeCommand(message, name, args)
+      return
+    }
     if (name === 'files' || name === 'resend') {
       await answerArtifactCommand({
         message, name, args, tasks: this.#tasks,
         workspace: this.#options.workingDirectory,
+        workspaceFor: (task) => {
+          const directory = task.workingDirectory ?? path.resolve(this.#options.workingDirectory)
+          return this.#allowedWorkspace(directory) ? directory : undefined
+        },
         maxBytes: this.config.maxProducedBytes,
         authorized: () => !this.#disposed && authorizeMessage(message, this.gateContext()).allow,
         send: (outgoing) => this.send(message, outgoing),
@@ -539,22 +627,11 @@ export class ChannelsRuntime {
           context,
         })
       const blocked = this.#inbox.list().some((entry) => sameTarget(entry.message, message) && this.#queuedInputs.get(entry.id)?.blocked)
-      await this.send(message, { text: blocked ? `${text}\n\n排队任务暂未开始：任务记录无法保存，请在 DSH 检查状态目录。` : text, kind: 'notice' })
+      await this.send(message, { text: blocked ? `${text}\n\n排队任务暂未开始：请在 DSH 检查项目目录及任务状态存储。` : text, kind: 'notice' })
       return
     }
-    if (name !== 'new') {
-      const unknown: never = name
-      throw new Error(`unknown command: ${String(unknown)}`)
-    }
-    // `/new`: commit identity before changing the live conversation.
-    const key = lineKey(message)
-    const next = (this.#lines.get(key) ?? this.#options.counters?.get(`line:${key}`) ?? 0) + 1
-    if (!this.#lines.set(key, next)) {
-      await this.send(message, { text: '未能开新会话。后续消息仍会进入原会话，请在 DSH 检查通道状态。', kind: 'notice' })
-      return
-    }
-    this.#options.logger.info(`${key} starts session line ${next}`)
-    await this.send(message, { text: `已开新会话（第 ${next} 条）。下一条任务会使用新会话，原会话可在 DSH 查看。`, kind: 'notice' })
+    const unknown: never = name
+    throw new Error(`unknown command: ${String(unknown)}`)
   }
 
   async #runTurn(message: InboundMessage, sessionId: string, queueSignal: AbortSignal, record: TaskRecord): Promise<void> {
@@ -568,7 +645,7 @@ export class ChannelsRuntime {
     const active = { record, controller }
     this.#activeTasks.set(key, active)
     if (typeof adapter.typing === 'function') void adapter.typing(message).catch(() => {})
-    const outputDir = this.#turnOutputDirectory()
+    const outputDir = this.#turnOutputDirectory(record.workingDirectory ?? this.#options.workingDirectory)
     try {
       let reply
       const progressNotice = setTimeout(() => {
@@ -577,7 +654,7 @@ export class ChannelsRuntime {
           .catch((error: unknown) => this.logger.warn(`progress notice failed for ${key}: ${String(error)}`))
       }, 60_000)
       progressNotice.unref()
-      try { reply = await this.#driver.run({ message, signal, sessionId, outputDirectory: outputDir }) }
+      try { reply = await this.#driver.run({ message, signal, sessionId, workingDirectory: record.workingDirectory ?? this.#options.workingDirectory, outputDirectory: outputDir }) }
       catch (error) { reply = { text: String(error), failed: true, cancelled: false, interrupted: false, settled: false } }
       finally { clearTimeout(progressNotice) }
       if (this.#disposed || queueSignal.aborted) return
@@ -652,10 +729,10 @@ export class ChannelsRuntime {
     return results
   }
 
-  #turnOutputDirectory(): string | undefined {
+  #turnOutputDirectory(workingDirectory: string): string | undefined {
     if (!this.#options.config.autoSendFiles) return undefined
     try {
-      const workspace = path.resolve(this.#options.workingDirectory)
+      const workspace = path.resolve(workingDirectory)
       fs.mkdirSync(workspace, { recursive: true })
       return fs.mkdtempSync(path.join(workspace, '.channel-output-'))
     } catch (error) {

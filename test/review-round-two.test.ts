@@ -58,10 +58,10 @@ test('/new reports a failed durable write and keeps the old session across resta
   const root = temp()
   fs.mkdirSync(path.join(root, 'counters.json'))
   // The session identity store must also refuse its write here.
-  fs.mkdirSync(path.join(root, 'lines.json'))
   const h = createHarness()
   const open = () => new ChannelsRuntime({ ctx: h.ctx, config: resolveConfig({ allowedSenders: ['sender'], autoSendFiles: false }), counters: new FileCounterStore({ stateRoot: root }), stateRoot: root, workingDirectory: root, logger, createUserMessage: h.createUserMessage })
   const runtime = open()
+  fs.mkdirSync(path.join(root, 'lines.json'))
   const adapter = createFakeAdapter()
   runtime.register(adapter)
   runtime.dispatch(inbound({ text: '/new' }))
@@ -72,6 +72,7 @@ test('/new reports a failed durable write and keeps the old session across resta
   await tick()
   const before = [...h.agents.keys()][0]
   await runtime.dispose()
+  fs.rmdirSync(path.join(root, 'lines.json'))
   const reopened = open()
   reopened.register(createFakeAdapter())
   reopened.dispatch(inbound())

@@ -29,10 +29,12 @@ const DEFAULTS: ChannelsConfig = {
   maxProducedFiles: 3,
   maxProducedBytes: 20 * 1024 * 1024,
   workingDirectory: '',
+  projects: {},
 }
 
 
 export const Config = z.object({
+  projects: z.dict(z.string()).default(DEFAULTS.projects).description('Project aliases mapped to absolute working directories. The name default is reserved.'),
   enabled: z.boolean().default(DEFAULTS.enabled).description('Start the configured channel adapters when the plugin loads.'),
   allowedSenders: z.array(z.string()).default(DEFAULTS.allowedSenders).description('Sender ids allowed to drive the agent; empty denies everyone.'),
   allowlistPerAccount: z.dict(z.array(z.string())).default(DEFAULTS.allowlistPerAccount).description('Per-account override of allowedSenders (same semantics: empty denies).'),
@@ -74,12 +76,14 @@ export interface ChannelsConfig {
   maxProducedFiles: number
   maxProducedBytes: number
   workingDirectory: string
+  projects: Record<string, string>
 }
 
 /** Fill missing fields; tolerate a config object from an older version. */
 export function resolveConfig(raw: Partial<ChannelsConfig> | undefined): ChannelsConfig {
   const input = raw ?? {}
   return {
+    projects: Object.fromEntries(Object.entries(record(input.projects)).filter(([key, value]) => key !== 'default' && /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,39}$/.test(key) && typeof value === 'string' && value.startsWith('/')).map(([key, value]) => [key, (value as string).trim()])),
     enabled: typeof input.enabled === 'boolean' ? input.enabled : DEFAULTS.enabled,
     allowedSenders: Array.isArray(input.allowedSenders) ? input.allowedSenders.map(String) : [...DEFAULTS.allowedSenders],
     allowlistPerAccount: Object.fromEntries(Object.entries(record(input.allowlistPerAccount)).filter(([, value]) => Array.isArray(value)).map(([key, value]) => [key, (value as unknown[]).map(String)])),

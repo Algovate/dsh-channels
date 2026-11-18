@@ -15,11 +15,15 @@
  */
 import { chatParagraphs } from './outbound.js'
 
-export type CommandName = 'help' | 'status' | 'tasks' | 'whoami' | 'new' | 'cancel' | 'clear' | 'files' | 'resend'
+export type CommandName = 'help' | 'status' | 'tasks' | 'whoami' | 'new' | 'cancel' | 'clear' | 'files' | 'resend' | 'projects' | 'project' | 'sessions' | 'session'
 
-export const TASK_CONTROLS: ReadonlySet<CommandName> = new Set(['status', 'tasks', 'cancel', 'clear', 'files', 'resend'])
+export const TASK_CONTROLS: ReadonlySet<CommandName> = new Set(['projects', 'project', 'sessions', 'session', 'status', 'tasks', 'cancel', 'clear', 'files', 'resend'])
 
 export const COMMANDS: Record<CommandName, { usage: string; summary: { en: string; zh: string } }> = {
+  projects: { usage: '/projects', summary: { en: 'list configured projects', zh: '查看可用项目' } },
+  project: { usage: '/project <别名>', summary: { en: 'switch project', zh: '切换后续消息的项目' } },
+  sessions: { usage: '/sessions', summary: { en: 'list session lines', zh: '查看当前项目的会话编号' } },
+  session: { usage: '/session <编号>', summary: { en: 'switch session line', zh: '切回当前聊天的历史会话' } },
   status: { usage: '/status', summary: { en: 'current task, execution, delivery and queues', zh: '查看任务、排队和发送状态' } },
   tasks: { usage: '/tasks', summary: { en: 'list recent tasks', zh: '查看最近 5 项任务' } },
   files: { usage: '/files [任务ID]', summary: { en: 'list recorded task artifacts', zh: '查看已完成任务的产物' } },

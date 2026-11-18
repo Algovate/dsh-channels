@@ -21,6 +21,8 @@
  *
  * @module @derekluo/dsh-channels/turns
  */
+import fs from 'node:fs'
+import path from 'node:path'
 import type { InboundMessage, Target } from './types.js'
 import { setTimeout as delay } from 'node:timers/promises'
 import { TurnProgress } from './turn-progress.js'
@@ -33,7 +35,7 @@ import type { InboundMedia } from './types.js'
 /** What `agents.create` / `agents.get` hand back, as far as this module cares. */
 export interface AgentHandle {
   agent: {
-    session?: { id?: string; snapshotEvents?: () => Array<Record<string, unknown>> } | undefined
+    session?: { header?: { cwd?: string }; id?: string; snapshotEvents?: () => Array<Record<string, unknown>> } | undefined
     inject?: (message: unknown) => void
     followup?: (message: unknown) => void
     steer?: (message: unknown) => void
@@ -71,6 +73,8 @@ export interface TurnRequest {
   system?: string
   /** Per-turn blocks, injected as one sourced snapshot before the message. */
   context?: TurnContextBlock[]
+  /** Snapshot of the configured project chosen when this input was accepted. */
+  workingDirectory?: string
   /** The private attachment directory for this particular user message. */
   outputDirectory?: string
   signal?: AbortSignal
@@ -86,7 +90,7 @@ export interface TurnDriverOptions {
   /** Injected in tests; defaults to the host's `createUserMessage`. */
   createUserMessage?: (fields: Record<string, unknown>) => unknown
   /** Called once per conversation when its session is attached or created. */
-  onAttach?: (target: Target, sessionId: string) => void
+  onAttach?: (target: Target, sessionId: string, workingDirectory: string) => void
   /** Extract document text for inbound files; a failure keeps the path-only note. */
   documentChars?: number
   /** The name this conversation's session gets in the GUI list, once. */
@@ -190,19 +194,26 @@ export class TurnDriver {
    *  4. if create says the session already exists (a resume race), resume again.
    * Skipping step 2 is what made a restart fail with `session already exists`.
    */
-  async attach(target: Target, options: { system?: string; sessionId?: string; signal?: AbortSignal } = {}): Promise<Attached> {
+  async attach(target: Target, options: { system?: string; sessionId?: string; workingDirectory?: string; signal?: AbortSignal } = {}): Promise<Attached> {
     const sessionId = options.sessionId ?? sessionIdFor(target)
+    const workingDirectory = options.workingDirectory ?? this.#options.workingDirectory
+    const canonical = (directory: string): string => { try { return fs.realpathSync(directory) } catch { return path.resolve(directory) } }
+    const checkDirectory = (agent: AgentHandle['agent']): void => {
+      const cwd = agent.session?.header?.cwd
+      if (cwd !== undefined && canonical(cwd) !== canonical(workingDirectory)) throw new Error('session working directory differs from selected project')
+    }
     const known = this.#attached.get(sessionId)
 
     const agents = this.#agents()
     if (this.#disposed) throw new Error('the turn driver is disposed')
     if (agents === undefined) throw new Error('the agents service is not available')
     const live = agents.get?.(sessionId)
-    if (known !== undefined && (typeof agents.get !== 'function' || known.handle.agent === live)) return known
+    if (known !== undefined && (typeof agents.get !== 'function' || known.handle.agent === live)) { checkDirectory(known.handle.agent); return known }
     if (live !== undefined) {
+      checkDirectory(live as AgentHandle['agent'])
       const attached = { handle: { agent: live as AgentHandle['agent'] }, sessionId }
       this.#attached.set(sessionId, attached)
-      this.#options.onAttach?.(target, sessionId)
+      this.#options.onAttach?.(target, sessionId, workingDirectory)
       return attached
     }
 
@@ -238,7 +249,7 @@ export class TurnDriver {
     const createOptions = {
       sessionId,
       ...routeOptions,
-      meta: { cwd: this.#options.workingDirectory },
+      meta: { cwd: options.workingDirectory ?? this.#options.workingDirectory },
       setup,
       signal: options.signal === undefined ? AbortSignal.timeout(30_000) : AbortSignal.any([options.signal, AbortSignal.timeout(30_000)]),
     }
@@ -275,6 +286,8 @@ export class TurnDriver {
     }
     if (handle === undefined) throw new Error('the agents service can neither resume nor create sessions')
 
+    try { checkDirectory(handle.agent) }
+    catch (error) { await handle.dispose?.(); throw error }
     if (this.#disposed || options.signal?.aborted) {
       await handle.dispose?.()
       throw new Error('the turn driver is disposed')
@@ -283,7 +296,7 @@ export class TurnDriver {
     const attached = { handle, sessionId, created }
     this.#attached.set(sessionId, attached)
     try {
-      this.#options.onAttach?.(target, sessionId)
+      this.#options.onAttach?.(target, sessionId, workingDirectory)
     } catch {
       // A mapping callback cannot be the reason a turn fails.
     }
@@ -352,6 +365,7 @@ export class TurnDriver {
     const attached = await this.attach(message, {
       ...(request.system === undefined ? {} : { system: request.system }),
       sessionId,
+      ...(request.workingDirectory === undefined ? {} : { workingDirectory: request.workingDirectory }),
       ...(signal === undefined ? {} : { signal }),
     })
     signal?.throwIfAborted()
