@@ -2,7 +2,8 @@
 
 ## 2026-11-18 重新设计部署到 mini
 
-- 部署包：`20261118-redesign`，包含 `@derekluo/dsh-channels` 与 `@derekluo/dsh-channels-weixin`；Telegram 包已上传到同目录但未安装（mini 当前只启用微信）。
+- 提交：`66bcb7d feat: redesign channel edge and harden schedule authorization`，已推送到 `origin/main` 与 `origin/codex/schedule-authorization-audit`。
+- 部署包：`66bcb7d`，包含 `@derekluo/dsh-channels` 与 `@derekluo/dsh-channels-weixin`；Telegram 包已上传到同目录但未安装（mini 当前只启用微信）。先前同内容标签 `20261118-redesign` 保留在 mini。
 - 归档 SHA-256：core `dd5048b1659abd72b54bfb97ef68d96c8bd4c735e096d772ec0a07bbcae611c3`，weixin `5df3d915948db47833d054cc281e23d6cb99ecc7e214930b614d242634888bbc`；安装后的 `dist/src/host.js` 与 `dist/src/store/state.js` 与本地构建逐字节一致。
 - 部署前备份：`~/.dsh/profiles/web/package.json.before-20261118-redesign`、`pnpm-lock.yaml.before-20261118-redesign`、`~/.dsh/channels/config.json.before-20261118-redesign`。
 - 重启 LaunchAgent `com.dsh.web` 后进程正常；启动日志确认 `POST /channels/pairing` 已注册，微信轮询启动，`state.json` 从旧 `inbox.json`/`tasks.json` 迁移成功（inbox 1 条清除回执、tasks 1 条已完成），权限 0600，配置未变。
