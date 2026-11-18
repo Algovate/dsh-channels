@@ -27,7 +27,7 @@ function taskLabels(saved: TaskRecord, context: TaskMessageContext) {
     : {
       none: '尚无结果', sending: '发送中', sent: '已发送',
       pending: task.filesUnsent ? '文字待重发（附件可在 DSH 取回）' : '待重发',
-      unknown: '未获平台确认', failed: '发送失败（可在 DSH 查看结果）',
+      unknown: '未获平台确认', failed: task.filesUnsent ? '附件未全部发送（可在 DSH 取回）' : '发送失败（可在 DSH 查看结果）',
     }[task.delivery]
   return { execution, delivery }
 }

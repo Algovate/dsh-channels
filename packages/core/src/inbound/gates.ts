@@ -116,7 +116,12 @@ export function createRateLimiter({ limit, windowMs, now = Date.now }: { limit: 
     if (bucket.used >= current) return undefined
     bucket.used += 1
     const reserved = bucket
-    return (commit) => { if (!commit) reserved.used -= 1 }
+    let finished = false
+    return (commit) => {
+      if (finished) return
+      finished = true
+      if (!commit) reserved.used -= 1
+    }
   })
 }
 

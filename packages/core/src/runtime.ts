@@ -23,10 +23,10 @@ import { SessionLines } from './store/lines.js'
 import { Inbox, type InboxEntry } from './store/inbox.js'
 import { Outbox } from './store/outbox.js'
 import { Tasks, type TaskRecord } from './store/tasks.js'
-import { Journal, receiptKey } from './store/journal.js'
+import { Journal } from './store/journal.js'
 import { TurnDriver } from './turns.js'
 import { chatParagraphs, plainText, splitIntoBubbles } from './outbound.js'
-import { listProducedFiles } from './produced.js'
+import { scanProducedFiles } from './produced.js'
 import { taskHistoryText, taskStatusText } from './task-messages.js'
 import type { ChannelAdapter, InboundMessage, Outgoing, SendResult, Target } from './types.js'
 
@@ -54,8 +54,7 @@ export class ChannelsRuntime {
   readonly #queue = new ConversationQueue()
   readonly #expiredAccounts = new Set<string>()
   readonly #inbox: Inbox
-  readonly #scheduledInbox = new Set<string>()
-  readonly #queuedReservations = new Map<string, Reservation>()
+  readonly #queuedInputs = new Map<string, { scheduled: boolean; finish?: Reservation; blocked?: boolean }>()
   readonly #activeTasks = new Map<string, { record: TaskRecord; controller: AbortController }>()
   readonly #tasks: Tasks
   #resuming = false
@@ -71,7 +70,6 @@ export class ChannelsRuntime {
   readonly #minute: GateContext['minute']
   readonly #day: GateContext['day']
   readonly #preflightReservations = new WeakMap<InboundMessage, Reservation>()
-  readonly #queuedReceipts = new Set<string>()
   #disposed = false
   readonly #stopTimers: Array<() => void> = []
 
@@ -245,6 +243,12 @@ export class ChannelsRuntime {
     return gate
   }
 
+  /** Classification only. Adapters still call canReceive before handing off priority text. */
+  canBypassInbound(message: InboundMessage): boolean {
+    const command = parseCommand(message.text)
+    return (command !== null && TASK_CONTROLS.has(command.name)) || isApprovalReply(message.text) || this.#interactions.busy(message)
+  }
+
   /** Reserve quota before downloads. The adapter must dispatch the same object after enrichment. */
   canReceive(message: InboundMessage, hasAttachments = false, legacyAccountId?: string): boolean {
     if (this.#disposed) return false
@@ -281,7 +285,7 @@ export class ChannelsRuntime {
     const access = authorizeMessage(message, context)
     if (!access.allow) return this.#refuse(message, access)
     const id = message.platformMessageId
-    if (id !== undefined && (this.#inbox.contains(message) || this.#queuedReceipts.has(receiptKey(message, id)) || this.#journal.received(message, id))) {
+    if (id !== undefined && (this.#inbox.contains(message) || this.#journal.received(message, id))) {
       return { allow: false, reason: 'duplicate' }
     }
     return access
@@ -349,7 +353,7 @@ export class ChannelsRuntime {
     this.#resuming = true
     try {
       for (const entry of this.#inbox.list()) {
-        if (this.#scheduledInbox.has(entry.id)) continue
+        if (this.#queuedInputs.get(entry.id)?.scheduled === true) continue
         const adapter = this.#adapters.get(entry.message.channel)
         if (adapter === undefined) continue
         try {
@@ -372,14 +376,14 @@ export class ChannelsRuntime {
     let entry: InboxEntry
     try { entry = saved ?? this.#inbox.add(message, this.#sessionIdFor(message)) }
     catch (error) { reservation(false); throw error }
-    this.#scheduledInbox.add(entry.id)
-    this.#queuedReservations.set(entry.id, reservation)
+    const queued = this.#queuedInputs.get(entry.id) ?? { scheduled: false }
+    queued.scheduled = true
+    queued.finish = reservation
+    this.#queuedInputs.set(entry.id, queued)
     if (saved === undefined) {
       const ahead = this.pendingInputs(message) - 1 + (this.#activeTasks.has(lineKey(message)) ? 1 : 0)
       void this.send(message, { text: ahead > 0 ? `已接收，前面有 ${ahead} 个任务。发 /status 查看队列。` : '已接收，准备处理。', kind: 'notice' }).catch((error) => this.logger.warn(`receipt notice failed: ${String(error)}`))
     }
-    const id = message.platformMessageId === undefined ? undefined : receiptKey(message, message.platformMessageId)
-    if (id !== undefined) this.#queuedReceipts.add(id)
     let charged = false
     void this.#queue
       .push(lineKey(message), async (signal) => {
@@ -392,13 +396,19 @@ export class ChannelsRuntime {
           senderId: message.senderId, summary: message.text.trim().replace(/\s+/g, ' ').slice(0, 80) || `附件任务（${message.media.length} 个）`,
           startedAt: Date.now(), execution: 'running', delivery: 'none',
         }
-        if (!this.#tasks.save(record)) throw new Error('task state could not be saved; queued input retained')
+        if (!this.#tasks.save(record)) {
+          if (!queued.blocked) {
+            queued.blocked = true
+            void this.send(message, { kind: 'notice', text: '任务已接收，但任务记录无法保存，暂未开始执行。请在 DSH 检查状态目录，或发 /clear 清除排队消息。' }).catch((error) => this.logger.warn(`blocked notice failed: ${String(error)}`))
+          }
+          throw new Error('task state could not be saved; queued input retained')
+        }
+        queued.blocked = false
         // Removal is the start boundary: after this point tools may have effects and must not be replayed.
         this.#inbox.remove(entry.id)
-        if (id !== undefined) this.#queuedReceipts.delete(id)
         this.#acceptInbound(message, reservation)
         charged = true
-        this.#queuedReservations.delete(entry.id)
+        queued.finish = undefined
         await this.#runTurn(message, entry.sessionId, signal, record)
       })
       .catch((error: unknown) => {
@@ -406,9 +416,9 @@ export class ChannelsRuntime {
       })
       .finally(() => {
         if (!charged) reservation(false)
-        if (id !== undefined) this.#queuedReceipts.delete(id)
-        this.#scheduledInbox.delete(entry.id)
-        this.#queuedReservations.delete(entry.id)
+        queued.scheduled = false
+        queued.finish = undefined
+        if (!this.#inbox.list().some((item) => item.id === entry.id)) this.#queuedInputs.delete(entry.id)
       })
   }
 
@@ -492,8 +502,8 @@ export class ChannelsRuntime {
         return
       }
       for (const entry of entries) {
-        this.#queuedReservations.get(entry.id)?.(false)
-        this.#queuedReservations.delete(entry.id)
+        this.#queuedInputs.get(entry.id)?.finish?.(false)
+        this.#queuedInputs.delete(entry.id)
         this.#acceptInbound(entry.message)
       }
       await this.send(message, { text: `已清除 ${entries.length} 条你的排队消息。`, kind: 'notice' })
@@ -517,7 +527,8 @@ export class ChannelsRuntime {
           recent: this.#journal.outbound(undefined, message, 'reply'),
           context,
         })
-      await this.send(message, { text, kind: 'notice' })
+      const blocked = this.#inbox.list().some((entry) => sameTarget(entry.message, message) && this.#queuedInputs.get(entry.id)?.blocked)
+      await this.send(message, { text: blocked ? `${text}\n\n排队任务暂未开始：任务记录无法保存，请在 DSH 检查状态目录。` : text, kind: 'notice' })
       return
     }
     if (name !== 'new') {
@@ -586,6 +597,7 @@ export class ChannelsRuntime {
       }
       const delivery = pending ? 'pending' : results.some((result) => !result.ok) ? 'failed' : results.some((result) => result.ok && result.unconfirmed) ? 'unknown' : 'sent'
       this.#tasks.update(message, taskId, { delivery, unconfirmed, filesUnsent })
+      if (results.some((result) => !result.ok && result.code === 'outbox-persist')) await this.send(message, { kind: 'notice', text: '结果发送失败，待重发记录也未能保存。请在 DSH 取回结果并检查状态目录。' })
     } finally {
       if (this.#activeTasks.get(key) === active) this.#activeTasks.delete(key)
       if (outputDir !== undefined) { try { fs.rmdirSync(outputDir) } catch { /* Keep artifacts. */ } }
@@ -601,8 +613,8 @@ export class ChannelsRuntime {
     const limit = Number.isFinite(adapter.capabilities.maxTextChars) && adapter.capabilities.maxTextChars > 0 ? adapter.capabilities.maxTextChars : this.#options.config.maxTextChars
     const bubbles = splitIntoBubbles(text, limit)
     if (outgoing.kind === 'reply' && bubbles.length > 0 && this.#outbox.list().some((entry) => sameTarget(entry.target, target))) {
-      this.#outbox.add(target, { kind: 'reply', text: bubbles[0]! }, { code: 'queued', remaining: bubbles.slice(1), taskId })
-      return [{ ok: false, code: 'queued' }]
+      const saved = this.#outbox.add(target, { kind: 'reply', text: bubbles[0]! }, { code: 'queued', remaining: bubbles.slice(1), taskId })
+      return [{ ok: false, code: saved === undefined ? 'outbox-persist' : 'queued' }]
     }
     const results: SendResult[] = []
     const base = { kind: outgoing.kind }
@@ -613,7 +625,7 @@ export class ChannelsRuntime {
       const result = await this.#deliver(adapter, target, { ...base, text: bubble }, bubble, id)
       results.push(result)
       if (!result.ok) {
-        if (outgoing.kind === 'reply') this.#outbox.add(target, { kind: 'reply', text: bubble }, { id, code: result.code, remaining: bubbles.slice(index + 1), taskId })
+        if (outgoing.kind === 'reply' && this.#outbox.add(target, { kind: 'reply', text: bubble }, { id, code: result.code, retryAfterMs: result.retryAfterMs, remaining: bubbles.slice(index + 1), taskId }) === undefined) results[results.length - 1] = { ok: false, code: 'outbox-persist' }
         return results
       }
     }
@@ -645,25 +657,18 @@ export class ChannelsRuntime {
    */
   async #sendProducedFiles(message: InboundMessage, outputDir: string, taskId: string): Promise<SendResult[]> {
     if (this.#options.config.autoSendFiles !== true) return []
-    let files
-    try {
-      files = await listProducedFiles({
-        dir: outputDir,
-        sinceMs: 0,
-        maxFiles: this.#options.config.maxProducedFiles,
-        maxBytes: this.#options.config.maxProducedBytes,
-      })
-    } catch (error) {
-      this.#options.logger.warn(`scanning produced files failed: ${String((error as Error)?.message ?? error)}`)
-      return []
+    const scan = await scanProducedFiles({
+      dir: outputDir, sinceMs: 0,
+      maxFiles: this.#options.config.maxProducedFiles,
+      maxBytes: this.#options.config.maxProducedBytes,
+    })
+    const media = scan.files.map((file) => ({ kind: 'file' as const, path: file.path, name: file.name, bytes: file.bytes }))
+    const results = media.length === 0 ? [] : await this.send(message, { kind: 'reply', media }, taskId)
+    if (scan.skipped > 0 || scan.incomplete) {
+      results.push({ ok: false, code: 'files-skipped' })
+      await this.send(message, { kind: 'notice', text: `部分附件未发送：${scan.skipped > 0 ? `${scan.skipped} 个文件超过数量或大小限制、为空或是符号链接。` : ''}${scan.incomplete ? '输出目录未能完整扫描。' : ''}请在 DSH 取回文件。` })
     }
-    if (files.length === 0) return []
-    const media = files
-      .filter((file) => file.bytes > 0)
-      .map((file) => ({ kind: 'file' as const, path: file.path, name: file.name, bytes: file.bytes }))
-    if (media.length === 0) return []
-    this.#options.logger.info(`sending ${media.length} produced file(s)`)
-    return this.send(message, { kind: 'reply', media }, taskId)
+    return results
   }
 
   /** One send, journalled in two phases. */
@@ -720,7 +725,7 @@ export class ChannelsRuntime {
             retryTasks.set(entry.taskId, { id: entry.taskId, target: entry.target, unconfirmed: previous?.unconfirmed === true || result.unconfirmed === true })
             if (result.unconfirmed) this.#tasks.update(entry.target, entry.taskId, { unconfirmed: true })
           }
-          return result.ok === true ? { ok: true as const } : { ok: false as const, code: result.code }
+          return result.ok === true ? { ok: true as const } : { ok: false as const, code: result.code, retryAfterMs: result.retryAfterMs }
         })
         .then(() => {
           for (const task of retryTasks.values()) {

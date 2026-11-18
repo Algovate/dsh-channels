@@ -92,6 +92,7 @@ export interface InboundMediaOptions {
   cdnBaseUrl: string
   messageId: string
   signal?: AbortSignal
+  maxBytes?: number
   logger: { info: (line: string) => void; warn: (line: string) => void }
 }
 
@@ -112,7 +113,7 @@ export async function saveInboundItem(
 
   const saveMedia = async (buffer: Buffer, mime?: string, _subdir?: string, maxBytes?: number, originalName?: string): Promise<{ path: string }> => {
     options.signal?.throwIfAborted()
-    if (maxBytes !== undefined && buffer.length > maxBytes) throw new Error(`attachment exceeds ${maxBytes} bytes`)
+    if (buffer.length > Math.min(maxBytes ?? MAX_INBOUND_MESSAGE_BYTES, options.maxBytes ?? MAX_INBOUND_MESSAGE_BYTES)) throw new Error(`attachment exceeds ${maxBytes} bytes`)
     const declared = typeof mime === 'string' && mime !== '' && mime !== 'application/octet-stream' ? mime : undefined
     const type = declared ?? sniffMime(buffer) ?? getMimeFromFilename(originalName ?? kind)
     const extension = extensionFor({ mime: type, kind, originalName })
@@ -130,7 +131,9 @@ export async function saveInboundItem(
     return { path: file }
   }
 
+  let release: (() => void) | undefined
   try {
+    release = await reserveMediaSlot(options.signal)
     await downloadMediaFromItem(item, {
       cdnBaseUrl: options.cdnBaseUrl,
       saveMedia,
@@ -140,14 +143,41 @@ export async function saveInboundItem(
       label: 'weixin',
       mediaSubdir: 'inbound',
       signal: options.signal,
+      maxBytes: options.maxBytes ?? MAX_INBOUND_MESSAGE_BYTES,
     })
     if (media === undefined) return { ok: false, kind, reason: 'download-empty' }
     options.logger.info(`saved inbound ${kind} to ${media.path} (${media.bytes} bytes)`)
     return { ok: true, media }
   } catch (error) {
     return { ok: false, kind, reason: String((error as Error)?.message ?? error) }
-  }
+  } finally { release?.() }
 }
 
 /** How many attachments of one message this adapter will fetch. */
 export const MAX_INBOUND_MEDIA = 8
+
+/** Two 100 MiB downloads at most across all chats in this process. */
+export const MAX_INBOUND_MESSAGE_BYTES = 100 * 1024 * 1024
+let activeMedia = 0
+const waitingMedia = new Set<() => void>()
+function reserveMediaSlot(signal?: AbortSignal): Promise<() => void> {
+  return new Promise((resolve, reject) => {
+    const abort = () => { waitingMedia.delete(start); reject(signal?.reason ?? new Error('media download aborted')) }
+    const start = () => {
+      waitingMedia.delete(start)
+      signal?.removeEventListener('abort', abort)
+      if (signal?.aborted) { reject(signal.reason); return }
+      activeMedia++
+      let released = false
+      resolve(() => {
+        if (released) return
+        released = true
+        activeMedia--
+        waitingMedia.values().next().value?.()
+      })
+    }
+    if (signal?.aborted) { reject(signal.reason); return }
+    if (activeMedia < 2) start()
+    else { waitingMedia.add(start); signal?.addEventListener('abort', abort, { once: true }) }
+  })
+}

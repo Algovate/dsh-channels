@@ -34,7 +34,7 @@ export class Tasks {
     try {
       const data: unknown = JSON.parse(fs.readFileSync(this.#file, 'utf8'))
       if (!Array.isArray(data) || !data.every(validTask)) throw new Error('invalid task records')
-      this.#items = data.map((task) => ({ ...task,
+      this.#items = data.filter((task) => !isLegacyQuery(task)).map((task) => ({ ...task,
         execution: task.execution === 'running' || task.execution === 'stopping' ? 'unknown' : task.execution,
         delivery: task.delivery === 'sending' ? 'unknown' : task.delivery,
       }))
@@ -43,14 +43,14 @@ export class Tasks {
     }
   }
   latest(target: Target): TaskRecord | undefined {
-    return this.#items.findLast((task) => sameTarget(task.target, target) && !isLegacyQuery(task))
+    return this.#items.findLast((task) => sameTarget(task.target, target))
   }
   get(target: Target, id: string): TaskRecord | undefined {
     return this.#items.find((task) => task.id === id && sameTarget(task.target, target))
   }
   recent(target: Target, senderId?: string): TaskRecord[] {
     return this.#items
-      .filter((task) => sameTarget(task.target, target) && (senderId === undefined || task.senderId === senderId) && !isLegacyQuery(task))
+      .filter((task) => sameTarget(task.target, target) && (senderId === undefined || task.senderId === senderId))
       .slice(-5)
       .reverse()
   }

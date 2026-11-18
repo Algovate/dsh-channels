@@ -11,7 +11,7 @@ Three `openclaw/plugin-sdk` imports and one package-internal import are redirect
 The source of this vendoring is `dsh-plugin-weixin` (MIT, © panqing), which had already
 done the redirection and recorded the manifest. Local patches preserve iLink package
 metadata in the built adapter, check send response error codes, bound response
-reads and CDN downloads/uploads (including a shared upload deadline and shutdown cancellation), propagate cancellation through text and final media sends, and remove fallbacks to unscoped legacy credentials
+reads and CDN downloads/uploads (including per-message remaining-byte budgets) (including a shared upload deadline and shutdown cancellation), propagate cancellation through text and final media sends, and remove fallbacks to unscoped legacy credentials
 and poll cursors.
 
 Nothing else is vendored. No other runtime dependency is bundled with this package.

@@ -13,7 +13,7 @@
  *
  * @module @derekluo/dsh-channels/produced
  */
-import fs from 'node:fs'
+import fs from 'node:fs/promises'
 import path from 'node:path'
 
 export interface ProducedFile {
@@ -31,6 +31,8 @@ export interface ScanOptions {
   maxFiles?: number
   maxBytes?: number
   maxDepth?: number
+  /** Scan budget is independent of the number of attachments selected. */
+  maxEntries?: number
   /** Directory names to skip anywhere in the tree. */
   ignoreDirs?: string[]
   /** Extensions never worth sending (intermediate junk). */
@@ -40,64 +42,58 @@ export interface ScanOptions {
 const DEFAULT_IGNORE_DIRS = new Set(['node_modules', '.git', '.cache', 'dist', 'dist-test', '.npm-cache'])
 const DEFAULT_IGNORE_EXT = new Set(['.tmp', '.lock', '.log', '.part'])
 
-/** Newest-first list of files written since `sinceMs`, within the caps. */
-export async function listProducedFiles({
-  dir,
-  sinceMs,
-  maxFiles = 5,
-  maxBytes = 20 * 1024 * 1024,
-  maxDepth = 4,
-  ignoreDirs = [],
-  ignoreExtensions = [],
-}: ScanOptions): Promise<ProducedFile[]> {
+export interface ProducedScan {
+  files: ProducedFile[]
+  skipped: number
+  incomplete: boolean
+}
+
+/** Inspect a bounded tree before choosing the newest eligible files. */
+export async function scanProducedFiles({
+  dir, sinceMs, maxFiles = 5, maxBytes = 20 * 1024 * 1024,
+  maxDepth = 4, maxEntries = 10000, ignoreDirs = [], ignoreExtensions = [],
+}: ScanOptions): Promise<ProducedScan> {
   const root = path.resolve(dir)
-  try {
-    if (!fs.lstatSync(root).isDirectory()) return []
-  } catch {
-    return []
-  }
+  const result: ProducedScan = { files: [], skipped: 0, incomplete: false }
   const ignoredDirs = new Set([...DEFAULT_IGNORE_DIRS, ...ignoreDirs])
   const ignoredExt = new Set([...DEFAULT_IGNORE_EXT, ...ignoreExtensions])
   const found: ProducedFile[] = []
-
-  const walk = (current: string, depth: number): void => {
-    if (depth > maxDepth || found.length >= maxFiles * 4) return
-    let entries: fs.Dirent[]
+  let visited = 0
+  const count = Number.isFinite(maxFiles) ? Math.max(0, Math.floor(maxFiles)) : 5
+  const budget = Number.isFinite(maxEntries) ? Math.max(1, Math.floor(maxEntries)) : 10000
+  const walk = async (current: string, depth: number): Promise<void> => {
+    if (depth > maxDepth) { result.incomplete = true; return }
     try {
-      entries = fs.readdirSync(current, { withFileTypes: true })
-    } catch {
-      return
-    }
-    for (const entry of entries) {
-      if (entry.name.startsWith('.')) continue
-      const full = path.join(current, entry.name)
-      if (entry.isSymbolicLink()) continue
-      if (entry.isDirectory()) {
-        if (ignoredDirs.has(entry.name)) continue
-        walk(full, depth + 1)
-        continue
+      const directory = await fs.opendir(current)
+      for await (const entry of directory) {
+        if (visited++ >= budget) { result.incomplete = true; break }
+        if (entry.name.startsWith('.')) continue
+        const full = path.join(current, entry.name)
+        if (entry.isSymbolicLink()) { result.skipped++; continue }
+        if (entry.isDirectory()) {
+          if (!ignoredDirs.has(entry.name)) await walk(full, depth + 1)
+          if (visited >= budget && result.incomplete) break
+          continue
+        }
+        if (!entry.isFile() || ignoredExt.has(path.extname(entry.name).toLowerCase())) continue
+        const stat = await fs.lstat(full)
+        if (!stat.isFile() || stat.mtimeMs < sinceMs - 1000) continue
+        if (stat.size === 0 || stat.size > maxBytes) { result.skipped++; continue }
+        found.push({ path: full, name: entry.name, bytes: stat.size, mtimeMs: stat.mtimeMs })
       }
-      if (!entry.isFile()) continue
-      if (ignoredExt.has(path.extname(entry.name).toLowerCase())) continue
-      let stat: fs.Stats
-      try {
-        stat = fs.lstatSync(full)
-      } catch {
-        continue
-      }
-      // A one-second grace absorbs filesystem timestamp granularity.
-      if (!stat.isFile() || stat.mtimeMs < sinceMs - 1000) continue
-      if (stat.size === 0 || stat.size > maxBytes) continue
-      if (!isInside(root, full)) continue
-      found.push({ path: full, name: entry.name, bytes: stat.size, mtimeMs: stat.mtimeMs })
-      if (found.length >= maxFiles * 4) return
-    }
+    } catch { result.incomplete = true }
   }
-  walk(root, 0)
-  found.sort((a, b) => b.mtimeMs - a.mtimeMs)
-  return found.slice(0, maxFiles)
+  try {
+    if (!(await fs.lstat(root)).isDirectory()) return { ...result, incomplete: true }
+  } catch { return { ...result, incomplete: true } }
+  await walk(root, 0)
+  found.sort((a, b) => b.mtimeMs - a.mtimeMs || a.path.localeCompare(b.path))
+  result.files = found.slice(0, count)
+  result.skipped += found.length - result.files.length
+  return result
 }
 
-function isInside(root: string, candidate: string): boolean {
-  return path.resolve(candidate).startsWith(root + path.sep)
+/** Compatibility list for callers that only need the selected paths. */
+export async function listProducedFiles(options: ScanOptions): Promise<ProducedFile[]> {
+  return (await scanProducedFiles(options)).files
 }

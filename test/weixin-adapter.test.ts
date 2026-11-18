@@ -315,3 +315,72 @@ test('Weixin times out when the CDN stops sending an attachment', async (t) => {
   })
   assert.deepEqual(await Promise.race([saved, delay(750, 'stalled', { ref: false })]), { ok: false, kind: 'image', reason: 'download-empty' })
 })
+
+test('task controls bypass stalled media, while ordinary text remains ordered and authorization still runs', async (t) => {
+  let finish: (() => void) | undefined
+  const cdnBaseUrl = await listen(t, (_, res) => { res.writeHead(200); res.write('media'); finish = () => res.end() })
+  let first = true
+  let replyContext: unknown
+  const baseUrl = await listen(t, async (req, res) => {
+    if (req.url?.endsWith('/sendmessage')) {
+      let body = ''; for await (const chunk of req) body += chunk
+      replyContext = JSON.parse(body).msg.context_token
+      res.end(JSON.stringify({ ret: 0, message_id: 'sent' })); return
+    }
+    if (!first) return
+    first = false
+    res.end(JSON.stringify({ ret: 0, get_updates_buf: 'after', msgs: [{ ...inbound('same', attachment('stall')), context_token: 'old' }, { ...inbound('same', textItem('normal')), context_token: 'older-normal' }, inbound('blocked', textItem('/cancel')), { ...inbound('same', textItem('/cancel')), context_token: 'latest' }] }))
+  })
+  const checked: string[] = []; const seen: string[] = []
+  const runtime = { canBypassInbound: (message: InboundMessage) => message.text === '/cancel', canReceive: (message: InboundMessage) => { checked.push(message.senderId); return message.senderId !== 'blocked' } }
+  const adapter = await createAdapter({ config: { accountId: 'acct', stateDir: stateDir(t, baseUrl), cdnBaseUrl, asrEnabled: false }, runtime })
+  adapter.onInbound((message) => seen.push(message.text || 'media'))
+  await adapter.start()
+  try {
+    await within(() => finish !== undefined && seen.includes('/cancel'))
+    assert.deepEqual(seen, ['/cancel']); assert.ok(checked.includes('blocked'))
+    finish?.(); await within(() => seen.length === 3)
+    assert.deepEqual(seen, ['/cancel', 'media', 'normal'])
+    await adapter.send({ channel: 'weixin', accountId: 'acct', conversationId: 'same' }, { kind: 'notice', text: 'reply' })
+    assert.equal(replyContext, 'latest')
+  } finally { finish?.(); await adapter.stop() }
+})
+
+test('Weixin limits active media downloads across chats and releases a canceled waiter', async (t) => {
+  const pending: Array<() => void> = []
+  let active = 0; let peak = 0; let calls = 0
+  t.mock.method(globalThis, 'fetch', async () => {
+    calls++; active++; peak = Math.max(peak, active)
+    return new Response(new ReadableStream<Uint8Array>({ start(controller) { pending.push(() => { controller.enqueue(new Uint8Array(20)); controller.close(); active-- }) } }))
+  })
+  const base = { accountId: 'acct', mediaRoot: stateDir(t), cdnBaseUrl: 'https://cdn.test', messageId: 'budget', logger: { info() {}, warn() {} } }
+  const abort = new AbortController()
+  const first = saveInboundItem(attachment('one'), base)
+  const second = saveInboundItem(attachment('two'), base)
+  const canceled = saveInboundItem(attachment('cancel'), { ...base, signal: abort.signal })
+  const fourth = saveInboundItem(attachment('four'), base)
+  try {
+    await within(() => calls >= 2)
+    await delay(10)
+    assert.equal(calls, 2)
+    abort.abort()
+    assert.equal((await canceled).ok, false)
+    pending.shift()?.(); pending.shift()?.()
+    await within(() => calls === 3)
+    pending.shift()?.()
+    assert.ok((await first).ok && (await second).ok && (await fourth).ok)
+    assert.equal(peak, 2)
+  } finally { for (const finish of pending) finish() }
+})
+
+test('Weixin enforces the remaining message byte budget before consuming a response', async (t) => {
+  let canceled = false
+  t.mock.method(globalThis, 'fetch', async () => {
+    let timer: ReturnType<typeof setTimeout>
+    return new Response(new ReadableStream({ start(controller) { timer = setTimeout(() => controller.close(), 40) }, cancel() { canceled = true; clearTimeout(timer) } }), { headers: { 'content-length': '100' } })
+  })
+  const options = { accountId: 'acct', mediaRoot: stateDir(t), cdnBaseUrl: 'https://cdn.test', messageId: 'bounded', maxBytes: 16, logger: { info() {}, warn() {} } }
+  const result = await saveInboundItem(attachment('large'), options)
+  assert.equal(result.ok, false)
+  assert.equal(canceled, true)
+})

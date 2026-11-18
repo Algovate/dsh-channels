@@ -7,14 +7,14 @@ const CDN_TIMEOUT_MS = 30_000;
 // A complete encrypted file can be one AES block larger than its plaintext.
 const MAX_CDN_BYTES = 100 * 1024 * 1024 + 16;
 
-async function fetchCdnBytes(url, label, signal) {
+async function fetchCdnBytes(url, label, signal, maxBytes = MAX_CDN_BYTES) {
     const timeout = AbortSignal.timeout(CDN_TIMEOUT_MS);
     const res = await fetch(url, { signal: signal ? AbortSignal.any([signal, timeout]) : timeout });
     if (!res.ok) {
         void res.body?.cancel().catch(() => {});
         throw new Error(`${label}: CDN download ${res.status} ${res.statusText}`);
     }
-    return readBoundedResponse(res, MAX_CDN_BYTES);
+    return readBoundedResponse(res, Math.min(MAX_CDN_BYTES, maxBytes));
 }
 /**
  * Parse CDNMedia.aes_key into a raw 16-byte AES key.
@@ -43,7 +43,7 @@ function parseAesKey(aesKeyBase64, label) {
  * Download and AES-128-ECB decrypt a CDN media file. Returns plaintext Buffer.
  * aesKeyBase64: CDNMedia.aes_key JSON field (see parseAesKey for supported formats).
  */
-export async function downloadAndDecryptBuffer(encryptedQueryParam, aesKeyBase64, cdnBaseUrl, label, fullUrl, signal) {
+export async function downloadAndDecryptBuffer(encryptedQueryParam, aesKeyBase64, cdnBaseUrl, label, fullUrl, signal, maxBytes = MAX_CDN_BYTES) {
     const key = parseAesKey(aesKeyBase64, label);
     let url;
     if (fullUrl) {
@@ -55,7 +55,7 @@ export async function downloadAndDecryptBuffer(encryptedQueryParam, aesKeyBase64
     else {
         throw new Error(`${label}: fullUrl is required (CDN URL fallback is disabled)`);
     }
-    const encrypted = await fetchCdnBytes(url, label, signal);
+    const encrypted = await fetchCdnBytes(url, label, signal, Math.min(MAX_CDN_BYTES, maxBytes + 16));
     logger.debug(`${label}: downloaded ${encrypted.byteLength} bytes, decrypting`);
     const decrypted = decryptAesEcb(encrypted, key);
     logger.debug(`${label}: decrypted ${decrypted.length} bytes`);
@@ -64,7 +64,7 @@ export async function downloadAndDecryptBuffer(encryptedQueryParam, aesKeyBase64
 /**
  * Download plain (unencrypted) bytes from the CDN. Returns the raw Buffer.
  */
-export async function downloadPlainCdnBuffer(encryptedQueryParam, cdnBaseUrl, label, fullUrl, signal) {
+export async function downloadPlainCdnBuffer(encryptedQueryParam, cdnBaseUrl, label, fullUrl, signal, maxBytes = MAX_CDN_BYTES) {
     let url;
     if (fullUrl) {
         url = fullUrl;
@@ -75,5 +75,5 @@ export async function downloadPlainCdnBuffer(encryptedQueryParam, cdnBaseUrl, la
     else {
         throw new Error(`${label}: fullUrl is required (CDN URL fallback is disabled)`);
     }
-    return fetchCdnBytes(url, label, signal);
+    return fetchCdnBytes(url, label, signal, maxBytes);
 }

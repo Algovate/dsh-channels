@@ -136,6 +136,8 @@ export interface ChannelAdapter {
 export interface AdapterRuntime {
   logger?: { info: (line: string) => void; warn: (line: string) => void }
   markExpired?(accountId: string, expired?: boolean): void
+  /** Priority text may bypass media enrichment; this does not authorize delivery. */
+  canBypassInbound?(message: InboundMessage): boolean
   /** Run before downloading attachments, then deliver the same message object. */
   canReceive?(message: InboundMessage, hasAttachments: boolean, legacyAccountId?: string): boolean
   /** Release a preflight reservation if the message never reaches core. Safe after delivery. */

@@ -14,7 +14,7 @@ import { fileURLToPath } from 'node:url'
 import { CDN_BASE_URL, listIndexedWeixinAccountIds } from '../vendor/openclaw-weixin/auth/accounts.js'
 import type { AccountInfo, AdapterRuntime, ChannelAdapter, InboundMessage, Outgoing, SendResult, Target } from '@derekluo/dsh-channels'
 import { mediaItemsOf, normalizeInbound, type NormalizedInbound, type RawMediaItem, type RawMessage } from './normalize.js'
-import { MAX_INBOUND_MEDIA, saveInboundItem } from './media.js'
+import { MAX_INBOUND_MEDIA, MAX_INBOUND_MESSAGE_BYTES, saveInboundItem } from './media.js'
 import { AsrBridge } from './asr.js'
 import { WeixinTransport, readAccount } from './transport.js'
 
@@ -70,6 +70,8 @@ export async function createAdapter({ runtime, config = {}, stateRoot }: WeixinA
   const expired = new Set<string>()
   const handlers = new Set<(message: InboundMessage) => void>()
   const inbox = new Map<string, Promise<void>>()
+  const contextOrder = new Map<string, number>()
+  let receivedOrder = 0
   const cdnBaseUrl = (config.cdnBaseUrl ?? CDN_BASE_URL).replace(/\/+$/, '')
   let inbound: AbortController | undefined
   let asr: AsrBridge | undefined
@@ -95,18 +97,24 @@ export async function createAdapter({ runtime, config = {}, stateRoot }: WeixinA
       const items = mediaItemsOf(message)
       message.raw = { contextToken: message.contextToken }
       const { conversationId, contextToken } = message
+      const order = ++receivedOrder
       // Slow attachments must not make later messages pass earlier ones in the same chat.
-      const queued = (inbox.get(conversationId) ?? Promise.resolve()).catch(() => {}).then(async () => {
+      const deliver = async () => {
         if (signal.aborted || runtime?.canReceive?.(message, items.length > 0) === false) return
         try {
+          if (contextToken !== '' && order > (contextOrder.get(conversationId) ?? -1)) {
+            contextOrder.set(conversationId, order)
+            transport.rememberContextToken(conversationId, contextToken)
+          }
           await attachMedia(message, items, signal)
           if (signal.aborted) return
-          transport.rememberContextToken(conversationId, contextToken)
           for (const handler of handlers) handler(message)
         } finally {
           runtime?.cancelReceive?.(message)
         }
-      })
+      }
+      if (items.length === 0 && runtime?.canBypassInbound?.(message) === true) return deliver()
+      const queued = (inbox.get(conversationId) ?? Promise.resolve()).catch(() => {}).then(deliver)
       inbox.set(conversationId, queued)
       return queued.finally(() => {
         if (inbox.get(conversationId) === queued) inbox.delete(conversationId)
@@ -138,19 +146,20 @@ export async function createAdapter({ runtime, config = {}, stateRoot }: WeixinA
           logger,
         })
       : undefined
-  /** Fetch the attachments of one message, in parallel, without failing the message. */
+  /** Fetch attachments sequentially within one message byte budget; other chats share two slots. */
   const attachMedia = async (message: NormalizedInbound, items: RawMediaItem[], signal: AbortSignal): Promise<void> => {
     if (!mediaEnabled || items.length === 0) return
-    const saved = await Promise.all(
-      items.slice(0, MAX_INBOUND_MEDIA).map((item) =>
-        saveInboundItem(item, { accountId, mediaRoot, cdnBaseUrl, messageId: message.at.toString(36), logger, signal })),
-    )
-    for (const result of saved) {
+    let remaining = MAX_INBOUND_MESSAGE_BYTES
+    for (const item of items.slice(0, MAX_INBOUND_MEDIA)) {
+      if (signal.aborted) return
+      if (remaining <= 0) { logger.warn('remaining attachments skipped: message byte budget exhausted'); break }
+      const result = await saveInboundItem(item, { accountId, mediaRoot, cdnBaseUrl, messageId: message.at.toString(36), logger, signal, maxBytes: remaining })
       if (signal.aborted) return
       if (!result.ok) {
         logger.warn(`inbound ${result.kind} not saved: ${result.reason}`)
         continue
       }
+      remaining -= result.media.bytes
       // A voice note that is still SILK cannot be transcribed; only the WAV the
       // vendored transcoder produced is worth handing to whisper.
       if (result.media.kind === 'voice' && result.media.mime === 'audio/wav' && asr !== undefined) {

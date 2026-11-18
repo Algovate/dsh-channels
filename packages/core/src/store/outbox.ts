@@ -65,12 +65,12 @@ export class Outbox {
     return atomicWriteJson(this.#file, { schemaVersion: 1, items } satisfies OutboxFile, { warn: this.#warn })
   }
 
-  /** Append a failed send. Oldest entries are dropped once the bound is reached. */
-  add(target: OutboxEntry['target'], outgoing: OutboxEntry['outgoing'], result: { code?: string; id?: string; remaining?: string[]; taskId?: string }): OutboxEntry | undefined {
+  /** Append a failed send. Refuse new entries once full, preserving replies already accepted. */
+  add(target: OutboxEntry['target'], outgoing: OutboxEntry['outgoing'], result: { code?: string; retryAfterMs?: number; id?: string; remaining?: string[]; taskId?: string }): OutboxEntry | undefined {
     const text = outgoing.text ?? ''
     if (text.trim() === '' || outgoing.kind !== 'reply') return undefined
     const items = this.#read()
-    if (items.length >= this.#max) items.shift()
+    if (items.length >= this.#max) { this.#warn('outbox is full; reply could not be saved'); return undefined }
     const entry: OutboxEntry = {
       id: result.id ?? `out-${this.#now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
       target,
@@ -78,12 +78,11 @@ export class Outbox {
       ...(result.taskId === undefined ? {} : { taskId: result.taskId }),
       ...(result.remaining === undefined || result.remaining.length === 0 ? {} : { remaining: result.remaining }),
       attempts: 0,
-      nextAt: this.#now() + backoffMs(1),
+      nextAt: this.#now() + retryDelay(1, result.retryAfterMs),
       ...(result.code === undefined ? {} : { lastCode: result.code }),
     }
     items.push(entry)
-    this.#write(items)
-    return entry
+    return this.#write(items) ? entry : undefined
   }
 
   list(): OutboxEntry[] {
@@ -94,12 +93,11 @@ export class Outbox {
     const items = this.#read()
     const kept = items.filter((entry) => entry.id !== id)
     if (kept.length === items.length) return false
-    this.#write(kept)
-    return true
+    return this.#write(kept)
   }
 
   /** Retry every entry whose backoff elapsed. Returns how many were delivered. */
-  async drain(send: (entry: OutboxEntry) => Promise<{ ok: boolean; code?: string }>): Promise<number> {
+  async drain(send: (entry: OutboxEntry) => Promise<{ ok: boolean; code?: string; retryAfterMs?: number }>): Promise<number> {
     if (this.#draining) return 0
     this.#draining = true
     try {
@@ -112,7 +110,7 @@ export class Outbox {
         if (current === undefined) continue
         if (current.nextAt > this.#now()) { blocked.add(key); continue }
         while (current !== undefined) {
-          let result: { ok: boolean; code?: string }
+          let result: { ok: boolean; code?: string; retryAfterMs?: number }
           try { result = await send(current) }
           catch (error) {
             this.#warn(`outbox retry failed: ${String(error)}`)
@@ -132,7 +130,7 @@ export class Outbox {
             items.splice(index, 1)
           } else {
             entry.attempts += 1
-            entry.nextAt = this.#now() + backoffMs(entry.attempts + 1)
+            entry.nextAt = this.#now() + retryDelay(entry.attempts + 1, result.retryAfterMs)
             if (result.code !== undefined) entry.lastCode = result.code
             blocked.add(key)
           }
@@ -160,4 +158,8 @@ function validEntry(value: unknown): value is OutboxEntry {
     && Number.isFinite(entry.nextAt)
     && (entry.part === undefined || (Number.isSafeInteger(entry.part) && entry.part >= 0))
     && (entry.remaining === undefined || (Array.isArray(entry.remaining) && entry.remaining.every((part) => typeof part === 'string')))
+}
+
+function retryDelay(attempts: number, platformWait?: number): number {
+  return Math.max(backoffMs(attempts), typeof platformWait === 'number' && Number.isFinite(platformWait) ? Math.max(0, platformWait) : 0)
 }
