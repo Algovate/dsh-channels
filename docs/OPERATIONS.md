@@ -112,7 +112,7 @@ printf '%s\n' "$package_dir"
 
 ## 计划任务回传
 
-宿主须启用兼容的 `schedule` 和 `sessionPersistence` 服务，并支持 `schedule/resolve-agent` 事件。计时、执行及原生任务存储由 DSH 负责；本插件不自建计时器或调用模型重跑任务。仅安装 npm 包不代表服务已挂载，应使用当前 DSH 版本支持的 profile/组合启用原生计划服务。mini 目前尚未启用这些依赖，本轮功能未部署到 mini。
+宿主须启用兼容的 `schedule` 和 `sessionPersistence` 服务，并支持 `schedule/resolve-agent` 事件。计时、执行及原生任务存储由 DSH 负责；本插件不自建计时器或调用模型重跑任务。仅安装 npm 包不代表服务已挂载，应使用当前 DSH 版本支持的 profile/组合启用原生计划服务。2026-11-18 已确认 mini 的 DSH `0.2.2-rc.3` 应用内置这些服务，并通过 Web profile 挂载；无需在 profile 单独安装计划包。部署后的真实一分钟计划及最终文字回传已通过隔离目标验证。
 
 - `/schedule after 10 检查项目部署状态`：10 分钟后执行一次。
 - `/schedule every 60 汇总项目状态`：每 60 分钟执行。分钟数为 1–525600 的整数，任务内容不超过 4000 个 UTF-16 单元。
