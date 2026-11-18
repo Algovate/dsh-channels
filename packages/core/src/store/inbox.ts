@@ -65,6 +65,7 @@ function validEntry(value: unknown): value is InboxEntry {
   const message = entry.message
   return (entry.project === undefined || typeof entry.project === 'string') && (entry.workingDirectory === undefined || typeof entry.workingDirectory === 'string') && (entry.clearedAt === undefined || Number.isFinite(entry.clearedAt)) && typeof entry.id === 'string' && typeof entry.sessionId === 'string' && message !== null && typeof message === 'object'
     && ['channel', 'accountId', 'conversationId', 'senderId', 'text'].every((key) => typeof message[key as keyof InboundMessage] === 'string')
+    && (message.attachmentErrors === undefined || (Array.isArray(message.attachmentErrors) && message.attachmentErrors.every((error) => typeof error === 'string')))
     && typeof message.group === 'boolean' && Number.isFinite(message.at) && Array.isArray(message.media)
     && message.media.every((media) => media !== null && typeof media === 'object' && ['image', 'file', 'voice', 'video'].includes(media.kind)
       && typeof media.path === 'string' && typeof media.mime === 'string' && Number.isFinite(media.bytes))

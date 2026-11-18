@@ -21,7 +21,7 @@ import { readManagementBody } from './management.js'
 import { Config as CoreConfig, resolveConfig, type ChannelsConfig } from './config.js'
 import { answerApproval } from './interaction/approval.js'
 import type { StatusPayload } from './status.js'
-import { saveConfigOverlay } from './store/root.js'
+import { saveConfigOverlay, readConfigState } from './store/root.js'
 import { DomainCounterStore, FileCounterStore, type CounterStore } from './store/counters.js'
 import { loadChannelsDomainSpec } from './store/domain.js'
 import { answerUserQuestion, type AskUserQuestionItem } from './interaction/questions.js'
@@ -191,13 +191,7 @@ export async function startChannels({ ctx, config }: { ctx: PluginContext; confi
  * overridable is a design mistake, not a merge rule.
  */
 export function readConfigOverlay(root: string): Partial<ChannelsConfig> {
-  const file = statePath(root, 'config')
-  try {
-    const parsed = JSON.parse(fs.readFileSync(file, 'utf8')) as Record<string, unknown>
-    return parsed !== null && typeof parsed === 'object' ? (parsed as Partial<ChannelsConfig>) : {}
-  } catch {
-    return {}
-  }
+  return readConfigState(root) as Partial<ChannelsConfig>
 }
 
 /**

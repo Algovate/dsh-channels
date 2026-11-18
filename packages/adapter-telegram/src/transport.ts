@@ -120,12 +120,12 @@ export class TelegramTransport {
    * One long poll. Returns the updates it got (empty on a timeout, which is
    * normal). The next poll confirms the previous batch with its offset.
    */
-  async pollOnce(): Promise<TelegramUpdate[]> {
+  async pollOnce(fromOffset?: number): Promise<TelegramUpdate[]> {
     if (this.signal.aborted) return []
     const configuredTimeout = this.#options.pollTimeoutSeconds ?? 25
     const timeout = Number.isFinite(configuredTimeout) ? Math.max(0, Math.min(50, Math.floor(configuredTimeout))) : 25
     const answer = await this.#call<TelegramUpdate[]>('getUpdates', {
-      offset: this.#offset === 0 ? undefined : this.#offset,
+      offset: (fromOffset ?? this.#offset) === 0 ? undefined : (fromOffset ?? this.#offset),
       timeout,
       allowed_updates: ['message'],
       limit: 50,

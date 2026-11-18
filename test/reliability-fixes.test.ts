@@ -6,7 +6,7 @@ import test from 'node:test'
 import { setTimeout as delay } from 'node:timers/promises'
 import { createRateLimiter } from '../packages/core/src/inbound/gates.js'
 import { Outbox } from '../packages/core/src/store/outbox.js'
-import { listProducedFiles } from '../packages/core/src/produced.js'
+import { scanProducedFiles } from '../packages/core/src/produced.js'
 import { createHarness, inbound } from './harness.js'
 import { createFakeAdapter, createChannelsRuntime, createFakeUserMessage } from './runtime-helper.js'
 import { resolveConfig } from '../packages/core/src/config.js'
@@ -55,7 +55,7 @@ test('platform retry delay survives enqueue and subsequent failed retry', async 
 test('produced-file selection considers the newest candidate beyond the old prefix cap', async () => {
   const root = temp()
   for (const [i, name] of ['a', 'b', 'c', 'd', 'z'].entries()) { const file = path.join(root, name); fs.writeFileSync(file, 'x'); fs.utimesSync(file, 1000 + i, 1000 + i) }
-  assert.equal((await listProducedFiles({ dir: root, sinceMs: 0, maxFiles: 1 }))[0]?.name, 'z')
+  assert.equal((await scanProducedFiles({ dir: root, sinceMs: 0, maxFiles: 1 })).files[0]?.name, 'z')
   fs.rmSync(root, { recursive: true })
 })
 

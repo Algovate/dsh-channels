@@ -11,16 +11,16 @@
 import fs from 'node:fs'
 import path from 'node:path'
 
-import { answerArtifactCommand, captureArtifacts } from './artifacts.js'
+import { answerArtifactCommand, captureArtifacts, snapshotArtifact } from './artifacts.js'
 import { InteractionQueue } from './interaction/queue.js'
 import { isApprovalReply } from './interaction/approval.js'
 import { ConversationQueue } from './inbound/queue.js'
 import { authorizeMessage, createDurableRateLimiter, createRateLimiter, reserveMessage, type GateContext, type GateDecision, type Reservation } from './inbound/gates.js'
 import type { CounterStore } from './store/counters.js'
 import { allowlistFor, type ChannelsConfig } from './config.js'
-import { lineKey, sameTarget, sessionIdFor } from './ids.js'
+import { lineKey, sameTarget } from './ids.js'
 import { helpText, parseCommand, TASK_CONTROLS, type CommandName } from './commands.js'
-import { SessionLines, type ChatRouting } from './store/lines.js'
+import { ChannelRoutes } from './routing.js'
 import { Inbox, type InboxEntry } from './store/inbox.js'
 import { Outbox } from './store/outbox.js'
 import { Tasks, type TaskRecord } from './store/tasks.js'
@@ -65,8 +65,9 @@ export class ChannelsRuntime {
   readonly #interactions: InteractionQueue
   /** Sessions already reported to the host's workspace grouping. */
   readonly #grouped = new Set<string>()
-  /** conversation line → session line number chosen by `/new`. */
-  readonly #lines: SessionLines
+  /** All project authorization and session identity decisions. */
+  readonly #routes: ChannelRoutes
+  readonly #routeNotices = new Set<string>()
   /** Built once: a limiter recreated per message would never accumulate. */
   readonly #minute: GateContext['minute']
   readonly #day: GateContext['day']
@@ -76,7 +77,7 @@ export class ChannelsRuntime {
 
   constructor(options: RuntimeOptions) {
     this.#options = options
-    this.#lines = new SessionLines(options.stateRoot, options.logger.warn)
+    this.#routes = new ChannelRoutes(options)
     this.#inbox = new Inbox(options.stateRoot, options.logger.warn)
     this.#tasks = new Tasks(options.stateRoot, options.logger.warn)
     this.#outbox = new Outbox({ stateRoot: options.stateRoot, warn: options.logger.warn })
@@ -301,6 +302,12 @@ export class ChannelsRuntime {
       this.cancelReceive(message)
       return access
     }
+    if (message.attachmentErrors?.length && message.text.trim() === '' && message.media.length === 0) {
+      this.cancelReceive(message)
+      this.#acceptInbound(message)
+      void this.send(message, { kind: 'notice', text: chatParagraphs('附件未能接收，本次未启动任务。请重新发送。', ...message.attachmentErrors) }).catch((error) => this.logger.warn(String(error)))
+      return access
+    }
     const command = parseCommand(message.text)
     // Answers must bypass the queue: the running turn is waiting for them.
     const approvalReply = isApprovalReply(message.text)
@@ -376,10 +383,22 @@ export class ChannelsRuntime {
   #enqueueTurn(message: InboundMessage, reservation: Reservation, saved?: InboxEntry): void {
     let entry: InboxEntry
     try {
-      const route = saved === undefined ? this.#routeFor(message) : undefined
-      entry = saved ?? this.#inbox.add(message, route!.sessionId, route!.workingDirectory, route!.project)
+      if (saved !== undefined) entry = saved
+      else {
+        const route = this.#routes.snapshot(message)
+        entry = this.#inbox.add(message, route.sessionId, route.workingDirectory, route.project)
+      }
+      this.#routeNotices.delete(lineKey(message))
     }
-    catch (error) { reservation(false); throw error }
+    catch (error) {
+      reservation(false)
+      const key = lineKey(message)
+      if (!this.#routeNotices.has(key)) {
+        this.#routeNotices.add(key)
+        void this.send(message, { kind: 'notice', text: '消息暂未接收，平台将重试。请在 DSH 检查项目和状态目录；项目已移除时可用 /project default 返回默认项目。' }).catch((error) => this.logger.warn(String(error)))
+      }
+      throw Object.assign(new Error(`inbound handoff failed: ${String(error)}`), { code: 'DSH_INBOUND_RETRY' })
+    }
     const queued = this.#queuedInputs.get(entry.id) ?? { scheduled: false }
     queued.scheduled = true
     queued.finish = reservation
@@ -396,7 +415,7 @@ export class ChannelsRuntime {
         const access = authorizeMessage(message, this.gateContext())
         if (!access.allow) { this.#inbox.remove(entry.id); return }
         const workingDirectory = entry.workingDirectory ?? this.#options.workingDirectory
-        if (!this.#queuedWorkspaceAllowed(entry, workingDirectory)) {
+        if (!this.#routes.acceptsQueued(entry)) {
           if (!queued.blocked) void this.send(message, { kind: 'notice', text: '排队任务所属项目已移除或目录不可用，暂未开始。请在 DSH 恢复配置，或发 /clear 清除自己的排队消息。' }).catch((error) => this.logger.warn(String(error)))
           queued.blocked = true
           throw new Error('queued project is unavailable or no longer configured; input retained for /clear')
@@ -449,106 +468,17 @@ export class ChannelsRuntime {
     })
   }
 
-  /**
-   * The session id this conversation is on.
-   *
-   * Line 0 is the deterministic id every existing conversation already uses;
-   * `/new` moves the conversation to line 1, 2, … so the old session stays
-   * intact (and visible in the GUI) while the next message starts clean. The
-   * line is persisted in the session-line store, so a restart does not walk back.
-   */
-  #workspaceFor(project: string): string {
-    if (project === 'default') return path.resolve(this.#options.workingDirectory)
-    const directory = this.config.projects[project]
-    if (!Object.hasOwn(this.config.projects, project) || directory === undefined || !path.isAbsolute(directory)) throw new Error('项目未配置')
-    const canonical = fs.realpathSync(directory)
-    if (!fs.statSync(canonical).isDirectory()) throw new Error('项目目录不可用')
-    return canonical
-  }
-
-  #allowedWorkspace(directory: string): boolean {
-    return ['default', ...Object.keys(this.config.projects)].some((project) => {
-      try { return this.#workspaceFor(project) === directory } catch { return false }
-    })
-  }
-
-  #queuedWorkspaceAllowed(entry: InboxEntry, directory: string): boolean {
-    try { return this.#workspaceFor(entry.project ?? 'default') === directory } catch { return false }
-  }
-
-  #routing(message: InboundMessage): ChatRouting {
-    return this.#lines.routing(lineKey(message), this.#routeKey('default', this.#workspaceFor('default')),
-      Math.floor(this.#options.counters?.get(`line:${lineKey(message)}`) ?? 0))
-  }
-
-  #routeKey(project: string, directory: string): string { return project === 'default' ? 'default' : JSON.stringify([project, directory]) }
-
-  #routeFor(message: InboundMessage): { sessionId: string; workingDirectory: string; project: string } {
-    const state = this.#routing(message)
-    const workingDirectory = this.#workspaceFor(state.project)
-    const line = state.sessions[this.#routeKey(state.project, workingDirectory)]?.current ?? 0
-    const suffix = state.project === 'default' ? (line === 0 ? '' : `#${line}`) : `#project:${this.#routeKey(state.project, workingDirectory)}#${line}`
-    return { sessionId: sessionIdFor({ ...message, conversationId: `${message.conversationId}${suffix}` }), workingDirectory, project: state.project }
-  }
-
-  #sessionIdFor(message: InboundMessage): string { return this.#routeFor(message).sessionId }
-
-  async #routeCommand(message: InboundMessage, name: 'projects' | 'project' | 'sessions' | 'session' | 'new', args: string): Promise<void> {
-    const notice = (text: string) => this.send(message, { text, kind: 'notice' })
-    try {
-      const state = this.#routing(message)
-      if (name === 'projects') {
-        await notice(chatParagraphs('【可用项目】', ...['default', ...Object.keys(this.config.projects)].map((alias) => `${alias}${state.project === alias ? '（当前）' : ''}`), '切换：/project <别名>'))
-        return
-      }
-      if (name === 'project') {
-        if (!args || !['default', ...Object.keys(this.config.projects)].includes(args)) { await notice('项目未配置或别名无效，请用 /projects 查看。'); return }
-        this.#workspaceFor(args)
-        state.project = args
-      } else {
-        const routeKey = this.#routeKey(state.project, this.#workspaceFor(state.project))
-        const selection = state.sessions[routeKey] ?? { current: 0, max: 0 }
-        if (name === 'sessions') {
-          const rows = Array.from({ length: Math.min(selection.max + 1, 20) }, (_, index) => selection.max - index)
-          if (!rows.includes(selection.current)) rows.push(selection.current)
-          await notice(chatParagraphs(`【${state.project} 的会话】`, ...rows.map((line) => `${line}${line === selection.current ? '（当前）' : ''}`), '切换：/session <编号>；新建：/new。显示最近 20 个编号及当前编号。'))
-          return
-        }
-        if (name === 'session') {
-          if (!/^(0|[1-9]\d{0,15})$/.test(args) || !Number.isSafeInteger(Number(args)) || Number(args) > selection.max) { await notice('会话编号不存在或无效，请用 /sessions 查看。'); return }
-          selection.current = Number(args)
-        } else {
-          if (!Number.isSafeInteger(selection.max + 1)) throw new Error('会话编号已达上限')
-          selection.current = ++selection.max
-        }
-        state.sessions[routeKey] = selection
-      }
-      if (!this.#lines.saveRouting(lineKey(message), state)) {
-        await notice(name === 'new' ? '未能开新会话。后续消息仍会进入原会话，请在 DSH 检查通道状态。' : '切换未能保存，后续消息仍使用原选择。请在 DSH 检查通道状态。')
-        return
-      }
-      const line = state.sessions[this.#routeKey(state.project, this.#workspaceFor(state.project))]?.current ?? 0
-      await notice(`${name === 'new' ? '已开新会话' : '已切换'}：${state.project}（第 ${line} 条）。下一条任务使用此选择；已排队任务保持原项目和会话。`)
-    } catch (error) {
-      this.logger.warn(`routing command failed: ${String(error)}`)
-      await notice('切换失败：项目目录或会话状态不可用，未更改选择。请在 DSH 检查配置和 lines.json；可用 /project default 返回默认项目。')
-    }
-  }
-
   /** Run one chat command and answer in the chat. Never starts a turn. */
   async #runCommand(message: InboundMessage, name: CommandName, args: string): Promise<void> {
     if (name === 'projects' || name === 'project' || name === 'sessions' || name === 'session' || name === 'new') {
-      await this.#routeCommand(message, name, args)
+      await this.send(message, { kind: 'notice', text: this.#routes.command(message, name, args) })
       return
     }
     if (name === 'files' || name === 'resend') {
       await answerArtifactCommand({
         message, name, args, tasks: this.#tasks,
         workspace: this.#options.workingDirectory,
-        workspaceFor: (task) => {
-          const directory = task.workingDirectory ?? path.resolve(this.#options.workingDirectory)
-          return this.#allowedWorkspace(directory) ? directory : undefined
-        },
+        workspaceFor: (task) => this.#routes.artifactWorkspace(task),
         maxBytes: this.config.maxProducedBytes,
         authorized: () => !this.#disposed && authorizeMessage(message, this.gateContext()).allow,
         send: (outgoing) => this.send(message, outgoing),
@@ -566,7 +496,7 @@ export class ChannelsRuntime {
           `发送者 ID：${message.senderId}`,
           `聊天 ID：${message.conversationId}`,
           `通道：${message.channel}（账号 ${message.accountId}）`,
-          `DSH 会话：${this.#sessionIdFor(message)}`,
+          `DSH 会话：${this.#routes.snapshot(message).sessionId}`,
         ),
         kind: 'notice',
       })
@@ -752,8 +682,16 @@ export class ChannelsRuntime {
       maxFiles: this.#options.config.maxProducedFiles,
       maxBytes: this.#options.config.maxProducedBytes,
     })
-    const media = scan.files.map((file) => ({ kind: 'file' as const, path: file.path, name: file.name, bytes: file.bytes }))
-    const results = media.length === 0 ? [] : await this.send(message, { kind: 'reply', media }, taskId)
+    const results: SendResult[] = []
+    let unavailable = 0
+    for (const file of scan.files) {
+      if (this.#disposed) break
+      const copy = await snapshotArtifact(path.dirname(outputDir), outputDir, path.relative(outputDir, file.path), this.config.maxProducedBytes)
+      if (copy === undefined) { unavailable++; results.push({ ok: false, code: 'artifact-unavailable' }); continue }
+      try { results.push(...await this.send(message, { kind: 'reply', media: [{ kind: 'file', path: copy.path, name: file.name }] }, taskId)) }
+      finally { await copy.dispose() }
+    }
+    if (unavailable > 0) await this.send(message, { kind: 'notice', text: `${unavailable} 个附件在发送前已改变或无法安全读取，请在 DSH 核对。` })
     if (scan.skipped > 0 || scan.incomplete) {
       results.push({ ok: false, code: 'files-skipped' })
       await this.send(message, { kind: 'notice', text: `部分附件未发送：${scan.skipped > 0 ? `${scan.skipped} 个文件超过数量或大小限制、为空或是符号链接。` : ''}${scan.incomplete ? '输出目录未能完整扫描。' : ''}请在 DSH 取回文件。` })

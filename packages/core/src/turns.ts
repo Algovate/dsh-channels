@@ -35,7 +35,8 @@ import type { InboundMedia } from './types.js'
 /** What `agents.create` / `agents.get` hand back, as far as this module cares. */
 export interface AgentHandle {
   agent: {
-    session?: { header?: { cwd?: string }; id?: string; snapshotEvents?: () => Array<Record<string, unknown>> } | undefined
+    status?: 'idle' | 'running'
+    session?: { seq?: number; header?: { cwd?: string }; id?: string; snapshotEvents?: (fromSeq?: number) => Array<Record<string, unknown>> } | undefined
     inject?: (message: unknown) => void
     followup?: (message: unknown) => void
     steer?: (message: unknown) => void
@@ -109,7 +110,8 @@ interface Attached {
 export class TurnDriver {
   readonly #options: TurnDriverOptions
   readonly #attached = new Map<string, Attached>()
-  readonly #owned = new Set<AgentHandle>()
+  readonly #owned = new Map<AgentHandle, string>()
+  readonly #leases = new Map<string, number>()
   readonly #running = new Map<AgentHandle['agent'], { message: InboundMessage; progress: TurnProgress; signal: AbortSignal; deadlineAt: number; removed: boolean }>()
   #disposed = false
   readonly #shutdown = new AbortController()
@@ -119,7 +121,7 @@ export class TurnDriver {
     const agent = value as AgentHandle['agent']
     const running = this.#running.get(agent)
     if (running === undefined || running.signal.aborted) return undefined
-    running.progress.update(agent.session?.snapshotEvents?.() ?? [])
+    this.#refreshProgress(agent, running.progress)
     return running.progress.ownsActiveTurn ? { target: running.message, signal: running.signal, deadlineAt: running.deadlineAt } : undefined
   }
 
@@ -127,7 +129,7 @@ export class TurnDriver {
     this.#disposed = true
     this.#shutdown.abort()
     this.#running.clear()
-    const handles = [...this.#owned]
+    const handles = [...this.#owned.keys()]
     this.#owned.clear()
     this.#attached.clear()
     await Promise.all(handles.map(async (handle) => {
@@ -208,13 +210,14 @@ export class TurnDriver {
     if (this.#disposed) throw new Error('the turn driver is disposed')
     if (agents === undefined) throw new Error('the agents service is not available')
     const live = agents.get?.(sessionId)
-    if (known !== undefined && (typeof agents.get !== 'function' || known.handle.agent === live)) { checkDirectory(known.handle.agent); return known }
+    if (known !== undefined && (typeof agents.get !== 'function' || known.handle.agent === live)) {
+      checkDirectory(known.handle.agent)
+      return this.#remember(target, known, workingDirectory)
+    }
     if (live !== undefined) {
       checkDirectory(live as AgentHandle['agent'])
       const attached = { handle: { agent: live as AgentHandle['agent'] }, sessionId }
-      this.#attached.set(sessionId, attached)
-      this.#options.onAttach?.(target, sessionId, workingDirectory)
-      return attached
+      return this.#remember(target, attached, workingDirectory)
     }
 
     // The preset is what gives the agent its tool set. A session created
@@ -292,19 +295,27 @@ export class TurnDriver {
       await handle.dispose?.()
       throw new Error('the turn driver is disposed')
     }
-    this.#owned.add(handle)
-    const attached = { handle, sessionId, created }
+    this.#owned.set(handle, sessionId)
+    return this.#remember(target, { handle, sessionId, created }, workingDirectory)
+  }
+
+  async #remember(target: Target, attached: Attached, workingDirectory: string): Promise<Attached> {
+    const { sessionId } = attached
+    const changed = this.#attached.get(sessionId) !== attached
+    this.#attached.delete(sessionId)
     this.#attached.set(sessionId, attached)
-    try {
-      this.#options.onAttach?.(target, sessionId, workingDirectory)
-    } catch {
-      // A mapping callback cannot be the reason a turn fails.
+    if (changed) {
+      try { this.#options.onAttach?.(target, sessionId, workingDirectory) }
+      catch { /* Cosmetic grouping cannot fail a turn. */ }
     }
+    await this.#prune(sessionId)
     return attached
   }
 
   /** Run one turn and return its reply after the matching turn ends. */
   async run(request: TurnRequest & { sessionId?: string }): Promise<TurnReply> {
+    const leasedId = request.sessionId ?? sessionIdFor(request.message)
+    this.#leases.set(leasedId, (this.#leases.get(leasedId) ?? 0) + 1)
     const deadline = new AbortController()
     const signal = AbortSignal.any([deadline.signal, this.#shutdown.signal, ...(request.signal === undefined ? [] : [request.signal])])
     const timeoutMs = this.#options.maxTurnWaitMs ?? 20 * 60_000
@@ -321,7 +332,7 @@ export class TurnDriver {
         if (running !== undefined) {
           const [agent, state] = running
           try {
-            state.progress.update(agent.session?.snapshotEvents?.() ?? [])
+            this.#refreshProgress(agent, state.progress)
           } catch (error) {
             this.logger.warn(`could not read final turn state: ${String(error)}`)
           }
@@ -336,7 +347,7 @@ export class TurnDriver {
             const [agent, state] = running
             for (let attempt = 0; attempt < 50; attempt++) {
               await delay(10)
-              try { state.progress.update(agent.session?.snapshotEvents?.() ?? []) } catch { break }
+              try { this.#refreshProgress(agent, state.progress) } catch { break }
               if (state.removed || state.progress.cancelled) return { ...reply, cancelled: true }
               if (state.progress.result !== undefined) return { ...state.progress.result, sessionId: reply.sessionId, settled: true }
             }
@@ -355,6 +366,9 @@ export class TurnDriver {
       clearTimeout(timer)
       deadline.abort() // Withdraw prompts on success, failure and timeout alike.
       signal.removeEventListener('abort', onAbort)
+      const remaining = (this.#leases.get(leasedId) ?? 1) - 1
+      if (remaining === 0) this.#leases.delete(leasedId); else this.#leases.set(leasedId, remaining)
+      await this.#prune()
     }
   }
 
@@ -419,7 +433,7 @@ export class TurnDriver {
     this.#running.set(agent, running)
     const cancel = (): void => {
       try {
-        progress.update(agent.session?.snapshotEvents?.() ?? [])
+        this.#refreshProgress(agent, progress)
         if (progress.ownsActiveTurn) agent.cancel?.({ kind: 'user' }, { keepInbox: true })
         else if (progress.result === undefined) running.removed = agent.inbox?.remove?.(messageId) === true
       } catch (error) { this.logger.warn(`could not cancel channel input: ${String(error)}`) }
@@ -489,7 +503,13 @@ export class TurnDriver {
     return enriched
   }
 
+  #refreshProgress(agent: AgentHandle['agent'], progress: TurnProgress): void {
+    progress.update(agent.session?.snapshotEvents?.(progress.nextSeq) ?? [])
+  }
+
   #lastSeq(agent: AgentHandle['agent']): number {
+    const seq = agent.session?.seq
+    if (typeof seq === 'number' && Number.isSafeInteger(seq)) return seq - 1
     const events = agent.session?.snapshotEvents?.() ?? []
     const last = events[events.length - 1]
     return typeof last?.['seq'] === 'number' ? (last['seq'] as number) : -1
@@ -497,7 +517,7 @@ export class TurnDriver {
 
   async #awaitReply(agent: AgentHandle['agent'], progress: TurnProgress, signal: AbortSignal): Promise<{ text: string; failed?: boolean }> {
     while (!signal.aborted) {
-      progress.update(agent.session?.snapshotEvents?.() ?? [])
+      this.#refreshProgress(agent, progress)
       if (progress.result !== undefined) return progress.result
       try { await delay(this.#options.pollMs ?? 120, undefined, { signal }) }
       catch { return { text: '', failed: true } }
@@ -505,8 +525,19 @@ export class TurnDriver {
     return { text: '', failed: true }
   }
 
-  /** Forget one attached session (tests, or after a dispose). */
-  detach(sessionId: string): void {
-    this.#attached.delete(sessionId)
+  /** Bound idle owned agents; active channel turns and live desktop work are never evicted. */
+  async #prune(keepId?: string): Promise<void> {
+    const limit = 32
+    for (const [handle, id] of this.#owned) {
+      if (this.#owned.size <= limit) break
+      if (id === keepId || this.#leases.has(id) || handle.agent.status !== 'idle' || this.#running.has(handle.agent)) continue
+      this.#owned.delete(handle)
+      if (this.#attached.get(id)?.handle === handle) this.#attached.delete(id)
+      try { await handle.dispose?.() } catch (error) { this.logger.warn(`idle agent disposal failed: ${String(error)}`) }
+    }
+    for (const [id, attached] of this.#attached) {
+      if (this.#attached.size <= limit) break
+      if (id !== keepId && !this.#leases.has(id) && !this.#owned.has(attached.handle)) this.#attached.delete(id)
+    }
   }
 }

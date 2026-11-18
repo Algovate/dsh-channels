@@ -29,17 +29,12 @@ export class SessionLines {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') { this.#unreadable = true; warn(`session routing could not be loaded: ${String(error)}`) }
     }
   }
-  get(key: string): number | undefined {
-    const value = Object.hasOwn(this.#values, key) ? this.#values[key] : undefined
-    return typeof value === 'number' ? value : undefined
-  }
-  set(key: string, line: number): boolean { return this.#write(key, line) }
-  routing(key: string, defaultRoute: string, legacy: number): ChatRouting {
+  routing(key: string, legacy: number): ChatRouting {
     if (this.#unreadable) throw new Error('session routing is unreadable; repair lines.json before continuing')
     const value = Object.hasOwn(this.#values, key) ? this.#values[key] : undefined
     if (value !== undefined && typeof value === 'object') return structuredClone(value)
     const line = typeof value === 'number' ? value : validLine(legacy) ? legacy : 0
-    return { project: 'default', sessions: { [defaultRoute]: { current: line, max: line } } }
+    return { project: 'default', sessions: { default: { current: line, max: line } } }
   }
   saveRouting(key: string, state: ChatRouting): boolean { return validRouting(state) && this.#write(key, state) }
   #write(key: string, value: number | ChatRouting): boolean {

@@ -148,14 +148,18 @@ export async function createAdapter({ runtime, config = {}, stateRoot }: WeixinA
       : undefined
   /** Fetch attachments sequentially within one message byte budget; other chats share two slots. */
   const attachMedia = async (message: NormalizedInbound, items: RawMediaItem[], signal: AbortSignal): Promise<void> => {
-    if (!mediaEnabled || items.length === 0) return
+    if (items.length === 0) return
+    message.attachmentErrors = []
+    if (!mediaEnabled) { message.attachmentErrors.push('附件接收未启用，请发送文字。'); return }
+    if (items.length > MAX_INBOUND_MEDIA) message.attachmentErrors.push('附件数量超过上限，其余附件未接收。')
     let remaining = MAX_INBOUND_MESSAGE_BYTES
     for (const item of items.slice(0, MAX_INBOUND_MEDIA)) {
       if (signal.aborted) return
-      if (remaining <= 0) { logger.warn('remaining attachments skipped: message byte budget exhausted'); break }
+      if (remaining <= 0) { message.attachmentErrors.push('附件总大小超过上限，其余附件未接收。'); break }
       const result = await saveInboundItem(item, { accountId, mediaRoot, cdnBaseUrl, messageId: message.at.toString(36), logger, signal, maxBytes: remaining })
       if (signal.aborted) return
       if (!result.ok) {
+        message.attachmentErrors.push(`${result.kind} 附件未能下载或解码，请重新发送。`)
         logger.warn(`inbound ${result.kind} not saved: ${result.reason}`)
         continue
       }

@@ -24,6 +24,8 @@ export class TurnProgress {
   readonly messageId: string
   constructor(before: number, messageId: string) { this.#lastSeq = before; this.messageId = messageId }
 
+  get nextSeq(): number { return Math.max(0, this.#lastSeq + 1) }
+
   get ownsActiveTurn(): boolean {
     return this.result === undefined && this.#matchingTurn !== undefined && this.#matchingTurn === this.#activeTurn
   }

@@ -7,10 +7,11 @@
  *
  * @module @derekluo/dsh-channels/store/outbox
  */
+import fs from 'node:fs'
 import { statePath } from './layout.js'
 import { lineKey } from '../ids.js'
 
-import { atomicWriteJson, readJsonFile } from './atomic.js'
+import { atomicWriteJson } from './atomic.js'
 
 export interface OutboxEntry {
   id: string
@@ -52,13 +53,20 @@ export class Outbox {
     this.#now = now
   }
 
-  #read(): OutboxEntry[] {
-    const store = readJsonFile<unknown>(this.#file, () => ({ schemaVersion: 1, items: [] }), this.#warn)
+  #read(): OutboxEntry[] | undefined {
+    let store: unknown
+    try { store = JSON.parse(fs.readFileSync(this.#file, 'utf8')) }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return []
+      this.#warn(`outbox could not be read; refusing mutations: ${String(error)}`)
+      return undefined
+    }
     const items = store !== null && typeof store === 'object' && 'items' in store ? store.items : undefined
-    if (!Array.isArray(items)) { this.#warn('outbox has invalid contents'); return [] }
-    const valid = items.filter(validEntry)
-    if (valid.length !== items.length) this.#warn('outbox contains invalid entries; repair the state file')
-    return valid
+    if (store === null || typeof store !== 'object' || !('schemaVersion' in store) || store.schemaVersion !== 1 || !Array.isArray(items) || !items.every(validEntry)) {
+      this.#warn('outbox has invalid contents; refusing mutations until repaired')
+      return undefined
+    }
+    return items
   }
 
   #write(items: OutboxEntry[]): boolean {
@@ -70,6 +78,7 @@ export class Outbox {
     const text = outgoing.text ?? ''
     if (text.trim() === '' || outgoing.kind !== 'reply') return undefined
     const items = this.#read()
+    if (items === undefined) return undefined
     if (items.length >= this.#max) { this.#warn('outbox is full; reply could not be saved'); return undefined }
     const entry: OutboxEntry = {
       id: result.id ?? `out-${this.#now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
@@ -86,11 +95,12 @@ export class Outbox {
   }
 
   list(): OutboxEntry[] {
-    return this.#read()
+    return this.#read() ?? []
   }
 
   drop(id: string): boolean {
     const items = this.#read()
+    if (items === undefined) return false
     const kept = items.filter((entry) => entry.id !== id)
     if (kept.length === items.length) return false
     return this.#write(kept)
@@ -103,10 +113,10 @@ export class Outbox {
     try {
       let delivered = 0
       const blocked = new Set<string>()
-      for (const candidate of this.#read()) {
+      for (const candidate of this.#read() ?? []) {
         const key = lineKey(candidate.target)
         if (blocked.has(key)) continue
-        let current = this.#read().find((entry) => entry.id === candidate.id)
+        let current = this.#read()?.find((entry) => entry.id === candidate.id)
         if (current === undefined) continue
         if (current.nextAt > this.#now()) { blocked.add(key); continue }
         while (current !== undefined) {
@@ -117,6 +127,7 @@ export class Outbox {
             result = { ok: false, code: 'retry-threw' }
           }
           const items = this.#read()
+          if (items === undefined) break
           const index = items.findIndex((entry) => entry.id === candidate.id)
           if (index === -1) break
           const entry = items[index]!
@@ -138,7 +149,7 @@ export class Outbox {
           if (!this.#write(items)) { blocked.add(key); break }
           if (!result.ok) break
           if (next === undefined) { delivered++; break }
-          current = this.#read().find((item) => item.id === candidate.id)
+          current = this.#read()?.find((item) => item.id === candidate.id)
         }
       }
       return delivered

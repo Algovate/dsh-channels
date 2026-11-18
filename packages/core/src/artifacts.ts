@@ -21,7 +21,7 @@ export async function captureArtifacts(directory: string): Promise<Pick<TaskReco
 interface ArtifactFile { path: string; name: string; bytes: number; dev: number; ino: number }
 
 /** Check every component again: artifacts may have been deleted or replaced since execution. */
-async function artifactFile(workspace: string, task: TaskRecord, relative: string): Promise<ArtifactFile | undefined> {
+async function artifactFile(workspace: string, task: Pick<TaskRecord, 'outputDirectory'>, relative: string): Promise<ArtifactFile | undefined> {
   if (task.outputDirectory === undefined || relative.includes('\0') || relative.includes('\\') || path.isAbsolute(relative)) return undefined
   const parts = relative.split('/')
   if (parts.some((part) => part === '' || part === '.' || part === '..')) return undefined
@@ -73,6 +73,13 @@ async function snapshotFile(file: ArtifactFile, maxBytes: number): Promise<{ pat
     if (temporary !== undefined) await fs.rm(temporary, { recursive: true, force: true })
     throw error
   } finally { await source.close() }
+}
+
+/** The automatic and manual delivery paths share containment checks and private upload bytes. */
+export async function snapshotArtifact(workspace: string, outputDirectory: string, relative: string, maxBytes: number): Promise<{ path: string; dispose: () => Promise<void> } | undefined> {
+  const file = await artifactFile(workspace, { outputDirectory }, relative)
+  if (file === undefined) return undefined
+  try { return await snapshotFile(file, maxBytes) } catch { return undefined }
 }
 
 function mediaKind(name: string): OutgoingMedia['kind'] {
@@ -129,9 +136,8 @@ export async function answerArtifactCommand({ message, name, args, tasks, worksp
   const file = await artifactFile(directory, task, task.artifacts[Number(index) - 1]!)
   if (file === undefined) { await notice('文件不可用，可能已删除、移动或无法安全读取。请在 DSH 查看。'); return }
   if (file.bytes === 0 || file.bytes > maxBytes) { await notice('文件为空或超过发送大小上限，请在 DSH 取回。'); return }
-  let copy: Awaited<ReturnType<typeof snapshotFile>>
-  try { copy = await snapshotFile(file, maxBytes) }
-  catch { await notice('文件不可用或已改变，请重新查看产物后再试。'); return }
+  const copy = await snapshotArtifact(directory, task.outputDirectory, task.artifacts[Number(index) - 1]!, maxBytes)
+  if (copy === undefined) { await notice('文件不可用或已改变，请重新查看产物后再试。'); return }
   let results: readonly SendResult[]
   try {
     if (!authorized()) return

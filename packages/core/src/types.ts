@@ -33,6 +33,8 @@ export interface InboundMedia {
 
 export interface InboundMessage extends Target {
   senderId: string
+  /** Descriptions of attachments omitted during download or decoding. */
+  attachmentErrors?: string[]
   /** The person's own words. Injected context never travels here. */
   text: string
   media: InboundMedia[]

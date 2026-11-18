@@ -8,11 +8,10 @@
  * @module @derekluo/dsh-channels/store/root
  */
 import { statePath } from './layout.js'
-import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 
-import { atomicWriteJson } from './atomic.js'
+import { atomicWriteJson, readJsonObject } from './atomic.js'
 
 export const STATE_ENV = 'DSH_CHANNELS_STATE_DIR'
 
@@ -21,6 +20,21 @@ export function stateRoot(): string {
   const override = process.env[STATE_ENV]?.trim()
   if (override !== undefined && override !== '') return path.resolve(override)
   return path.join(os.homedir(), '.dsh', 'channels')
+}
+
+/** Validate explicit access restrictions before either using or updating an overlay. */
+export function readConfigState(root: string): Record<string, unknown> {
+  const value = readJsonObject(statePath(root, 'config'))
+  const strings = (input: unknown): boolean => Array.isArray(input) && input.every((item) => typeof item === 'string')
+  for (const key of ['allowedSenders', 'allowedChats']) {
+    if (Object.hasOwn(value, key) && !strings(value[key])) throw new Error(`invalid configuration field: ${key}`)
+  }
+  if (Object.hasOwn(value, 'enabled') && typeof value.enabled !== 'boolean') throw new Error('invalid configuration field: enabled')
+  if (Object.hasOwn(value, 'allowlistPerAccount')) {
+    const scoped = value.allowlistPerAccount
+    if (scoped === null || typeof scoped !== 'object' || Array.isArray(scoped) || !Object.values(scoped).every(strings)) throw new Error('invalid configuration field: allowlistPerAccount')
+  }
+  return value
 }
 
 /**
@@ -33,13 +47,11 @@ export function stateRoot(): string {
  */
 export function saveConfigOverlay(root: string, patch: Record<string, unknown>, options: { warn?: (line: string) => void } = {}): boolean {
   const file = statePath(root, 'config')
-  const current = (() => {
-    try {
-      const parsed = JSON.parse(fs.readFileSync(file, 'utf8')) as unknown
-      return parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed) ? (parsed as Record<string, unknown>) : {}
-    } catch {
-      return {}
-    }
-  })()
-  return atomicWriteJson(file, { ...current, ...patch }, { mode: 0o600, ...options })
+  try {
+    const current = readConfigState(root)
+    return atomicWriteJson(file, { ...current, ...patch }, { mode: 0o600, ...options })
+  } catch (error) {
+    options.warn?.(`configuration could not be read; refusing overwrite: ${String(error)}`)
+    return false
+  }
 }

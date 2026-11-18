@@ -92,8 +92,3 @@ export async function scanProducedFiles({
   result.skipped += found.length - result.files.length
   return result
 }
-
-/** Compatibility list for callers that only need the selected paths. */
-export async function listProducedFiles(options: ScanOptions): Promise<ProducedFile[]> {
-  return (await scanProducedFiles(options)).files
-}

@@ -60,10 +60,10 @@ function describeOne(item: InboundMedia): string {
  * The user-message text for one inbound message: attachments first, the
  * person's own words last. No media means the text comes back untouched.
  */
-export function inboundTextWithMedia(message: Pick<InboundMessage, 'text' | 'media'>): string {
+export function inboundTextWithMedia(message: Pick<InboundMessage, 'text' | 'media' | 'attachmentErrors'>): string {
   const media = Array.isArray(message.media) ? message.media : []
-  if (media.length === 0) return message.text
-  const blocks = media.map(describeOne)
+  if (media.length === 0 && !message.attachmentErrors?.length) return message.text
+  const blocks = [...(message.attachmentErrors ?? []).map((error) => `[附件未接收：${error}]`), ...media.map(describeOne)]
   if (typeof message.text === 'string' && message.text !== '') blocks.push(message.text)
   return blocks.join('\n\n')
 }

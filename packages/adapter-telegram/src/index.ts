@@ -12,11 +12,11 @@
 import { createHash } from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
-import { setTimeout as delay } from 'node:timers/promises'
 
 import type { AccountInfo, AdapterRuntime, ChannelAdapter, InboundMedia, InboundMessage, Outgoing, SendResult, Target } from '@derekluo/dsh-channels'
 import { DEFAULT_API_BASE, MAX_TEXT_CHARS, TelegramTransport, type FetchLike } from './transport.js'
-import { CHANNEL_ID, mediaOf, normalizeInbound, type NormalizedInbound, type TelegramUpdate } from './normalize.js'
+import { runTelegramPolling } from './polling.js'
+import { CHANNEL_ID, mediaOf, type NormalizedInbound } from './normalize.js'
 
 export { CHANNEL_ID, normalizeInbound } from './normalize.js'
 
@@ -88,33 +88,41 @@ export async function createAdapter({ runtime, config = {}, stateRoot = '' }: Te
       return undefined
     }
     const extension = path.extname(item.fileName ?? downloaded.filePath) || (item.kind === 'image' ? '.jpg' : item.kind === 'video' ? '.mp4' : item.kind === 'voice' ? '.ogg' : '.bin')
-    const directory = path.join(mediaRoot, safeName(accountId, 'telegram'))
-    fs.mkdirSync(directory, { recursive: true })
-    const file = path.join(directory, `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}-${item.kind}${extension}`)
-    fs.writeFileSync(file, downloaded.bytes, { mode: 0o600 })
-    logger.info(`saved inbound ${item.kind} to ${file} (${downloaded.bytes.length} bytes)`)
-    const media: InboundMedia = {
-      kind: item.kind,
-      path: file,
-      mime: item.mime ?? 'application/octet-stream',
-      bytes: downloaded.bytes.length,
-      ...(item.fileName === undefined ? {} : { name: safeName(item.fileName, 'file') }),
+    try {
+      const directory = path.join(mediaRoot, safeName(accountId, 'telegram'))
+      fs.mkdirSync(directory, { recursive: true })
+      const file = path.join(directory, `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}-${item.kind}${extension}`)
+      fs.writeFileSync(file, downloaded.bytes, { mode: 0o600 })
+      logger.info(`saved inbound ${item.kind} to ${file} (${downloaded.bytes.length} bytes)`)
+      const media: InboundMedia = {
+        kind: item.kind,
+        path: file,
+        mime: item.mime ?? 'application/octet-stream',
+        bytes: downloaded.bytes.length,
+        ...(item.fileName === undefined ? {} : { name: safeName(item.fileName, 'file') }),
+      }
+      return media
+    } catch (error) {
+      logger.warn(`telegram attachment could not be saved: ${String(error)}`)
+      return undefined
     }
-    return media
   }
 
-  const handleUpdate = async (update: TelegramUpdate): Promise<void> => {
-    const message = normalizeInbound(update, accountId)
-    if (message === null) return
-    const items = (message.mediaItems ?? []).slice(0, MAX_INBOUND_MEDIA)
-    delete message.mediaItems
-    if (runtime?.canReceive?.(message, items.length > 0, legacyAccountId) === false) return
+  const handleMessage = async (message: NormalizedInbound): Promise<void> => {
+    const descriptors = message.mediaItems ?? []
+    const items = descriptors.slice(0, MAX_INBOUND_MEDIA)
+    message.attachmentErrors ??= []
+    if (descriptors.length > items.length) message.attachmentErrors.push('附件数量超过上限，其余附件未接收。')
+    if (items.length && !mediaEnabled) message.attachmentErrors.push('附件接收未启用，请发送文字。')
+    if (runtime?.canReceive?.(message, items.length > 0 || message.media.length > 0, legacyAccountId) === false) return
     try {
+      delete message.mediaItems
       if (items.length > 0 && mediaEnabled) {
         for (const item of items) {
           const saved = await saveMedia(item)
           if (transport.signal.aborted) return
           if (saved !== undefined) message.media.push(saved)
+          else message.attachmentErrors.push(`${item.kind} 附件未能下载或超过大小上限，请重新发送。`)
         }
       }
       for (const handler of handlers) handler(message)
@@ -140,32 +148,11 @@ export async function createAdapter({ runtime, config = {}, stateRoot = '' }: Te
       if (loop !== undefined) return
       transport.start()
       logger.info(`telegram adapter polling bot ${accountId}`)
-      loop = (async () => {
-        while (!transport.signal.aborted) {
-          let updates: TelegramUpdate[]
-          try {
-            updates = await transport.pollOnce()
-          } catch (error) {
-            if (transport.signal.aborted) break
-            logger.warn(`telegram poll failed: ${String((error as Error)?.message ?? error)}`)
-            await delay(3000, undefined, { signal: transport.signal }).catch(() => {})
-            continue
-          }
-          for (const update of updates) {
-            if (transport.signal.aborted) break
-            try {
-              await handleUpdate(update)
-            } catch (error) {
-              logger.warn(`telegram update failed: ${String((error as Error)?.message ?? error)}`)
-              if ((error as { code?: string } | null)?.code === 'DSH_INBOUND_RETRY') {
-                transport.retryFrom(update.update_id)
-                await delay(3000, undefined, { signal: transport.signal }).catch(() => {})
-                break
-              }
-            }
-          }
-        }
-      })()
+      loop = runTelegramPolling({
+        transport, accountId, logger,
+        priority: (message) => runtime?.canBypassInbound?.(message) === true,
+        deliver: handleMessage,
+      })
     },
     async stop(): Promise<void> {
       transport.stop()

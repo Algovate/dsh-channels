@@ -329,9 +329,11 @@ test('restarting mid-batch lets the interrupted Telegram update use the remainin
     const routed: Array<{ text: string; allowed: boolean; attachments: number }> = []
     let firstPoll = true
     const adapter = await createAdapter({
-      runtime, stateRoot, config: { token: '123:secret', fetchImpl: async (url) => {
+      runtime, stateRoot, config: { token: '123:secret', fetchImpl: async (url, init) => {
         if (url.endsWith('/getUpdates')) {
           if (!firstPoll) {
+            const offset = JSON.parse(String(init?.body)).offset ?? 0
+            if (offset < 12) return Response.json({ ok: true, result: updates.filter((update) => update.update_id >= offset) })
             checkpoint.resolve('next poll')
             return block.promise
           }

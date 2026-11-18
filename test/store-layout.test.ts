@@ -93,7 +93,7 @@ test('real core writers keep every generated path in the declared inventory', as
   try {
     new Inbox(root, () => {}).add(inbound(), 'session')
     new FileCounterStore({ stateRoot: root }).set('line:conversation', 1)
-    assert.equal(new SessionLines(root, () => {}).set('conversation', 2), true)
+    assert.equal(new SessionLines(root, () => {}).saveRouting('conversation', { project: 'default', sessions: { default: { current: 2, max: 2 } } }), true)
     new Journal({ stateRoot: root }).append({ direction: 'in', phase: 'received', id: 'test', channel: 'fake', accountId: 'a', conversationId: 'c', kind: 'message', text: 'hi' })
     new Outbox({ stateRoot: root }).add({ channel: 'fake', accountId: 'a', conversationId: 'c' }, { kind: 'reply', text: 'hi' }, {})
     createLogger({ stateRoot: root }).info('test')

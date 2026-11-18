@@ -43,3 +43,13 @@ export function readJsonFile<T>(file: string, fallback: () => T, warn?: (line: s
     return fallback()
   }
 }
+
+/** Critical object state: only an absent file means an empty configuration. */
+export function readJsonObject(file: string): Record<string, unknown> {
+  let text: string
+  try { text = fs.readFileSync(file, 'utf8') }
+  catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return {}; throw error }
+  const value: unknown = JSON.parse(text)
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) throw new Error(`invalid object state in ${path.basename(file)}`)
+  return value as Record<string, unknown>
+}
