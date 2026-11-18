@@ -54,6 +54,16 @@ export class TurnProgress {
     return this.result === undefined && this.#matchingTurn !== undefined && this.#matchingTurn === this.#activeTurn
   }
 
+  /** True when this progress is following the turn that produced `turn`. */
+  matchesTurn(turn: number): boolean {
+    return this.#matchingTurn !== undefined && this.#matchingTurn === turn
+  }
+
+  /** True while the input is still waiting in the host inbox, not yet claimed. */
+  get queuedInInbox(): boolean {
+    return this.#inboxIndex !== undefined && this.#matchingTurn === undefined
+  }
+
   update(events: Array<Record<string, unknown>>): void {
     if (this.result !== undefined) return
     for (const event of events) {

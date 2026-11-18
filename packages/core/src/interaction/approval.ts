@@ -59,6 +59,11 @@ export function approvalEntry({ target, request }: { target: Target; request: { 
       title: formatApprovalPrompt(request),
       options: [],
       hint,
+      actions: [
+        { label: '允许一次', value: `${code} 1` },
+        { label: '拒绝', value: `${code} 2` },
+        { label: '取消审批', value: `${code} 3` },
+      ],
     },
     parse(text: string) {
       const parts = text.trim().split(/\s+/)
@@ -119,6 +124,9 @@ export async function answerApproval({
     for (const [side, pending] of [['remote', remote], ['local', local]] as const) {
       void pending.then((result) => {
         if (result.ok === true && result.value !== 'unavailable') settle({ side, value: result.value })
+        // An expired or withdrawn chat prompt is a terminal "nobody answered
+        // here" even if the desktop surface is still hanging.
+        else if (side === 'remote' && result.ok === false) settle(undefined)
       }).finally(finishOne)
     }
   }), request.signal).catch((error: unknown) => {
@@ -134,9 +142,16 @@ export async function answerApproval({
   // Nobody decided. An approval fails CLOSED, and the seam already has the word
   // for it: `unavailable`. Throwing here would make the host read a timeout as a
   // crashed answerer instead of "nobody said yes".
-  const [remoteResult, localResult] = await Promise.all([remote, local])
-  for (const result of [remoteResult, localResult]) {
-    if (result.ok === false) logger.info?.(`approval surface ended without a decision: ${String((result.error as Error)?.message ?? result.error)}`)
+  const remoteResult = await remote
+  if (remoteResult.ok === false) {
+    // The chat prompt expired or was withdrawn. A hung desktop answerer must
+    // not keep this seam open; the action fails closed.
+    logger.info?.(`approval chat surface ended without a decision: ${String((remoteResult.error as Error)?.message ?? remoteResult.error)}`)
+    return 'unavailable'
+  }
+  const localResult = await local
+  if (localResult.ok === false) {
+    logger.info?.(`approval desktop surface ended without a decision: ${String((localResult.error as Error)?.message ?? localResult.error)}`)
   }
   return 'unavailable'
 }

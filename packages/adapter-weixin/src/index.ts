@@ -12,7 +12,7 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import { CDN_BASE_URL, listIndexedWeixinAccountIds } from '../vendor/openclaw-weixin/auth/accounts.js'
-import type { AccountInfo, AdapterRuntime, ChannelAdapter, InboundMessage, Outgoing, SendResult, Target } from '@derekluo/dsh-channels'
+import type { AccountInfo, AdapterRuntime, ChannelAdapter, InboundMessage, IngressSink, Outgoing, SendResult, Target } from '@derekluo/dsh-channels'
 import { mediaItemsOf, normalizeInbound, type NormalizedInbound, type RawMediaItem, type RawMessage } from './normalize.js'
 import { MAX_INBOUND_MEDIA, MAX_INBOUND_MESSAGE_BYTES, saveInboundItem } from './media.js'
 import { AsrBridge } from './asr.js'
@@ -69,6 +69,7 @@ export async function createAdapter({ runtime, config = {}, stateRoot }: WeixinA
 
   const expired = new Set<string>()
   const handlers = new Set<(message: InboundMessage) => void>()
+  let sink: IngressSink | undefined
   const inbox = new Map<string, Promise<void>>()
   const contextOrder = new Map<string, number>()
   let receivedOrder = 0
@@ -108,7 +109,8 @@ export async function createAdapter({ runtime, config = {}, stateRoot }: WeixinA
           }
           await attachMedia(message, items, signal)
           if (signal.aborted) return
-          for (const handler of handlers) handler(message)
+          if (sink !== undefined) await sink.offer(message, { priority: items.length === 0 && runtime?.canBypassInbound?.(message) === true })
+          else for (const handler of handlers) await handler(message)
         } finally {
           runtime?.cancelReceive?.(message)
         }
@@ -198,6 +200,10 @@ export async function createAdapter({ runtime, config = {}, stateRoot }: WeixinA
       },
     },
 
+    async startWithSink(next: IngressSink): Promise<void> {
+      sink = next
+      try { await adapter.start() } catch (error) { sink = undefined; throw error }
+    },
     async start(): Promise<void> {
       if (inbound !== undefined) return
       inbound = new AbortController()
@@ -213,6 +219,7 @@ export async function createAdapter({ runtime, config = {}, stateRoot }: WeixinA
       stopping = Promise.all([transport.stop(), asr?.dispose()]).then(() => {
         inbound = undefined
         asr = undefined
+        sink = undefined
         stopping = undefined
       })
       return stopping

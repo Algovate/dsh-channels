@@ -32,7 +32,8 @@ test('a sender that is not on the allowlist never reaches the agent', async () =
   await tick(20)
   assert.equal(decision.allow, false)
   assert.equal(h.created.length, 0)
-  assert.equal(adapter.sent.length, 0)
+  assert.equal(adapter.sent.filter((entry) => entry.outgoing.text?.includes('尚未获准')).length, 1)
+  assert.equal(runtime.pendingPairings().length, 1)
   runtime.dispose()
 })
 
@@ -224,14 +225,12 @@ test('files the turn wrote are sent as attachments after the reply', async () =>
   const os = await import('node:os')
   const path = await import('node:path')
   const workspaceDir = fs.mkdtempSync(path.join(os.tmpdir(), 'channels-ws-'))
+  const source = path.join(workspaceDir, 'out.txt')
   const h = createHarness({
     reply: '做好了',
-    // The fake agent "uses a tool" during the turn.
-    onFollowup: () => {
-      const output = fs.readdirSync(workspaceDir).find((entry) => entry.startsWith('.channel-output-'))
-      assert.ok(output)
-      fs.writeFileSync(path.join(workspaceDir, output, 'out.txt'), 'done')
-    },
+    // The fake agent "uses a tool" during the turn and declares the result.
+    onFollowup: () => { fs.writeFileSync(source, 'done') },
+    deliverables: () => [{ path: source }],
   })
   const runtime = createChannelsRuntime({ ctx: h.ctx, config: { autoSendFiles: true }, workingDirectory: workspaceDir })
   const adapter = createFakeAdapter()
@@ -239,9 +238,31 @@ test('files the turn wrote are sent as attachments after the reply', async () =>
   runtime.dispatch(inbound())
   await tick(200)
   const withMedia = adapter.sent.filter((entry) => (entry.outgoing.media ?? []).length > 0)
-  assert.equal(withMedia.length, 1, 'the produced file went out as an attachment')
+  assert.equal(withMedia.length, 1, 'the presented file went out as an attachment')
   assert.match(withMedia[0]?.outgoing.media?.[0]?.path ?? '', /out\.txt$/)
+  assert.doesNotMatch(JSON.stringify(h.followedUp[0]?.message), /output directory/i, 'the presenter replaces the hidden directory instruction')
   runtime.dispose()
+})
+
+test('a presented file outside the session workspace is not sent', async () => {
+  const fs = await import('node:fs')
+  const os = await import('node:os')
+  const path = await import('node:path')
+  const workspaceDir = fs.mkdtempSync(path.join(os.tmpdir(), 'channels-ws-'))
+  const outsideDir = fs.mkdtempSync(path.join(os.tmpdir(), 'channels-outside-'))
+  const outside = path.join(outsideDir, 'private.txt')
+  fs.writeFileSync(outside, 'private')
+  const h = createHarness({ reply: '好了', deliverables: () => [{ path: outside }] })
+  const runtime = createChannelsRuntime({ ctx: h.ctx, config: { autoSendFiles: true }, workingDirectory: workspaceDir })
+  const adapter = createFakeAdapter()
+  runtime.register(adapter)
+  runtime.dispatch(inbound())
+  await tick(100)
+  assert.equal(adapter.sent.flatMap((entry) => entry.outgoing.media ?? []).length, 0)
+  assert.ok(adapter.sent.some((entry) => /附件未发送/.test(entry.outgoing.text ?? '')))
+  runtime.dispose()
+  fs.rmSync(workspaceDir, { recursive: true, force: true })
+  fs.rmSync(outsideDir, { recursive: true, force: true })
 })
 
 test('autoSendFiles:false keeps the turn text-only', async () => {

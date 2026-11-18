@@ -37,6 +37,8 @@ export interface ScanOptions {
   ignoreDirs?: string[]
   /** Extensions never worth sending (intermediate junk). */
   ignoreExtensions?: string[]
+  /** A dedicated artifact directory: include dotfiles and ignored extensions. */
+  includeAll?: boolean
 }
 
 const DEFAULT_IGNORE_DIRS = new Set(['node_modules', '.git', '.cache', 'dist', 'dist-test', '.npm-cache'])
@@ -51,7 +53,7 @@ export interface ProducedScan {
 /** Inspect a bounded tree before choosing the newest eligible files. */
 export async function scanProducedFiles({
   dir, sinceMs, maxFiles = 5, maxBytes = 20 * 1024 * 1024,
-  maxDepth = 4, maxEntries = 10000, ignoreDirs = [], ignoreExtensions = [],
+  maxDepth = 4, maxEntries = 10000, ignoreDirs = [], ignoreExtensions = [], includeAll = false,
 }: ScanOptions): Promise<ProducedScan> {
   const root = path.resolve(dir)
   const result: ProducedScan = { files: [], skipped: 0, incomplete: false }
@@ -67,15 +69,15 @@ export async function scanProducedFiles({
       const directory = await fs.opendir(current)
       for await (const entry of directory) {
         if (visited++ >= budget) { result.incomplete = true; break }
-        if (entry.name.startsWith('.')) continue
+        if (!includeAll && entry.name.startsWith('.')) continue
         const full = path.join(current, entry.name)
         if (entry.isSymbolicLink()) { result.skipped++; continue }
         if (entry.isDirectory()) {
-          if (!ignoredDirs.has(entry.name)) await walk(full, depth + 1)
+          if (includeAll || !ignoredDirs.has(entry.name)) await walk(full, depth + 1)
           if (visited >= budget && result.incomplete) break
           continue
         }
-        if (!entry.isFile() || ignoredExt.has(path.extname(entry.name).toLowerCase())) continue
+        if (!entry.isFile() || (!includeAll && ignoredExt.has(path.extname(entry.name).toLowerCase()))) continue
         const stat = await fs.lstat(full)
         if (!stat.isFile() || stat.mtimeMs < sinceMs - 1000) continue
         if (stat.size === 0 || stat.size > maxBytes) { result.skipped++; continue }

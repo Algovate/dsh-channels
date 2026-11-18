@@ -144,10 +144,21 @@ export function parseAnswers(text: string, questions: readonly AskUserQuestionIt
 
 /** Build the queue entry for one question request. */
 export function questionEntry({ target, questions, hint }: { target: Target; questions: readonly AskUserQuestionItem[]; hint?: string }): InteractionEntry {
+  const single = questions.length === 1 ? questions[0] : undefined
+  const options = single !== undefined && single.multiple !== true && Array.isArray(single.options) ? single.options : []
+  const actions = options.length === 0 ? undefined : options.map((option, index) => ({
+    label: (typeof option === 'string' ? option : typeof option?.label === 'string' ? option.label : String(option)).slice(0, 64),
+    value: String(index + 1),
+  }))
   return {
     kind: 'question',
     target,
-    view: { title: formatQuestionPrompt(questions), options: [], ...(hint === undefined ? {} : { hint }) },
+    view: {
+      title: formatQuestionPrompt(questions),
+      options: [],
+      ...(hint === undefined ? {} : { hint }),
+      ...(actions === undefined ? {} : { actions }),
+    },
     freeText: questions.every((question) => !Array.isArray(question?.options) || question.options.length === 0),
     parse(text: string) {
       const parsed = parseAnswers(text, questions)
@@ -194,7 +205,13 @@ export async function answerUserQuestion({
     if (first.side === 'local') queue.retire(entry)
     return first.value
   }
-  const other = await withinLifetime<Awaited<typeof local> | Awaited<typeof remote>>(first.side === 'remote' ? local : remote, request.signal)
+  if (first.side === 'remote') {
+    // The chat prompt expired; do not wait for a desktop answerer that may hang.
+    const error = first.error
+    logger.warn(`no answer to the agent's question: ${String((error as Error)?.message ?? error)}`)
+    throw error instanceof Error ? error : new Error(String(error))
+  }
+  const other = await withinLifetime<Awaited<typeof local> | Awaited<typeof remote>>(remote, request.signal)
   if (other.ok === true) {
     if (other.side === 'local') queue.retire(entry)
     return other.value

@@ -15,15 +15,16 @@
  *    it; `kind: 'user'` may not carry extra fields (the session format
  *    validates it down to `kind`/`rpcId`/`clientTimeZone`).
  *
- * M0 reads the reply by polling `session.snapshotEvents()`. The event-driven
- * wakeup (`session/event`) is the M1 work item; the polling interval is a
- * constant so swapping it is one place.
+ * Replies come from the host's committed `session/event` feed. A bare host
+ * without that feed (tests, older embeddings) still falls back to polling
+ * `snapshotEvents()`; production DSH always provides the feed.
  *
  * @module @derekluo/dsh-channels/turns
  */
 import fs from 'node:fs'
 import path from 'node:path'
 import type { InboundMessage, Target } from './types.js'
+import { createHostPort, type HostContext, type HostPort } from './host.js'
 import { setTimeout as delay } from 'node:timers/promises'
 import { TurnProgress } from './turn-progress.js'
 export { assistantTextOf } from './turn-progress.js'
@@ -54,6 +55,11 @@ export interface AgentsService {
   create?: (options: Record<string, unknown>) => Promise<AgentHandle>
 }
 
+export interface PresentedFile {
+  path: string
+  description?: string
+}
+
 export interface TurnReply {
   text: string
   sessionId: string
@@ -61,6 +67,10 @@ export interface TurnReply {
   cancelled?: boolean
   interrupted?: boolean
   settled?: boolean
+  /** The wait timed out, but the host turn may still be running. */
+  pending?: boolean
+  /** Files the host declared through `present` during this turn. */
+  deliverables?: PresentedFile[]
 }
 
 export interface TurnContextBlock {
@@ -79,13 +89,16 @@ export interface TurnRequest {
   /** The private attachment directory for this particular user message. */
   outputDirectory?: string
   signal?: AbortSignal
+  /** Called once if the wait timed out and the host turn later settles. */
+  onSettled?: (reply: TurnReply) => void
 }
 
 export interface TurnDriverOptions {
-  ctx: { get?: (name: string) => unknown }
+  ctx: HostContext
   logger: { info: (line: string) => void; warn: (line: string) => void }
   /** Agent working directory (the session's cwd). */
   workingDirectory: string
+  /** How long to wait before detaching; a submitted turn keeps running. */
   maxTurnWaitMs?: number
   pollMs?: number
   /** Injected in tests; defaults to the host's `createUserMessage`. */
@@ -107,12 +120,31 @@ interface Attached {
   named?: boolean
 }
 
+interface RunningTurn {
+  agent: AgentHandle['agent']
+  messageId: string
+  message: InboundMessage
+  progress: TurnProgress
+  signal: AbortSignal
+  deadlineAt: number
+  removed: boolean
+  deliverables: PresentedFile[]
+  resolve: (reply: { text: string; failed?: boolean }) => void
+  done: Promise<{ text: string; failed?: boolean }>
+}
+
 export class TurnDriver {
   readonly #options: TurnDriverOptions
+  readonly #host: HostPort
   readonly #attached = new Map<string, Attached>()
   readonly #owned = new Map<AgentHandle, string>()
   readonly #leases = new Map<string, number>()
-  readonly #running = new Map<AgentHandle['agent'], { message: InboundMessage; progress: TurnProgress; signal: AbortSignal; deadlineAt: number; removed: boolean }>()
+  readonly #running = new Map<AgentHandle['agent'], RunningTurn>()
+  /** Session id → the channel turn waiting on it; events carry only the session. */
+  readonly #bySession = new Map<string, RunningTurn>()
+  #unsubscribe: (() => void) | undefined
+  /** True when the host gave us a session event feed; polling is the fallback only. */
+  #live = false
   #disposed = false
   readonly #shutdown = new AbortController()
 
@@ -121,14 +153,18 @@ export class TurnDriver {
     const agent = value as AgentHandle['agent']
     const running = this.#running.get(agent)
     if (running === undefined || running.signal.aborted) return undefined
-    this.#refreshProgress(agent, running.progress)
+    if (!this.#live) this.#refreshProgress(agent, running.progress)
     return running.progress.ownsActiveTurn ? { target: running.message, signal: running.signal, deadlineAt: running.deadlineAt } : undefined
   }
 
   async dispose(): Promise<void> {
     this.#disposed = true
     this.#shutdown.abort()
+    try { this.#unsubscribe?.() } catch { /* Teardown cannot fail an unload. */ }
+    this.#unsubscribe = undefined
+    this.#live = false
     this.#running.clear()
+    this.#bySession.clear()
     const handles = [...this.#owned.keys()]
     this.#owned.clear()
     this.#attached.clear()
@@ -139,6 +175,51 @@ export class TurnDriver {
 
   constructor(options: TurnDriverOptions) {
     this.#options = options
+    this.#host = createHostPort(options.ctx)
+    if (this.#host.hasEventBus()) {
+      try {
+        const off = this.#host.on('session/event', ((session: { id?: string }, event: Record<string, unknown>) => {
+          this.#observe(session, event)
+        }) as never, { global: true })
+        if (typeof off === 'function') {
+          this.#unsubscribe = off
+          this.#live = true
+        }
+      } catch (error) {
+        this.logger.warn(`session event subscription failed; falling back to polling: ${String(error)}`)
+      }
+    }
+  }
+
+  /** Fold one committed host event into the channel turn that is waiting on it. */
+  /** Keep only files the host declared for this channel turn, once each. */
+  #collectDeliverables(running: RunningTurn, event: Record<string, unknown>): void {
+    const data = event['data'] as { turn?: unknown; files?: unknown } | undefined
+    if (typeof data?.turn !== 'number' || !running.progress.matchesTurn(data.turn)) return
+    for (const item of Array.isArray(data.files) ? data.files : []) {
+      if (item === null || typeof item !== 'object') continue
+      const file = item as { path?: unknown; description?: unknown }
+      if (typeof file.path !== 'string' || file.path === '') continue
+      if (running.deliverables.some((existing) => existing.path === file.path)) continue
+      running.deliverables.push({
+        path: file.path,
+        ...(typeof file.description === 'string' && file.description !== '' ? { description: file.description } : {}),
+      })
+    }
+  }
+
+  #observe(session: { id?: string } | undefined, event: Record<string, unknown>): void {
+    if (this.#disposed) return
+    const id = typeof session?.id === 'string' ? session.id : undefined
+    const running = id === undefined ? undefined : this.#bySession.get(id)
+    if (running === undefined) return
+    try {
+      running.progress.update([event])
+      if (event['type'] === 'deliverables/presented') this.#collectDeliverables(running, event)
+    } catch (error) {
+      this.logger.warn(`could not read session event: ${String(error)}`)
+    }
+    if (running.progress.result !== undefined) running.resolve(running.progress.result)
   }
 
   get logger(): TurnDriverOptions['logger'] {
@@ -155,9 +236,7 @@ export class TurnDriver {
    * picked in the GUI.
    */
   #defaultRoute(): { provider: string; model: string } | undefined {
-    const defaults = this.#options.ctx.get?.('agentDefaultModel') as
-      | { currentSelection?: () => { provider?: string; model?: string } | undefined }
-      | undefined
+    const defaults = this.#host.get<{ currentSelection?: () => { provider?: string; model?: string } | undefined }>('agentDefaultModel')
     try {
       const selection = defaults?.currentSelection?.()
       if (typeof selection?.provider === 'string' && selection.provider !== '' && typeof selection.model === 'string' && selection.model !== '') {
@@ -171,8 +250,8 @@ export class TurnDriver {
   }
 
   #agents(): AgentsService | undefined {
-    const service = this.#options.ctx.get?.('agents')
-    return service !== undefined && service !== null ? (service as AgentsService) : undefined
+    const service = this.#host.get<AgentsService>('agents')
+    return service ?? undefined
   }
 
   async #factory(): Promise<MessageFactory> {
@@ -224,9 +303,7 @@ export class TurnDriver {
     // without one gets the bare default (a working-directory tool and little
     // else), so `ask_user_question`, bash and the rest would be missing — the
     // first thing a real turn exposes.
-    const presets = this.#options.ctx.get?.('agentPresets') as
-      | { resolve?: (id: undefined) => Promise<{ id?: string } | undefined>; mount?: (agentCtx: unknown, id: string) => Promise<unknown> }
-      | undefined
+    const presets = this.#host.get<{ resolve?: (id: undefined) => Promise<{ id?: string } | undefined>; mount?: (agentCtx: unknown, id: string) => Promise<unknown> }>('agentPresets')
     let presetId: string | undefined
     try {
       const resolved = await presets?.resolve?.(undefined)
@@ -312,44 +389,53 @@ export class TurnDriver {
     return attached
   }
 
-  /** Run one turn and return its reply after the matching turn ends. */
+  /** Run one turn and return its reply; a wait timeout detaches without cancelling it. */
   async run(request: TurnRequest & { sessionId?: string }): Promise<TurnReply> {
     const leasedId = request.sessionId ?? sessionIdFor(request.message)
     this.#leases.set(leasedId, (this.#leases.get(leasedId) ?? 0) + 1)
-    const deadline = new AbortController()
-    const signal = AbortSignal.any([deadline.signal, this.#shutdown.signal, ...(request.signal === undefined ? [] : [request.signal])])
+    const sessionId = request.sessionId ?? sessionIdFor(request.message)
+    // `preSubmit` stops an attach that ran past the deadline; `prompt` withdraws
+    // interactions when the turn settles. Neither cancels a submitted turn.
+    const preSubmit = new AbortController()
+    const prompt = new AbortController()
+    const signal = AbortSignal.any([preSubmit.signal, this.#shutdown.signal, ...(request.signal === undefined ? [] : [request.signal]), prompt.signal])
     const timeoutMs = this.#options.maxTurnWaitMs ?? 20 * 60_000
     const deadlineAt = Date.now() + timeoutMs
-    const timer = setTimeout(() => deadline.abort(new Error('the turn timed out')), timeoutMs)
-    const lifecycle: { submitted: boolean; result?: TurnReply } = { submitted: false }
+    const lifecycle: { submitted: boolean; running?: RunningTurn; result?: TurnReply } = { submitted: false }
+    let timedOut = false
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const timeout = new Promise<'timeout'>((resolve) => {
+      timer = setTimeout(() => { timedOut = true; resolve('timeout') }, timeoutMs)
+    })
+    const work = this.#run({ ...request, signal, deadlineAt, lifecycle })
+      .catch((error: unknown) => ({ text: String((error as Error)?.message ?? error), failed: true, sessionId }))
+
     let cancellation: Promise<TurnReply> | undefined
     let onAbort!: () => void
     const aborted = new Promise<TurnReply>((resolve) => {
       onAbort = () => {
-        const reply = { text: '回合已取消或超时', failed: true, interrupted: true, sessionId: request.sessionId ?? sessionIdFor(request.message) }
+        const reply = { text: '回合已取消或超时', failed: true, interrupted: true, sessionId }
         if (lifecycle.result?.settled) { resolve(lifecycle.result); return }
-        const running = [...this.#running.entries()].find(([, value]) => value.signal === signal)
-        if (running !== undefined) {
-          const [agent, state] = running
-          try {
-            this.#refreshProgress(agent, state.progress)
-          } catch (error) {
-            this.logger.warn(`could not read final turn state: ${String(error)}`)
+        const state = lifecycle.running
+        if (state !== undefined) {
+          if (!this.#live) {
+            try { this.#refreshProgress(state.agent, state.progress) } catch (error) { this.logger.warn(`could not read final turn state: ${String(error)}`) }
           }
           if (state.progress.result !== undefined) {
-            resolve({ ...state.progress.result, sessionId: reply.sessionId, settled: true, cancelled: state.progress.cancelled })
+            resolve({ ...state.progress.result, sessionId, settled: true, cancelled: state.progress.cancelled, ...(state.deliverables.length === 0 ? {} : { deliverables: state.deliverables }) })
             return
           }
         }
         if (request.signal?.reason === 'user-cancel') {
           cancellation = (async () => {
-            if (running === undefined) return { ...reply, cancelled: !lifecycle.submitted }
-            const [agent, state] = running
+            if (state === undefined) return { ...reply, cancelled: !lifecycle.submitted }
             for (let attempt = 0; attempt < 50; attempt++) {
               await delay(10)
-              try { this.#refreshProgress(agent, state.progress) } catch { break }
+              if (!this.#live) {
+                try { this.#refreshProgress(state.agent, state.progress) } catch { break }
+              }
               if (state.removed || state.progress.cancelled) return { ...reply, cancelled: true }
-              if (state.progress.result !== undefined) return { ...state.progress.result, sessionId: reply.sessionId, settled: true }
+              if (state.progress.result !== undefined) return { ...state.progress.result, sessionId, settled: true, ...(state.deliverables.length === 0 ? {} : { deliverables: state.deliverables }) }
             }
             return { ...reply, cancelled: false }
           })()
@@ -359,20 +445,41 @@ export class TurnDriver {
       if (signal.aborted) onAbort()
       else signal.addEventListener('abort', onAbort, { once: true })
     })
+
     try {
-      const result = await Promise.race([this.#run({ ...request, signal, deadlineAt, lifecycle }), aborted])
-      return await (cancellation ?? Promise.resolve(result))
+      const winner = await Promise.race([work, timeout, aborted])
+      if (winner === 'timeout') {
+        const state = lifecycle.running
+        if (!lifecycle.submitted) {
+          // Nothing has run yet: stop a late attach from submitting after we left.
+          preSubmit.abort(new Error('the turn timed out before submission'))
+        } else if (state !== undefined && state.progress.queuedInInbox && state.progress.result === undefined) {
+          // The input is still queued behind desktop work; remove only that input.
+          try { state.removed = state.agent.inbox?.remove?.(state.messageId) === true }
+          catch (error) { this.logger.warn(`could not remove timed-out input: ${String(error)}`) }
+          state.resolve({ text: '', failed: true })
+        }
+        void work.then((result) => {
+          try { prompt.abort() } catch { /* already aborted */ }
+          try { request.onSettled?.(result) } catch (error) { this.logger.warn(`late turn callback failed: ${String(error)}`) }
+        })
+        return {
+          text: '回合等待超时，任务仍在后台处理；结果确认后会继续发送，发 /status 查看。',
+          failed: true, interrupted: true, pending: true, settled: false, sessionId,
+        }
+      }
+      return await (cancellation ?? Promise.resolve(winner))
     } finally {
-      clearTimeout(timer)
-      deadline.abort() // Withdraw prompts on success, failure and timeout alike.
+      if (timer !== undefined) clearTimeout(timer)
       signal.removeEventListener('abort', onAbort)
+      if (!timedOut) { try { prompt.abort() } catch { /* already aborted */ } }
       const remaining = (this.#leases.get(leasedId) ?? 1) - 1
       if (remaining === 0) this.#leases.delete(leasedId); else this.#leases.set(leasedId, remaining)
       await this.#prune()
     }
   }
 
-  async #run(request: TurnRequest & { sessionId?: string; signal: AbortSignal; deadlineAt: number; lifecycle: { submitted: boolean; result?: TurnReply } }): Promise<TurnReply> {
+  async #run(request: TurnRequest & { sessionId?: string; signal: AbortSignal; deadlineAt: number; lifecycle: { submitted: boolean; running?: RunningTurn; result?: TurnReply } }): Promise<TurnReply> {
     const { message, signal } = request
     const sessionId = request.sessionId ?? sessionIdFor(message)
     if (signal?.aborted) return { text: '', failed: true, sessionId }
@@ -429,26 +536,34 @@ export class TurnDriver {
     const before = this.#lastSeq(agent)
     if (signal?.aborted) return { text: '', failed: true, sessionId }
     const progress = new TurnProgress(before, messageId)
-    const running = { message, progress, signal, deadlineAt: request.deadlineAt, removed: false }
+    let resolve!: (reply: { text: string; failed?: boolean }) => void
+    const done = new Promise<{ text: string; failed?: boolean }>((settle) => { resolve = settle })
+    const running: RunningTurn = { agent, messageId, message, progress, signal, deadlineAt: request.deadlineAt, removed: false, deliverables: [], resolve, done }
     this.#running.set(agent, running)
+    this.#bySession.set(sessionId, running)
+    request.lifecycle.running = running
     const cancel = (): void => {
       try {
-        this.#refreshProgress(agent, progress)
+        if (!this.#live) this.#refreshProgress(agent, progress)
         if (progress.ownsActiveTurn) agent.cancel?.({ kind: 'user' }, { keepInbox: true })
         else if (progress.result === undefined) running.removed = agent.inbox?.remove?.(messageId) === true
       } catch (error) { this.logger.warn(`could not cancel channel input: ${String(error)}`) }
     }
+    const stopWaiting = (): void => { resolve({ text: '', failed: true }) }
     signal.addEventListener('abort', cancel, { once: true })
+    signal.addEventListener('abort', stopWaiting, { once: true })
     try {
       request.lifecycle.submitted = true
       agent.followup(input)
-      const reply = await this.#awaitReply(agent, progress, signal)
-      const result = { ...reply, sessionId, settled: progress.result !== undefined }
+      const reply = await this.#awaitReply(agent, progress, signal, running)
+      const result = { ...reply, sessionId, settled: progress.result !== undefined, ...(running.deliverables.length === 0 ? {} : { deliverables: running.deliverables }) }
       request.lifecycle.result = result
       return result
     } finally {
       signal.removeEventListener('abort', cancel)
+      signal.removeEventListener('abort', stopWaiting)
       if (this.#running.get(agent) === running) this.#running.delete(agent)
+      if (this.#bySession.get(sessionId) === running) this.#bySession.delete(sessionId)
     }
   }
 
@@ -465,7 +580,7 @@ export class TurnDriver {
     if (!attached.created || attached.named) return
     const title = this.#options.titleFor?.(message)
     if (title === undefined || title.trim() === '') return
-    const service = this.#options.ctx.get?.('sessionTitle') as { rename?: (session: unknown, title: string) => unknown } | undefined
+    const service = this.#host.get<{ rename?: (session: unknown, title: string) => unknown }>('sessionTitle')
     if (typeof service?.rename !== 'function') return
     // The host takes the live SESSION OBJECT, not the id: passing the id made
     // it read `undefined.id` and answer `session "undefined" is not live`
@@ -515,7 +630,10 @@ export class TurnDriver {
     return typeof last?.['seq'] === 'number' ? (last['seq'] as number) : -1
   }
 
-  async #awaitReply(agent: AgentHandle['agent'], progress: TurnProgress, signal: AbortSignal): Promise<{ text: string; failed?: boolean }> {
+  async #awaitReply(agent: AgentHandle['agent'], progress: TurnProgress, signal: AbortSignal, running: RunningTurn): Promise<{ text: string; failed?: boolean }> {
+    // The host emits committed events synchronously; the subscription was made
+    // before followup(), so a fast turn cannot finish before we are listening.
+    if (this.#live) return await running.done
     while (!signal.aborted) {
       this.#refreshProgress(agent, progress)
       if (progress.result !== undefined) return progress.result

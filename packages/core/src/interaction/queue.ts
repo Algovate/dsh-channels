@@ -38,6 +38,8 @@ export interface InteractionEntry {
     title: string
     options: { id: string; label: string }[]
     hint?: string
+    /** Native button labels and the text each one sends back. */
+    actions?: Array<{ label: string; value: string }>
   }
   /** Parse one reply text; `null` means "not an answer, ask again". */
   parse(text: string): { ok: true; value: string } | { ok: false; hint: string } | null
@@ -179,7 +181,11 @@ export class InteractionQueue {
       }
       pending.started = true
       try {
-        const results = await this.#options.send(entry.target, { text: this.#renderText(entry, validity), kind: 'question' })
+        const results = await this.#options.send(entry.target, {
+          text: this.#renderText(entry, validity),
+          kind: 'question',
+          ...(entry.view.actions === undefined || entry.view.actions.length === 0 ? {} : { actions: entry.view.actions }),
+        })
         const failed = results.find((result) => result.ok === false)
         if (failed !== undefined) throw new Error(failed.detail ?? failed.code)
         if (results.length === 0) throw new Error('nothing was sent')

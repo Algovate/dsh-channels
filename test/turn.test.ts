@@ -25,6 +25,15 @@ test('a conversation resumes its own session instead of creating a second one', 
   runtime.dispose()
 })
 
+test('a reply arrives from the session event feed, not from polling the log', async () => {
+  const h = createHarness({ reply: '在' })
+  const driver = new TurnDriver({ ctx: h.ctx, logger: { info: () => {}, warn: () => {} }, workingDirectory: '/tmp', createUserMessage: h.createUserMessage })
+  const reply = await driver.run({ message: inbound() })
+  assert.equal(reply.text, '在')
+  assert.equal(h.snapshotReads(), 0, 'the event feed must satisfy the wait without snapshotEvents()')
+  await driver.dispose()
+})
+
 test('a second message reuses the attached session', async () => {
   const h = createHarness({ reply: '在' })
   const runtime = h.makeRuntime()

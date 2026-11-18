@@ -5,6 +5,7 @@ import path from 'node:path'
 import test from 'node:test'
 import { setTimeout as delay } from 'node:timers/promises'
 import { createHarness, inbound } from './harness.js'
+import { resetStateFile, stateFile } from '../packages/core/src/store/state.js'
 import { createChannelsRuntime, createFakeAdapter } from './runtime-helper.js'
 
 async function until(check: () => boolean) { for (let i = 0; i < 150 && !check(); i++) await delay(10); assert.ok(check()) }
@@ -49,7 +50,7 @@ test('create binds a dedicated native session and management remains scoped to c
 })
 
 test('creation intent must be durable before any native schedule is created', async () => {
-  const f = fixture(); fs.mkdirSync(path.join(f.root, 'schedules.json'))
+  const f = fixture(); stateFile(f.root).failNextWrite('schedules')
   try { f.send('/schedule after 1 提醒我'); await until(() => f.text().includes('保存') || f.text().includes('失败')); assert.equal(f.creates.length, 0) }
   finally { await f.close() }
 })
@@ -84,11 +85,11 @@ test('corrupt attribution blocks native activation and preserves the state file'
   const f = fixture()
   try {
     f.send('/schedule after 1 检查部署'); await until(() => f.creates.length === 1); const id = f.binding().sessionId
-    fs.writeFileSync(path.join(f.root, 'schedules.json'), '{'); await f.restart()
+    fs.writeFileSync(path.join(f.root, 'state.json'), '{'); resetStateFile(f.root); await f.restart()
     const hook = f.hooks.get('schedule/resolve-agent')!
     await assert.rejects(hook(id, async () => ({ secret: true })), /不可读/)
     f.send('/schedules'); await until(() => f.text().includes('不可读'))
-    assert.equal(fs.readFileSync(path.join(f.root, 'schedules.json'), 'utf8'), '{')
+    assert.equal(fs.readFileSync(path.join(f.root, 'state.json'), 'utf8'), '{')
   } finally { await f.close() }
 })
 
@@ -194,4 +195,89 @@ test('shutdown during outbox authorization retains the result without sending or
     await f.runtime.dispose(); release(f.records); await delay(30)
     assert.equal(f.runtime.outbox.list().length, 1); assert.doesNotMatch(f.text(), /private scheduled output/)
   } finally { release?.(f.records); await f.close() }
+})
+
+test('queued schedule mutations recheck sender permission after earlier operations finish', async () => {
+  const f = fixture(); const create = f.service.create.bind(f.service); let release!: () => void
+  const wait = new Promise<void>((resolve) => { release = resolve })
+  f.service.create = async (request) => { const result = await create(request); await wait; return result }
+  try {
+    f.send('/schedule after 1 first'); await until(() => f.creates.length === 1)
+    f.send('/schedule after 2 second'); f.runtime.updateAllowlist({ remove: 'sender' }); release()
+    await until(() => f.text().includes('权限'))
+    assert.equal(f.creates.length, 1)
+  } finally { release(); await f.close() }
+})
+
+test('native activation cannot continue after disposal while catalog lookup is pending', async () => {
+  const f = fixture(); let release!: (records: typeof f.records) => void
+  try {
+    f.send('/schedule after 1 检查部署'); await until(() => f.creates.length === 1); const saved = f.binding()
+    let catalog = false; const wait = new Promise<typeof f.records>((resolve) => { release = resolve })
+    Object.assign(f.service, { catalog() { catalog = true; return wait } })
+    let activated = false; const activation = f.hooks.get('schedule/resolve-agent')!(saved.sessionId, async () => { activated = true; return {} })
+    const refused = assert.rejects(activation)
+    await until(() => catalog); await f.runtime.dispose(); release(f.records)
+    await refused; assert.equal(activated, false)
+  } finally { release?.(f.records); await f.close() }
+})
+
+test('permission revoked while a dedicated session is being attached prevents native creation', async () => {
+  const f = fixture(); const create = f.h.agentsService.create.bind(f.h.agentsService); let release!: () => void
+  const wait = new Promise<void>((resolve) => { release = resolve })
+  f.h.agentsService.create = async (request) => { const result = await create(request); await wait; return result }
+  try {
+    f.send('/schedule after 1 检查部署'); await until(() => f.h.created.length === 1)
+    f.runtime.updateAllowlist({ remove: 'sender' }); release()
+    await until(() => f.text().includes('权限')); assert.equal(f.creates.length, 0)
+  } finally { release(); await f.close() }
+})
+
+test('a native activation rejects permissions revoked while its catalog lookup was waiting', async () => {
+  const f = fixture(); let release!: (records: typeof f.records) => void
+  try {
+    f.send('/schedule after 1 检查部署'); await until(() => f.creates.length === 1); const saved = f.binding()
+    let entered = false; const wait = new Promise<typeof f.records>((resolve) => { release = resolve })
+    Object.assign(f.service, { catalog() { entered = true; return wait } })
+    let activated = false; const activation = f.hooks.get('schedule/resolve-agent')!(saved.sessionId, async () => { activated = true; return {} }); const refused = assert.rejects(activation, /权限/)
+    await until(() => entered); f.runtime.updateAllowlist({ remove: 'sender' }); release(f.records)
+    await refused; assert.equal(activated, false)
+  } finally { release?.(f.records); await f.close() }
+})
+
+test('deleting a binding while activation awaits a stale native catalog prevents activation', async () => {
+  const f = fixture(); let release!: (records: typeof f.records) => void
+  try {
+    f.send('/schedule after 1 检查部署'); await until(() => f.creates.length === 1); const saved = f.binding(); const stale = [...f.records]
+    let lookups = 0; const wait = new Promise<typeof f.records>((resolve) => { release = resolve })
+    Object.assign(f.service, { catalog() { return ++lookups === 1 ? wait : f.records } })
+    let activated = false; const activation = f.hooks.get('schedule/resolve-agent')!(saved.sessionId, async () => { activated = true; return {} }); const refused = assert.rejects(activation)
+    await until(() => lookups > 0); f.send(`/schedule delete ${saved.id.slice(0, 8)}`)
+    await until(() => JSON.parse(fs.readFileSync(path.join(f.root, 'schedules.json'), 'utf8')).bindings.length === 0)
+    release(stale); await refused; assert.equal(activated, false)
+  } finally { release?.(f.records); await f.close() }
+})
+
+test('removing the original project during an account lookup prevents native activation', async () => {
+  const f = fixture(); let release!: () => void
+  try {
+    f.runtime.config.projects.app = f.root; f.send('/project app'); await until(() => f.text().includes('已切换'))
+    f.send('/schedule after 1 检查部署'); await until(() => f.creates.length === 1); const saved = f.binding()
+    let entered = false; let checks = 0; const wait = new Promise<void>((resolve) => { release = resolve })
+    f.adapter.accounts.list = async () => { if (++checks === 2) { entered = true; await wait } return [{ accountId: 'acct', expired: false }] }
+    let activated = false; const activation = f.hooks.get('schedule/resolve-agent')!(saved.sessionId, async () => { activated = true; return {} }); const refused = assert.rejects(activation)
+    await until(() => entered); delete f.runtime.config.projects.app; release()
+    await refused; assert.equal(activated, false)
+  } finally { release?.(); await f.close() }
+})
+
+test('an authorized owner can delete a schedule after its original project is removed', async () => {
+  const f = fixture()
+  try {
+    f.runtime.config.projects.app = f.root; f.send('/project app'); await until(() => f.text().includes('已切换'))
+    f.send('/schedule after 1 检查部署'); await until(() => f.creates.length === 1); const saved = f.binding()
+    delete f.runtime.config.projects.app; f.send(`/schedule delete ${saved.id.slice(0, 8)}`)
+    await until(() => f.records.length === 0)
+    assert.equal(JSON.parse(fs.readFileSync(path.join(f.root, 'schedules.json'), 'utf8')).bindings.length, 0)
+  } finally { await f.close() }
 })

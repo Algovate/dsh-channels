@@ -7,10 +7,21 @@ export interface ChannelStatusView {
   media: { image: boolean; file: boolean; voice: boolean; video: boolean }
 }
 
+export interface PairingView {
+  id: string
+  channel: string
+  accountId: string
+  conversationId: string
+  senderId: string
+  at: number
+  text: string
+}
+
 export interface StatusPayload {
   stateRoot: string
   channels: ChannelStatusView[]
   allowlist: string[]
+  pairings: PairingView[]
   inboxPending: number
   outboxPending: number
   journal: Array<{ at: number; kind: string; state: string; text: string }>

@@ -27,6 +27,7 @@ import { loadChannelsDomainSpec } from './store/domain.js'
 import { answerUserQuestion, type AskUserQuestionItem } from './interaction/questions.js'
 import { createLogger } from './log.js'
 import { ChannelsRuntime } from './runtime.js'
+import { createHostPort, type HostContext } from './host.js'
 import { stateRoot } from './store/root.js'
 import type { AdapterModule, ChannelAdapter } from './types.js'
 
@@ -37,12 +38,7 @@ export const inject = ['agents']
 export const Config = CoreConfig
 
 /** Structural slice of the Cordis context this plugin touches. */
-export interface PluginContext {
-  get?: (name: string) => unknown
-  logger?: { info?: (line: string) => void; warn?: (line: string) => void }
-  /** Cordis event bus; absent in a bare test context. */
-  on?: (event: string, listener: (...args: never[]) => unknown, options?: Record<string, unknown>) => () => void
-}
+export interface PluginContext extends HostContext {}
 
 export interface ChannelPlugin {
   runtime: ChannelsRuntime
@@ -51,7 +47,7 @@ export interface ChannelPlugin {
 }
 
 export function managementRejection(ctx: PluginContext, headers: Record<string, string | string[] | undefined>): number | undefined {
-  const connection = ctx.get?.('connection') as { requestRejection?: (request: { headers: typeof headers }) => number | undefined } | undefined
+  const connection = createHostPort(ctx).get<{ requestRejection?: (request: { headers: typeof headers }) => number | undefined }>('connection')
   if (typeof connection?.requestRejection !== 'function') return 503
   try { return connection.requestRejection({ headers }) } catch { return 503 }
 }
@@ -108,6 +104,7 @@ export async function startChannels({ ctx, config }: { ctx: PluginContext; confi
   })
   const adapters: ChannelAdapter[] = []
   const loaded: Array<{ adapter: ChannelAdapter; disposer: () => void }> = []
+  const sink = runtime.ingress()
 
   for (const spec of config.adapters) {
     try {
@@ -124,15 +121,17 @@ export async function startChannels({ ctx, config }: { ctx: PluginContext; confi
       })
       if (runtime.adapters().some((existing) => existing.id === adapter.id)) throw new Error(`duplicate channel id: ${adapter.id}`)
       const disposer = runtime.register(adapter)
-      let off: () => void
+      // A driver with startWithSink owns only its platform loop. Older adapters
+      // keep the explicit onInbound registration until they migrate.
+      let off: (() => void) | undefined
       try {
-        off = adapter.onInbound((message) => runtime.dispatch(message))
+        off = typeof adapter.startWithSink === 'function' ? undefined : adapter.onInbound((message) => runtime.dispatch(message))
       } catch (error) {
         disposer()
         throw error
       }
       loaded.push({ adapter, disposer: () => {
-        off()
+        off?.()
         disposer()
       } })
       adapters.push(adapter)
@@ -144,7 +143,8 @@ export async function startChannels({ ctx, config }: { ctx: PluginContext; confi
   const offSeams = registerInteractionSeams({ ctx, config, runtime, logger })
   for (const { adapter, disposer } of loaded) {
     try {
-      await adapter.start()
+      if (typeof adapter.startWithSink === 'function') await adapter.startWithSink(sink)
+      else await adapter.start()
     } catch (error) {
       disposer()
       try { await adapter.stop() } catch (error) { logger.warn(`failed adapter cleanup: ${String(error)}`) }
@@ -156,6 +156,7 @@ export async function startChannels({ ctx, config }: { ctx: PluginContext; confi
   const stopOutbox = runtime.startOutboxRetry()
   const offStatusRoute = registerStatusRoute({ ctx, config, runtime, root, logger })
   const offAllowlistRoute = registerAllowlistRoute({ ctx, runtime, root, logger })
+  const offPairingRoute = registerPairingRoute({ ctx, runtime, root, logger })
   const offSettingsRoute = registerSettingsRoute({ ctx, runtime, root, logger })
 
   return {
@@ -163,6 +164,7 @@ export async function startChannels({ ctx, config }: { ctx: PluginContext; confi
     adapters,
     async dispose() {
       offSettingsRoute()
+      offPairingRoute()
       offAllowlistRoute()
       offStatusRoute()
       offSeams()
@@ -214,10 +216,11 @@ function registerInteractionSeams({
   runtime: ChannelsRuntime
   logger: { info: (line: string) => void; warn: (line: string) => void }
 }): () => void {
-  if (typeof ctx.on !== 'function') return () => {}
+  const host = createHostPort(ctx)
+  if (!host.hasEventBus()) return () => {}
   const offs: Array<() => void> = []
   offs.push(
-    ctx.on(
+    host.on(
       'user-questions/request',
       ((request: { agent?: unknown; questions?: unknown[]; signal?: AbortSignal }, next: () => Promise<unknown>) => {
         const interaction = runtime.interactionForAgent(request?.agent)
@@ -239,7 +242,7 @@ function registerInteractionSeams({
     ),
   )
   offs.push(
-    ctx.on(
+    host.on(
       'approval/request',
       ((request: { agent?: unknown; toolName?: string; reason?: string; displayReason?: unknown; signal?: AbortSignal }, next: () => Promise<unknown>) => {
         const interaction = runtime.interactionForAgent(request?.agent)
@@ -270,7 +273,8 @@ function registerInteractionSeams({
 }
 
 async function optionalService<T>(ctx: PluginContext, name: string): Promise<T | undefined> {
-  const direct = ctx.get?.(name) as T | undefined
+  const host = createHostPort(ctx)
+  const direct = host.get<T>(name)
   if (direct !== undefined && direct !== null) return direct
   const injectService = (ctx as {
     inject?: (services: string[], callback: (scope: Record<string, unknown>) => void) => unknown
@@ -385,7 +389,7 @@ function registerWriteRoute({ ctx, path: routePath, logger, accept }: {
   logger: { info: (line: string) => void; warn: (line: string) => void }
   accept: (parsed: Record<string, unknown>, json: ManagementJson) => void
 }): () => void {
-  const server = ctx.get?.('webServer') as { register?: (route: unknown) => () => void; getOrigin?: () => string } | undefined
+  const server = createHostPort(ctx).get<{ register?: (route: unknown) => () => void; getOrigin?: () => string }>('webServer')
   if (typeof server?.register !== 'function') return () => {}
   let origin: string | undefined
   try { origin = server.getOrigin?.() } catch { /* Writes fail closed if the origin is unavailable. */ }
@@ -445,6 +449,24 @@ function registerAllowlistRoute({ ctx, runtime, root, logger }: WriteRouteOption
   } })
 }
 
+function registerPairingRoute({ ctx, runtime, root, logger }: WriteRouteOptions): () => void {
+  return registerWriteRoute({ ctx, path: '/channels/pairing', logger, accept: (parsed, json) => {
+    const id = typeof parsed.id === 'string' ? parsed.id.trim() : ''
+    const action = parsed.action === 'approve' || parsed.action === 'deny' ? parsed.action : undefined
+    if (id === '' || id.length > 64 || action === undefined) {
+      json(400, { ok: false, code: 'invalid', detail: 'id and action=approve|deny are required' })
+      return
+    }
+    const result = runtime.resolvePairing(id, action, (patch) => saveConfigOverlay(root, patch, { warn: (line) => logger.warn(line) }))
+    if (result === undefined) {
+      json(404, { ok: false, code: 'not-found', detail: 'the pairing request expired or the allowlist could not be saved' })
+      return
+    }
+    logger.info(`pairing ${action}d for ${result.senderId}`)
+    json(200, { ok: true })
+  } })
+}
+
 function registerSettingsRoute({ ctx, runtime, root, logger }: WriteRouteOptions): () => void {
   return registerWriteRoute({ ctx, path: '/channels/settings', logger, accept: (parsed, json) => {
     const patch: { senderPerMinute?: number; senderPerDay?: number; autoSendFiles?: boolean; questionsEnabled?: boolean; approvalsEnabled?: boolean } = {}
@@ -490,9 +512,7 @@ function registerStatusRoute({
   root: string
   logger: { info: (line: string) => void; warn: (line: string) => void }
 }): () => void {
-  const webServer = ctx.get?.('webServer') as
-    | { register?: (route: unknown) => () => void }
-    | undefined
+  const webServer = createHostPort(ctx).get<{ register?: (route: unknown) => () => void }>('webServer')
   if (typeof webServer?.register !== 'function') return () => {}
   try {
     const off = webServer.register({
@@ -552,6 +572,15 @@ async function buildStatus({
         },
       }))),
     allowlist: [...config.allowedSenders],
+    pairings: runtime.pendingPairings().map((pairing) => ({
+      id: pairing.id,
+      channel: pairing.channel,
+      accountId: pairing.accountId,
+      conversationId: pairing.conversationId,
+      senderId: pairing.senderId,
+      at: pairing.at,
+      text: pairing.text,
+    })),
     inboxPending: runtime.pendingInputs(),
     outboxPending: runtime.outbox.list().length,
     journal:

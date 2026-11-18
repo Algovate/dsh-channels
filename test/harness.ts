@@ -13,7 +13,7 @@ export interface FakeEvent {
 }
 
 export interface FakeAgent {
-  session: { id: string; snapshotEvents: () => FakeEvent[] }
+  session: { id: string; seq?: number; snapshotEvents: () => FakeEvent[] }
   inbox: { clear: () => void }
   inject: (message: unknown) => void
   followup: (message: unknown) => void
@@ -31,42 +31,97 @@ export interface HarnessOptions {
   pollMs?: number
   /** Called when the fake agent receives a followup — the place to "use a tool". */
   onFollowup?: () => void
+  /** Files the fake turn declares with `present`; a function runs after onFollowup. */
+  deliverables?: Array<{ path: string; description?: string }> | (() => Array<{ path: string; description?: string }>)
+}
+
+type FakeSession = { id?: string }
+type FakeSessionListener = (session: FakeSession, event: FakeEvent) => void
+
+/**
+ * The fake host's event feed.
+ *
+ * Tests already append to `h.events` directly; overriding `push` keeps those
+ * tests honest: the driver sees the same committed event the real host would
+ * publish, instead of polling the array.
+ */
+export class FakeEventLog extends Array<FakeEvent> {
+  readonly listeners = new Set<FakeSessionListener>()
+  currentSessionId = ''
+
+  override push(...items: FakeEvent[]): number {
+    return this.#emit(this.currentSessionId, items)
+  }
+
+  /** Append events attributed to one session (the fake agent knows which turn it is). */
+  pushFor(sessionId: string, ...items: FakeEvent[]): number {
+    this.currentSessionId = sessionId
+    return this.#emit(sessionId, items)
+  }
+
+  #emit(sessionId: string, items: FakeEvent[]): number {
+    const count = super.push(...items)
+    const session = { id: sessionId }
+    for (const item of items) {
+      for (const listener of this.listeners) {
+        try { listener(session, item) } catch { /* A test listener cannot fail the fake host. */ }
+      }
+    }
+    return count
+  }
 }
 
 export function createHarness(options: HarnessOptions = {}) {
-  const events: FakeEvent[] = []
+  const events = new FakeEventLog()
   const created: Array<Record<string, unknown>> = []
   const injected: unknown[] = []
   const followedUp: Array<{ message: unknown }> = []
   const sections: Array<Record<string, unknown>> = []
   const agents = new Map<string, FakeAgent>()
   let turnNumber = 0
+  let snapshotReads = 0
 
-  const makeAgent = (sessionId: string): FakeAgent => ({
-    session: { id: sessionId, snapshotEvents: () => events },
-    inbox: { clear: () => {} },
-    inject: (message) => {
-      injected.push(message)
-      events.push({ seq: events.length + 1, type: 'agent/inbox/spliced', data: {} })
-    },
-    followup: (message) => {
-      followedUp.push({ message })
-      options.onFollowup?.()
-      if (options.silent === true) return
-      // The host settles the turn asynchronously; the driver polls until it sees this.
-      Promise.resolve().then(() => {
-        const turn = ++turnNumber
-        events.push({ seq: events.length + 1, type: 'turn/start', data: { turn } })
-        events.push({ seq: events.length + 1, type: 'user/message', data: message as Record<string, unknown> })
-        events.push({
-          seq: events.length + 1,
-          type: 'assistant/message',
-          data: { turn, message: { content: [{ type: 'text', text: options.reply ?? '好的' }] } },
+  const makeAgent = (sessionId: string): FakeAgent => {
+    if (events.currentSessionId === '') events.currentSessionId = sessionId
+    return {
+      session: {
+        id: sessionId,
+        get seq() { return events.length },
+        snapshotEvents: () => { snapshotReads++; return events },
+      },
+      inbox: { clear: () => {} },
+      inject: (message) => {
+        injected.push(message)
+        events.pushFor(sessionId, { seq: events.length + 1, type: 'agent/inbox/spliced', data: {} })
+      },
+      followup: (message) => {
+        events.currentSessionId = sessionId
+        followedUp.push({ message })
+        options.onFollowup?.()
+        if (options.silent === true) return
+        // The host settles the turn asynchronously on the same event feed.
+        Promise.resolve().then(() => {
+          const turn = ++turnNumber
+          events.pushFor(sessionId, { seq: events.length + 1, type: 'turn/start', data: { turn } })
+          events.pushFor(sessionId, { seq: events.length + 1, type: 'user/message', data: message as Record<string, unknown> })
+          events.pushFor(sessionId, {
+            seq: events.length + 1,
+            type: 'assistant/message',
+            data: { turn, message: { content: [{ type: 'text', text: options.reply ?? '好的' }] } },
+          })
+          const files = typeof options.deliverables === 'function' ? options.deliverables() : options.deliverables
+          if (files !== undefined && files.length > 0) {
+            events.pushFor(sessionId, {
+              seq: events.length + 1,
+              type: 'deliverables/presented',
+              data: { turn, callId: `present-${turn}`, files },
+            })
+          }
+          events.pushFor(sessionId, { seq: events.length + 1, type: 'turn/end', data: { turn, reason: { kind: 'completed' } } })
         })
-        events.push({ seq: events.length + 1, type: 'turn/end', data: { turn, reason: { kind: 'completed' } } })
-      })
-    },
-  })
+      },
+    }
+  }
 
   for (const id of options.existing ?? []) agents.set(id, makeAgent(id))
 
@@ -97,7 +152,15 @@ export function createHarness(options: HarnessOptions = {}) {
     remove: (sessionId: string) => agents.delete(sessionId),
   }
 
-  const ctx = { get: (name: string) => (name === 'agents' ? agentsService : undefined) }
+  const ctx = {
+    get: (name: string) => (name === 'agents' ? agentsService : undefined),
+    on: (event: string, listener: (...args: never[]) => unknown) => {
+      if (event !== 'session/event') return () => {}
+      const wrapped = listener as unknown as FakeSessionListener
+      events.listeners.add(wrapped)
+      return () => { events.listeners.delete(wrapped) }
+    },
+  }
   return {
     ctx,
     events,
@@ -107,6 +170,7 @@ export function createHarness(options: HarnessOptions = {}) {
     sections,
     agents,
     agentsService,
+    snapshotReads: () => snapshotReads,
     createUserMessage: createFakeUserMessage,
     makeRuntime: (config: Record<string, unknown> = {}) =>
       createChannelsRuntime({

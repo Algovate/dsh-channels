@@ -15,6 +15,7 @@ export type GateReason =
   | 'duplicate'
   | 'not-allowed'
   | 'chat-not-allowed'
+  | 'not-addressed'
   | 'rate-minute'
   | 'rate-day'
 

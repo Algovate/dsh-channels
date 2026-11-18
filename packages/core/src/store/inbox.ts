@@ -2,31 +2,29 @@
 import fs from 'node:fs'
 import { randomUUID } from 'node:crypto'
 import type { InboundMessage } from '../types.js'
-import { atomicWriteJson } from './atomic.js'
-import { statePath } from './layout.js'
+import { stateFile, type StateFile } from './state.js'
 import { receiptKey } from './journal.js'
 
 const RECEIPT_WINDOW_MS = 3 * 24 * 60 * 60_000
 export interface InboxEntry { id: string; message: InboundMessage; sessionId: string; workingDirectory?: string; project?: string; clearedAt?: number }
 
 export class Inbox {
-  readonly #file: string
+  readonly #store: StateFile
   readonly #warn: (line: string) => void
   #items: InboxEntry[] = []
   #unreadable = false
 
   constructor(root: string, warn: (line: string) => void) {
-    this.#file = statePath(root, 'inbox')
+    this.#store = stateFile(root, warn)
     this.#warn = warn
     try {
-      const saved: unknown = JSON.parse(fs.readFileSync(this.#file, 'utf8'))
+      const saved: unknown = this.#store.read<unknown>('inbox')
+      if (saved === undefined) return
       if (!Array.isArray(saved) || !saved.every(validEntry)) throw new Error('invalid inbox records')
       this.#items = saved
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
-        this.#unreadable = true
-        warn(`inbox could not be loaded; refusing new turns until repaired: ${String(error)}`)
-      }
+      this.#unreadable = true
+      warn(`inbox could not be loaded; refusing new turns until repaired: ${String(error)}`)
     }
   }
 
@@ -54,7 +52,7 @@ export class Inbox {
 
   #write(items: InboxEntry[]): void {
     items = items.filter((entry) => entry.clearedAt === undefined || entry.clearedAt > Date.now() - RECEIPT_WINDOW_MS)
-    if (this.#unreadable || !atomicWriteJson(this.#file, items, { warn: this.#warn })) throw retryError('inbound message could not be persisted; provider delivery must be retried')
+    if (this.#unreadable || !this.#store.write('inbox', items)) throw retryError('inbound message could not be persisted; provider delivery must be retried')
     this.#items = items
   }
 }

@@ -10,6 +10,7 @@ import { scanProducedFiles } from '../packages/core/src/produced.js'
 import { createHarness, inbound } from './harness.js'
 import { createFakeAdapter, createChannelsRuntime, createFakeUserMessage } from './runtime-helper.js'
 import { resolveConfig } from '../packages/core/src/config.js'
+import { stateFile } from '../packages/core/src/store/state.js'
 
 const temp = () => fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-reliability-'))
 const until = async (check: () => boolean) => { for (let i = 0; i < 100; i++) { if (check()) return; await delay(5) } assert.ok(check()) }
@@ -27,15 +28,10 @@ test('outbox reports add/drop persistence failures and preserves the prior entry
   const root = temp()
   const box = new Outbox({ stateRoot: root })
   const first = box.add(inbound(), { kind: 'reply', text: 'first' }, {})!
-  fs.renameSync(path.join(root, 'outbox.json'), path.join(root, 'saved.json'))
-  fs.mkdirSync(path.join(root, 'outbox.json'))
+  stateFile(root).failNextWrite('outbox')
   assert.equal(box.add(inbound(), { kind: 'reply', text: 'cannot save' }, {}), undefined)
-  fs.rmSync(path.join(root, 'outbox.json'), { recursive: true })
-  fs.renameSync(path.join(root, 'saved.json'), path.join(root, 'outbox.json'))
-  // A temporary file at the writer's path makes a rename impossible while reads remain valid.
-  const original = fs.renameSync
-  fs.renameSync = (() => { throw new Error('rename denied') }) as typeof fs.renameSync
-  try { assert.equal(box.drop(first.id), false) } finally { fs.renameSync = original }
+  stateFile(root).failNextWrite('outbox')
+  assert.equal(box.drop(first.id), false)
   assert.equal(box.list()[0]?.id, first.id)
   fs.rmSync(root, { recursive: true })
 })
@@ -61,13 +57,13 @@ test('produced-file selection considers the newest candidate beyond the old pref
 
 test('skipped output files prevent an all-sent task state and notify the chat', async () => {
   const root = temp()
-  const h = createHarness()
-  const runtime = createChannelsRuntime({ stateRoot: root, workingDirectory: root, ctx: h.ctx, config: { maxProducedFiles: 1, maxProducedBytes: 8 }, createUserMessage: (fields) => {
-    const content = fields['content'] as Array<{ text: string }>
-    const dir = /directory: (.+)\.$/m.exec(content[0]?.text ?? '')?.[1]
-    if (dir) { fs.writeFileSync(path.join(dir, 'small'), 'x'); fs.writeFileSync(path.join(dir, 'large'), 'larger than cap') }
-    return createFakeUserMessage(fields)
-  } })
+  const small = path.join(root, 'small')
+  const large = path.join(root, 'large')
+  const h = createHarness({
+    onFollowup: () => { fs.writeFileSync(small, 'x'); fs.writeFileSync(large, 'larger than cap') },
+    deliverables: () => [{ path: small }, { path: large }],
+  })
+  const runtime = createChannelsRuntime({ stateRoot: root, workingDirectory: root, ctx: h.ctx, config: { maxProducedFiles: 1, maxProducedBytes: 8 } })
   const adapter = createFakeAdapter(); runtime.register(adapter)
   try {
     runtime.dispatch(inbound())
@@ -82,14 +78,14 @@ test('skipped output files prevent an all-sent task state and notify the chat', 
 test('a blocked task explains the storage failure once while preserving accepted work', async () => {
   const root = temp(); const h = createHarness(); const runtime = createChannelsRuntime({ stateRoot: root, ctx: h.ctx })
   const adapter = createFakeAdapter(); runtime.register(adapter)
-  fs.mkdirSync(path.join(root, 'tasks.json'))
+  stateFile(root).failNextWrite('tasks')
   try {
     runtime.dispatch(inbound())
     await until(() => adapter.sent.some((e) => /任务记录.*无法保存/.test(e.outgoing.text ?? '')))
+    stateFile(root).failNextWrite('tasks')
     await runtime.resumePending(); await delay(20)
     assert.equal(h.followedUp.length, 0); assert.equal(runtime.pendingInputs(), 1)
     assert.equal(adapter.sent.filter((e) => /任务记录.*无法保存/.test(e.outgoing.text ?? '')).length, 1)
-    fs.rmSync(path.join(root, 'tasks.json'), { recursive: true })
     await runtime.resumePending()
     await until(() => h.followedUp.length === 1)
     assert.equal(runtime.pendingInputs(), 0)

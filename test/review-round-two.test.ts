@@ -12,6 +12,7 @@ import { FileCounterStore } from '../packages/core/src/store/counters.js'
 import { resolveConfig } from '../packages/core/src/config.js'
 import { parseCommand } from '../packages/core/src/commands.js'
 import { splitIntoBubbles } from '../packages/core/src/outbound.js'
+import { stateFile } from '../packages/core/src/store/state.js'
 import { extractDocumentText } from '../packages/core/src/documents.js'
 import { createFakeAdapter } from './runtime-helper.js'
 import { createHarness, inbound } from './harness.js'
@@ -56,12 +57,10 @@ test('ASR buffers JSON lines and split UTF-8 before starting the next request', 
 
 test('/new reports a failed durable write and keeps the old session across restart', async () => {
   const root = temp()
-  fs.mkdirSync(path.join(root, 'counters.json'))
-  // The session identity store must also refuse its write here.
   const h = createHarness()
   const open = () => new ChannelsRuntime({ ctx: h.ctx, config: resolveConfig({ allowedSenders: ['sender'], autoSendFiles: false }), counters: new FileCounterStore({ stateRoot: root }), stateRoot: root, workingDirectory: root, logger, createUserMessage: h.createUserMessage })
   const runtime = open()
-  fs.mkdirSync(path.join(root, 'lines.json'))
+  stateFile(root).failNextWrite('lines')
   const adapter = createFakeAdapter()
   runtime.register(adapter)
   runtime.dispatch(inbound({ text: '/new' }))
@@ -72,7 +71,6 @@ test('/new reports a failed durable write and keeps the old session across resta
   await tick()
   const before = [...h.agents.keys()][0]
   await runtime.dispose()
-  fs.rmdirSync(path.join(root, 'lines.json'))
   const reopened = open()
   reopened.register(createFakeAdapter())
   reopened.dispatch(inbound())
@@ -95,7 +93,7 @@ test('document cancellation and oversized binary files are rejected before parsi
   fs.rmSync(root, { recursive: true })
 })
 
-test('turn timeout cancels only its active host turn and withdraws approvals even if desktop never settles', async () => {
+test('turn timeout detaches without cancelling the host turn and expires its approval at the deadline', async () => {
   const { InteractionQueue } = await import('../packages/core/src/interaction/queue.js')
   const { answerApproval } = await import('../packages/core/src/interaction/approval.js')
   const events: Array<Record<string, unknown>> = []
@@ -116,17 +114,17 @@ test('turn timeout cancels only its active host turn and withdraws approvals eve
   try {
     await tick()
     assert.equal(inputId, 'channel-input')
-    const lookup = (driver as unknown as { interactionForAgent?: (agent: unknown) => { target: ReturnType<typeof inbound>; signal: AbortSignal } | undefined }).interactionForAgent
+    const lookup = (driver as unknown as { interactionForAgent?: (agent: unknown) => { target: ReturnType<typeof inbound>; signal: AbortSignal; deadlineAt: number } | undefined }).interactionForAgent
     assert.ok(lookup, 'interactions must share the owning turn lifetime')
     const interaction = lookup.call(driver, agent)!
-    const approval = answerApproval({ queue, target: interaction.target, request: { signal: interaction.signal }, next: () => new Promise(() => {}) })
+    const approval = answerApproval({ queue, target: interaction.target, request: { signal: interaction.signal, deadlineAt: interaction.deadlineAt }, next: () => new Promise(() => {}) })
     await tick()
     const code = sent.join('\n').match(/[a-f0-9]{6}/)![0]
-    assert.equal((await running).failed, true)
+    assert.equal((await running).pending, true)
     assert.equal(await Promise.race([approval, tick(50).then(() => 'hung')]), 'unavailable')
     assert.equal(queue.pendingCount(), 0)
     assert.notEqual(queue.claim(inbound(), `${code} 1`).status, 'answered')
-    assert.equal(canceled, 1)
+    assert.equal(canceled, 0, 'a wait timeout must not cancel a submitted turn')
   } finally { queue.dispose(); await driver.dispose(); await running }
 })
 

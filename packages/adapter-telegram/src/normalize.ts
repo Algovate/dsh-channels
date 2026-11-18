@@ -53,16 +53,26 @@ export interface TelegramMessage {
   edit_date?: number
 }
 
+export interface TelegramCallbackQuery {
+  id?: string
+  data?: string
+  from?: TelegramUser
+  message?: TelegramMessage
+}
+
 export interface TelegramUpdate {
   update_id?: number
   message?: TelegramMessage
   edited_message?: TelegramMessage
   channel_post?: TelegramMessage
+  callback_query?: TelegramCallbackQuery
 }
 
 export interface NormalizedInbound extends InboundMessage {
   /** The attachment descriptors this message carries, if any. */
   mediaItems?: RawMedia[]
+  /** Present when this input came from an inline button. */
+  callbackQueryId?: string
 }
 
 /** The user's display name, for a row that has no id to show. */
@@ -133,6 +143,26 @@ export function mediaOf(message: TelegramMessage): RawMedia[] {
  * broadcast, and a bot's own message must never loop back into a turn.
  */
 export function normalizeInbound(update: TelegramUpdate, accountId: string, now = Date.now()): NormalizedInbound | null {
+  const query = update?.callback_query
+  if (query !== undefined) {
+    const data = typeof query.data === 'string' ? query.data.trim() : ''
+    const chat = query.message?.chat
+    const chatId = chat?.id
+    const senderId = query.from?.id
+    if (data === '' || typeof chatId !== 'number' || typeof senderId !== 'number' || query.from?.is_bot === true) return null
+    const group = chat?.type === 'group' || chat?.type === 'supergroup'
+    return {
+      channel: CHANNEL_ID,
+      accountId,
+      conversationId: String(chatId),
+      senderId: String(senderId),
+      text: data,
+      media: [],
+      group,
+      at: now,
+      ...(typeof query.id === 'string' && query.id !== '' ? { platformMessageId: `callback:${query.id}`, callbackQueryId: query.id } : {}),
+    }
+  }
   const message = update?.message
   if (message === undefined || message === null) return null
   if (message.edit_date !== undefined) return null

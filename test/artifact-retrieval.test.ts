@@ -7,6 +7,7 @@ import { setTimeout as delay } from 'node:timers/promises'
 import { parseCommand, TASK_CONTROLS } from '../packages/core/src/commands.js'
 import { createChannelsRuntime, createFakeAdapter, createFakeUserMessage } from './runtime-helper.js'
 import { createHarness, inbound } from './harness.js'
+import { stateFile } from '../packages/core/src/store/state.js'
 
 async function until(check: () => boolean) {
   for (let i = 0; i < 100; i++) { if (check()) return; await delay(5) }
@@ -141,13 +142,10 @@ test('a legacy task without an artifact index never scans arbitrary workspace fi
 
 test('new task artifacts are persisted before delivery and can be recovered after restart', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'channel-artifact-capture-'))
-  const h = createHarness()
-  const open = () => createChannelsRuntime({ stateRoot: root, workingDirectory: root, ctx: h.ctx, config: { senderPerMinute: 1 }, createUserMessage(fields) {
-    const blocks = fields['content'] as Array<{ text: string }>
-    const directory = /directory: (.+)\.$/m.exec(blocks[0]?.text ?? '')?.[1]
-    if (directory) fs.writeFileSync(path.join(directory, 'new.png'), 'png')
-    return createFakeUserMessage(fields)
-  } })
+  const source = path.join(root, 'new.png')
+  fs.writeFileSync(source, 'png')
+  const h = createHarness({ deliverables: () => [{ path: source }] })
+  const open = () => createChannelsRuntime({ stateRoot: root, workingDirectory: root, ctx: h.ctx, config: { senderPerMinute: 1 } })
   const first = open(); first.register(createFakeAdapter())
   try {
     first.dispatch(inbound({ text: 'create image' }))
@@ -243,10 +241,9 @@ test('bounded multi-chunk copies retain file bytes and clean up after a failed u
 test('an artifact-index write failure is disclosed while the completed result is still delivered', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'channel-artifact-failure-'))
   const h = createHarness({ onFollowup() {
-    fs.renameSync(path.join(root, 'tasks.json'), path.join(root, 'tasks.saved.json'))
-    fs.mkdirSync(path.join(root, 'tasks.json'))
+    stateFile(root).failNextWrite('tasks')
   } })
-  const runtime = createChannelsRuntime({ stateRoot: root, workingDirectory: root, ctx: h.ctx, createUserMessage(fields) {
+  const runtime = createChannelsRuntime({ stateRoot: root, workingDirectory: root, ctx: h.ctx, config: { legacyOutputScan: true }, createUserMessage(fields) {
     const blocks = fields['content'] as Array<{ text: string }>
     const directory = /directory: (.+)\.$/m.exec(blocks[0]?.text ?? '')?.[1]
     if (directory) fs.writeFileSync(path.join(directory, 'image.png'), 'png')

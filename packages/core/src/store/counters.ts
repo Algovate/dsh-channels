@@ -14,10 +14,7 @@
  *
  * @module @derekluo/dsh-channels/store/counters
  */
-import { statePath } from './layout.js'
-import fs from 'node:fs'
-
-import { atomicWriteJson } from './atomic.js'
+import { stateFile, type StateFile } from './state.js'
 
 export interface CounterStore {
   /** Read the count for a window key; 0 when absent. */
@@ -41,18 +38,19 @@ function countAt(record: CounterRecord | undefined, windowStart: number | undefi
 
 /** A compact counter file next to the rest of the plugin state. */
 export class FileCounterStore implements CounterStore {
-  readonly #file: string
+  readonly #store: StateFile
   readonly #warn: (line: string) => void
   readonly #values = new Map<string, CounterRecord>()
   #dirty = false
 
   constructor({ stateRoot, warn = () => {} }: { stateRoot: string; warn?: (line: string) => void }) {
-    this.#file = statePath(stateRoot, 'counters')
+    this.#store = stateFile(stateRoot, warn)
     this.#warn = warn
   }
   async load(): Promise<void> {
     try {
-      const parsed: unknown = JSON.parse(fs.readFileSync(this.#file, 'utf8'))
+      const parsed: unknown = this.#store.read<unknown>('counters')
+      if (parsed === undefined) return
       if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return
       for (const [key, value] of Object.entries(parsed)) {
         const loc = location(key)
@@ -81,7 +79,7 @@ export class FileCounterStore implements CounterStore {
   }
   flush(): boolean {
     if (!this.#dirty) return true
-    const ok = atomicWriteJson(this.#file, Object.fromEntries([...this.#values].map(([key, value]) => [key, value.windowStart === undefined ? value.count : value])), { mode: 0o600, warn: this.#warn })
+    const ok = this.#store.write('counters', Object.fromEntries([...this.#values].map(([key, value]) => [key, value.windowStart === undefined ? value.count : value])))
     if (ok) this.#dirty = false
     return ok
   }

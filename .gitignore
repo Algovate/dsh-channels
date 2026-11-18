@@ -9,3 +9,6 @@ node_modules/
 # packaging and local caches
 *.tgz
 .npm-cache/
+
+# macOS
+.DS_Store

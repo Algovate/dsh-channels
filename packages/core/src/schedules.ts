@@ -2,6 +2,7 @@
 import fs from 'node:fs'
 import { randomUUID } from 'node:crypto'
 import { ChannelSchedulesStore, type ScheduleBinding } from './store/schedules.js'
+import { createHostPort, type HostContext, type HostPort } from './host.js'
 import { TurnProgress } from './turn-progress.js'
 import { sameTarget } from './ids.js'
 import { chatParagraphs } from './outbound.js'
@@ -22,11 +23,12 @@ interface Persistence {
   }>
 }
 interface Options {
-  ctx: { get?(name: string): unknown; on?(event: string, listener: (...args: never[]) => unknown, options?: Record<string, unknown>): () => void }
+  ctx: HostContext
   stateRoot: string
   logger: { warn(line: string): void }
   route(message: InboundMessage): { workingDirectory: string; project: string }
   attach(message: InboundMessage, sessionId: string, workingDirectory: string): Promise<void>
+  canManage(message: InboundMessage): Promise<boolean>
   authorized(binding: ScheduleBinding): Promise<boolean>
   send(message: InboundMessage, text: string, deliveryId?: string): Promise<readonly SendResult[]>
   queued(deliveryId: string): boolean
@@ -34,6 +36,7 @@ interface Options {
 const PREFIX = 'chan-schedule-'
 export class ChannelSchedules {
   readonly #options: Options
+  readonly #host: HostPort
   readonly #store: ChannelSchedulesStore
   readonly #stop = new AbortController()
   readonly #offs: Array<() => void> = []
@@ -42,19 +45,23 @@ export class ChannelSchedules {
   #syncing: Promise<void> | undefined
   constructor(options: Options) {
     this.#options = options
+    this.#host = createHostPort(options.ctx)
     this.#store = new ChannelSchedulesStore(options.stateRoot, options.logger.warn)
     try {
-      const off = options.ctx.on?.('schedule/resolve-agent', ((id: string, next: () => Promise<unknown>) => this.#guard(id, next)) as never, { prepend: true, global: true })
-      if (typeof off === 'function') { this.#offs.push(off); this.#activationRegistered = true }
-      const events = options.ctx.on?.('session/event', ((session: { id?: string }, event: { type?: string }) => {
-        if (session?.id?.startsWith(PREFIX) && event?.type === 'turn/end') void this.sync().catch((error) => options.logger.warn(String(error)))
-      }) as never, { global: true })
-      if (events) this.#offs.push(events)
+      if (this.#host.hasEventBus()) {
+        const off = this.#host.on('schedule/resolve-agent', ((id: string, next: () => Promise<unknown>) => this.#guard(id, next)) as never, { prepend: true, global: true })
+        this.#offs.push(off)
+        this.#activationRegistered = true
+        const events = this.#host.on('session/event', ((session: { id?: string }, event: { type?: string }) => {
+          if (session?.id?.startsWith(PREFIX) && event?.type === 'turn/end') void this.sync().catch((error) => options.logger.warn(String(error)))
+        }) as never, { global: true })
+        this.#offs.push(events)
+      }
     } catch (error) { options.logger.warn(`schedule hooks unavailable: ${String(error)}`) }
   }
   #services(): { native: NativeSchedule; persistence: Persistence } {
-    const native = this.#options.ctx.get?.('schedule') as NativeSchedule | undefined
-    const persistence = this.#options.ctx.get?.('sessionPersistence') as Persistence | undefined
+    const native = this.#host.get<NativeSchedule>('schedule')
+    const persistence = this.#host.get<Persistence>('sessionPersistence')
     if (!this.#activationRegistered || typeof native?.create !== 'function' || typeof native.catalog !== 'function' || typeof native.edit !== 'function' || typeof native.history !== 'function' || typeof persistence?.open !== 'function') throw new Error('宿主未启用兼容的 DSH 计划任务及会话持久化服务，当前不可用。')
     return { native, persistence }
   }
@@ -65,11 +72,19 @@ export class ChannelSchedules {
   }
   async #guard(id: string, next: () => Promise<unknown>): Promise<unknown> {
     if (!id.startsWith(PREFIX)) return next()
+    this.#stop.signal.throwIfAborted()
     const binding = this.#store.read().bindings.find((item) => item.sessionId === id)
     if (!binding || binding.deleting || !binding.scheduleId || !await this.#options.authorized(binding)) throw new Error('通道计划的归属、权限或原项目不可用，禁止激活')
     const task = (await this.#services().native.catalog()).find((item) => item.id === binding.scheduleId)
+    this.#stop.signal.throwIfAborted()
     if (!this.#matches(binding, task)) throw new Error('通道计划的原生目标已改变，禁止激活')
+    if (!await this.#options.authorized(binding)) throw new Error('通道计划权限已改变，禁止激活')
+    this.#stop.signal.throwIfAborted()
+    if (!this.#current(binding)) throw new Error('通道计划绑定已删除或改变，禁止激活')
     return next()
+  }
+  #current(binding: ScheduleBinding): boolean {
+    return this.#store.read().bindings.some((item) => item.id === binding.id && !item.deleting && item.scheduleId === binding.scheduleId)
   }
   #matches(binding: ScheduleBinding, task?: NativeTask): task is NativeTask {
     return task !== undefined && task.target?.kind === 'session' && task.target.sessionId === binding.sessionId
@@ -84,7 +99,10 @@ export class ChannelSchedules {
     if (!allowed) return false
     const task = (await this.#services().native.catalog()).find((item) => item.id === binding.scheduleId)
     this.#stop.signal.throwIfAborted()
-    return this.#matches(binding, task)
+    if (!this.#matches(binding, task)) return false
+    const stillAllowed = await this.#options.authorized(binding)
+    this.#stop.signal.throwIfAborted()
+    return stillAllowed && this.#current(binding)
   }
   #visible(binding: ScheduleBinding, message: InboundMessage): boolean {
     return sameTarget(binding.message, message) && binding.message.senderId === message.senderId
@@ -93,6 +111,12 @@ export class ChannelSchedules {
     return this.#exclusive(async () => {
       const notice = (text: string) => this.#options.send(message, text)
       try {
+        const requireManagement = async () => {
+          this.#stop.signal.throwIfAborted()
+          if (!await this.#options.canManage(message)) throw new Error('当前发送者或账号权限已失效，未执行计划操作')
+          this.#stop.signal.throwIfAborted()
+        }
+        await requireManagement()
         const { native } = this.#services()
         if (name === 'schedule' && /^(after|every)\s/.test(args)) {
           const match = /^(after|every)\s+([1-9]\d{0,5})\s+([\s\S]+)$/.exec(args)
@@ -107,6 +131,9 @@ export class ChannelSchedules {
           }
           state.bindings.push(binding); this.#store.save(state)
           await this.#options.attach(binding.message, binding.sessionId, binding.workingDirectory)
+          await requireManagement()
+          if (!await this.#options.authorized(binding)) throw new Error('原项目或账号权限已失效，未创建原生计划')
+          this.#stop.signal.throwIfAborted()
           const created = await native.create({ title: binding.title, prompt, timing: match[1] === 'after' ? { kind: 'after', after_seconds: Number(match[2]) * 60 } : { kind: 'every', every_seconds: Number(match[2]) * 60 }, target: { kind: 'session', sessionId: binding.sessionId } }, binding.sessionId, AbortSignal.any([this.#stop.signal, AbortSignal.timeout(30000)]))
           if (!this.#matches(binding, created) || typeof created.id !== 'string') throw new Error('原生创建结果尚未确认；请用 /schedules 查看，不要重复创建')
           binding.scheduleId = created.id; this.#store.save(state)
@@ -115,6 +142,7 @@ export class ChannelSchedules {
         }
         await this.#recover(native)
         const state = this.#store.read(); const owned = state.bindings.filter((item) => this.#visible(item, message)); const tasks = await native.catalog()
+        await requireManagement()
         if (name === 'schedules') {
           await notice(owned.length ? chatParagraphs('【本聊天的计划】', ...owned.map((binding) => {
             const task = tasks.find((item) => item.id === binding.scheduleId)

@@ -286,6 +286,7 @@ window.__ModuleLoader__.load({
                   h('span', null, `${t('Outbox', '待重发')}: ${Number(data.outboxPending) || 0}`),
                   h('span', null, `${t('Waiting for an answer', '等待答复')}: ${data.interactions && data.interactions.pending ? t('yes', '有') : t('no', '无')}`),
                 ),
+                h(PendingPairings, { data, reload: load, t }),
                 h(AllowlistEditor, { data, reload: load, t }),
                 h(SettingsEditor, { data, reload: load, t }),
                 (data.journal || []).length > 0
@@ -306,6 +307,65 @@ window.__ModuleLoader__.load({
       }
     }
 
+
+    /**
+     * Pending senders, approved here instead of by copying an id out of a log.
+     */
+    function PendingPairings({ data, reload, t }) {
+      const list = Array.isArray(data.pairings) ? data.pairings : []
+      const [busy, setBusy] = React.useState('')
+      const [error, setError] = React.useState('')
+      if (list.length === 0) return null
+      const act = (id, action) => {
+        setBusy(id)
+        setError('')
+        fetch('/channels/pairing', {
+          method: 'POST',
+          credentials: 'same-origin',
+          headers: { 'content-type': 'application/json', accept: 'application/json' },
+          body: JSON.stringify({ id, action }),
+        })
+          .then(async (response) => {
+            const body = await response.json().catch(() => ({}))
+            if (!response.ok || body.ok !== true) throw new Error(body.detail || `${response.status} ${response.statusText}`)
+            reload()
+          })
+          .catch((cause) => setError(String((cause && cause.message) || cause)))
+          .finally(() => setBusy(''))
+      }
+      const button = (id, action, label, danger) => h('button', {
+        type: 'button',
+        disabled: busy === id,
+        'data-channels-pairing': action,
+        onClick: () => act(id, action),
+        style: {
+          padding: '4px 10px',
+          borderRadius: 8,
+          border: `1px solid ${danger ? 'rgba(201,42,42,0.5)' : 'var(--dsw-alias-divider, rgba(128,128,128,0.3))'}`,
+          background: 'transparent',
+          color: danger ? '#c92a2a' : 'inherit',
+          fontSize: 12,
+          cursor: busy === id ? 'default' : 'pointer',
+          opacity: busy === id ? 0.5 : 1,
+        },
+      }, label)
+      return h(
+        'div',
+        { 'data-channels-pairings': '', style: { display: 'flex', flexDirection: 'column', gap: 8 } },
+        h('div', { style: { fontSize: 12, fontWeight: 600, opacity: 0.85 } }, t('Pending senders', '待批准的发送者')),
+        h('div', { style: { fontSize: 12, opacity: 0.75 } }, t('Approve the people you trust. Everyone else stays refused.', '只批准你信任的人；其余发送者继续被拒绝。')),
+        ...list.map((pairing) => h(
+          'div',
+          { key: pairing.id, style: { display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', fontSize: 12 } },
+          h('span', { style: { fontWeight: 600 } }, `${pairing.channel} · ${pairing.accountId}`),
+          h('span', { style: { opacity: 0.85 } }, pairing.senderId),
+          h('span', { style: { opacity: 0.6, maxWidth: 340, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, pairing.text || t('(attachment)', '（附件）')),
+          button(pairing.id, 'approve', t('Allow', '允许'), false),
+          button(pairing.id, 'deny', t('Deny', '拒绝'), true),
+        )),
+        error !== '' ? h('div', { 'data-channels-pairings-error': '', style: { color: '#c92a2a', fontSize: 12 } }, error) : null,
+      )
+    }
 
     /**
      * The allowlist editor.

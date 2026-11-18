@@ -266,7 +266,7 @@ test('the per-turn output directory cannot be replaced by a link to another dire
       fs.symlinkSync(shared, path.join(workspace, output), 'junction')
     },
   })
-  const runtime = createChannelsRuntime({ ctx: harness.ctx, workingDirectory: workspace })
+  const runtime = createChannelsRuntime({ ctx: harness.ctx, workingDirectory: workspace, config: { legacyOutputScan: true } })
   const adapter = createFakeAdapter()
   runtime.register(adapter)
   runtime.dispatch(inbound())

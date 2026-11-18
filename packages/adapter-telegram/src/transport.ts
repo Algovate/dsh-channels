@@ -15,7 +15,7 @@
 import fs from 'node:fs'
 import path from 'node:path'
 
-import type { SendResult } from '@derekluo/dsh-channels'
+import type { OutgoingAction, SendResult } from '@derekluo/dsh-channels'
 import type { TelegramUpdate } from './normalize.js'
 
 export const DEFAULT_API_BASE = 'https://api.telegram.org'
@@ -127,7 +127,7 @@ export class TelegramTransport {
     const answer = await this.#call<TelegramUpdate[]>('getUpdates', {
       offset: (fromOffset ?? this.#offset) === 0 ? undefined : (fromOffset ?? this.#offset),
       timeout,
-      allowed_updates: ['message'],
+      allowed_updates: ['message', 'callback_query'],
       limit: 50,
     }, timeout * 1000 + REQUEST_TIMEOUT_MS)
     if (answer.ok !== true || !Array.isArray(answer.result)) {
@@ -142,18 +142,26 @@ export class TelegramTransport {
     return updates
   }
 
+  /** Stop the Telegram spinner after a callback button was consumed. */
+  async answerCallbackQuery(id: string): Promise<void> {
+    try { await this.#call('answerCallbackQuery', { callback_query_id: id }) } catch { /* The update is already handled. */ }
+  }
+
   /** A failed durable handoff must be retried before a newer offset confirms it. */
   retryFrom(updateId: number | undefined): void {
     this.#offset = Math.min(this.#offset, typeof updateId === 'number' && Number.isSafeInteger(updateId) ? updateId : 0)
   }
 
-  /** Send one text message. Never throws: the caller decides what a failure means. */
-  async sendText(chatId: string, text: string): Promise<SendResult> {
+  /** Send one text message, optionally with one inline action per row. */
+  async sendText(chatId: string, text: string, actions?: readonly OutgoingAction[]): Promise<SendResult> {
     try {
       const answer = await this.#call<{ message_id?: number }>('sendMessage', {
         chat_id: chatId,
         text,
         disable_web_page_preview: true,
+        ...(actions === undefined || actions.length === 0
+          ? {}
+          : { reply_markup: { inline_keyboard: actions.map((action) => [{ text: action.label.slice(0, 64), callback_data: action.value.slice(0, 64) }]) } }),
       })
       if (answer.ok !== true) {
         const retry = answer.parameters?.retry_after
@@ -168,6 +176,28 @@ export class TelegramTransport {
       return typeof messageId === 'number' ? { ok: true, messageId: String(messageId) } : { ok: true, unconfirmed: true }
     } catch (error) {
       return { ok: false, code: 'send-failed', detail: String((error as Error)?.message ?? error) }
+    }
+  }
+
+  /** Edit one previously sent text message in place. */
+  async editMessageText(chatId: string, messageId: string, text: string, actions?: readonly OutgoingAction[]): Promise<SendResult> {
+    const id = Number(messageId)
+    if (!Number.isSafeInteger(id) || id <= 0) return { ok: false, code: 'invalid-message-id' }
+    try {
+      const answer = await this.#call<{ message_id?: number }>('editMessageText', {
+        chat_id: chatId,
+        message_id: id,
+        text,
+        disable_web_page_preview: true,
+        ...(actions === undefined || actions.length === 0
+          ? {}
+          : { reply_markup: { inline_keyboard: actions.map((action) => [{ text: action.label.slice(0, 64), callback_data: action.value.slice(0, 64) }]) } }),
+      })
+      if (answer.ok !== true) return { ok: false, code: 'edit-failed', detail: answer.description ?? 'no description' }
+      const message = answer.result?.message_id
+      return typeof message === 'number' ? { ok: true, messageId: String(message) } : { ok: true, unconfirmed: true }
+    } catch (error) {
+      return { ok: false, code: 'edit-failed', detail: String((error as Error)?.message ?? error) }
     }
   }
 

@@ -1,10 +1,8 @@
 /** Recent executions per chat; never replay this file as work. */
-import fs from 'node:fs'
 import { parseCommand } from '../commands.js'
 import { sameTarget } from '../ids.js'
 import type { Target } from '../types.js'
-import { atomicWriteJson } from './atomic.js'
-import { statePath } from './layout.js'
+import { stateFile, type StateFile } from './state.js'
 
 const MAX_TASKS = 500
 const MAX_TASKS_PER_CHAT = 10
@@ -28,22 +26,23 @@ export interface TaskRecord {
   artifactsIncomplete?: boolean
 }
 export class Tasks {
-  readonly #file: string
+  readonly #store: StateFile
   readonly #warn: (line: string) => void
   #items: TaskRecord[] = []
   #unreadable = false
   constructor(root: string, warn: (line: string) => void) {
-    this.#file = statePath(root, 'tasks')
+    this.#store = stateFile(root, warn)
     this.#warn = warn
     try {
-      const data: unknown = JSON.parse(fs.readFileSync(this.#file, 'utf8'))
+      const data: unknown = this.#store.read<unknown>('tasks')
+      if (data === undefined) return
       if (!Array.isArray(data) || !data.every(validTask)) throw new Error('invalid task records')
       this.#items = data.filter((task) => !isLegacyQuery(task)).map((task) => ({ ...task,
         execution: task.execution === 'running' || task.execution === 'stopping' ? 'unknown' : task.execution,
         delivery: task.delivery === 'sending' ? 'unknown' : task.delivery,
       }))
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') { this.#unreadable = true; warn(`tasks could not be loaded: ${String(error)}`) }
+      this.#unreadable = true; warn(`tasks could not be loaded: ${String(error)}`)
     }
   }
   latest(target: Target): TaskRecord | undefined {
@@ -70,7 +69,7 @@ export class Tasks {
     return this.#write([...retained, task].slice(-MAX_TASKS))
   }
   #write(items: TaskRecord[]): boolean {
-    if (this.#unreadable || !atomicWriteJson(this.#file, items, { warn: this.#warn })) return false
+    if (this.#unreadable || !this.#store.write('tasks', items)) return false
     this.#items = items
     return true
   }

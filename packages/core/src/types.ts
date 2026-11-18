@@ -54,11 +54,19 @@ export interface OutgoingMedia {
   name?: string
 }
 
+export interface OutgoingAction {
+  label: string
+  /** Text this action sends back when the platform supports native buttons. */
+  value: string
+}
+
 export interface Outgoing {
   text?: string
   /** @deprecated Ignored. Configure maxTextChars and bubbleGapMs on the core. */
   bubbles?: { maxChars: number; gapMs: number }
   media?: OutgoingMedia[]
+  /** Native buttons; adapters without `capabilities.actions` receive text only. */
+  actions?: OutgoingAction[]
   kind: 'reply' | 'notice' | 'question'
 }
 
@@ -80,9 +88,11 @@ export interface Capabilities {
   stickers?: boolean
   /** @deprecated Provide the optional adapter.typing method instead. */
   typing?: boolean
-  /** @deprecated Native buttons are not implemented by core. */
+  /** @deprecated Use `actions` instead. */
   buttons?: boolean
-  /** @deprecated Message editing is not implemented by core. */
+  /** Native inline actions for interaction prompts. */
+  actions?: boolean
+  /** The adapter can edit a previously sent message in place. */
   edit?: boolean
   /** 0 means "no limit the core needs to enforce". */
   maxTextChars: number
@@ -113,6 +123,12 @@ export interface AccountSurface {
   markExpired?(accountId: string, expired: boolean): void
 }
 
+/** The core's durable ingress boundary; a driver offers one message at a time. */
+export interface IngressSink {
+  /** Resolve after the core has accepted (or refused) the message durably. */
+  offer(message: InboundMessage, options?: { priority?: boolean }): Promise<void>
+}
+
 export interface ChannelAdapter {
   readonly id: ChannelId
   readonly label: { zh: string; en: string }
@@ -125,12 +141,16 @@ export interface ChannelAdapter {
     parse(reply: string, view: InteractionView): InteractionReply | null
   }
   start(): Promise<void>
+  /** Preferred driver entry: the core owns durable handoff, ordering and retry. */
+  startWithSink?(sink: IngressSink): Promise<void>
   stop(): Promise<void>
   /** A handler error with code DSH_INBOUND_RETRY means durable handoff failed: do not acknowledge it. */
   onInbound(handler: (message: InboundMessage) => void): () => void
   /** Restore platform-private routing context before replaying a persisted input. */
   restoreInbound?(message: InboundMessage): void
   send(target: Target, outgoing: Outgoing): Promise<SendResult>
+  /** Edit one previously sent message; text only, no media. */
+  edit?(target: Target, messageId: string, outgoing: Outgoing): Promise<SendResult>
   typing?(target: Target): Promise<void>
 }
 

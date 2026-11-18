@@ -96,6 +96,7 @@ test('a refused sender cannot run commands', async () => {
   const decision = runtime.dispatch(inbound({ text: '/status' }))
   assert.equal(decision.allow, false)
   await tick(30)
-  assert.equal(adapter.sent.length, 0)
+  assert.equal(adapter.sent.filter((entry) => entry.outgoing.text?.includes('尚未获准')).length, 1)
+  assert.equal(adapter.sent.some((entry) => entry.outgoing.text?.includes('【可用命令】')), false)
   runtime.dispose()
 })

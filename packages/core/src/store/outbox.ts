@@ -7,11 +7,8 @@
  *
  * @module @derekluo/dsh-channels/store/outbox
  */
-import fs from 'node:fs'
-import { statePath } from './layout.js'
 import { lineKey } from '../ids.js'
-
-import { atomicWriteJson } from './atomic.js'
+import { stateFile, type StateFile } from './state.js'
 
 export interface OutboxEntry {
   id: string
@@ -40,14 +37,14 @@ export function backoffMs(attempts: number): number {
 }
 
 export class Outbox {
-  readonly #file: string
+  readonly #store: StateFile
   readonly #max: number
   readonly #warn: (line: string) => void
   readonly #now: () => number
   #draining = false
 
   constructor({ stateRoot, max = 50, warn = () => {}, now = Date.now }: { stateRoot: string; max?: number; warn?: (line: string) => void; now?: () => number }) {
-    this.#file = statePath(stateRoot, 'outbox')
+    this.#store = stateFile(stateRoot, warn)
     this.#max = max
     this.#warn = warn
     this.#now = now
@@ -55,14 +52,14 @@ export class Outbox {
 
   #read(): OutboxEntry[] | undefined {
     let store: unknown
-    try { store = JSON.parse(fs.readFileSync(this.#file, 'utf8')) }
+    try { store = this.#store.read<unknown>('outbox') }
     catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return []
       this.#warn(`outbox could not be read; refusing mutations: ${String(error)}`)
       return undefined
     }
-    const items = store !== null && typeof store === 'object' && 'items' in store ? store.items : undefined
-    if (store === null || typeof store !== 'object' || !('schemaVersion' in store) || store.schemaVersion !== 1 || !Array.isArray(items) || !items.every(validEntry)) {
+    if (store === undefined) return []
+    const items = store !== null && typeof store === 'object' && 'items' in store ? (store as { items?: unknown }).items : undefined
+    if (store === null || typeof store !== 'object' || !('schemaVersion' in store) || (store as { schemaVersion?: unknown }).schemaVersion !== 1 || !Array.isArray(items) || !items.every(validEntry)) {
       this.#warn('outbox has invalid contents; refusing mutations until repaired')
       return undefined
     }
@@ -70,7 +67,7 @@ export class Outbox {
   }
 
   #write(items: OutboxEntry[]): boolean {
-    return atomicWriteJson(this.#file, { schemaVersion: 1, items } satisfies OutboxFile, { warn: this.#warn })
+    return this.#store.write('outbox', { schemaVersion: 1, items } satisfies OutboxFile)
   }
 
   /** Append a failed send. Refuse new entries once full, preserving replies already accepted. */

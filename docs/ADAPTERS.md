@@ -24,8 +24,9 @@
 - **加载。** 导出 `createAdapter({ ctx, runtime, stateRoot, config })`。`config` 是以本包名索引的配置对象。
 - **标识。** 提供稳定的通道 ID 和账号 ID。账号 ID 参与会话、去重、配额与重发；变更显示名称不应变更账号 ID。平台提供稳定的消息 ID 时，填入 `platformMessageId`，使同一聊天的重投可去重。
 - **入站。** 可先用核心 `canBypassInbound(message)` 判断无附件文本是否为任务控制或当前交互答复，让它绕过耗时媒体队列；此方法只分类，交付前仍须调用 `canReceive` 鉴权。先剔除平台回显、编辑、广播以及不支持或为空的消息，再做预检。保持同一聊天的消息顺序；附件慢时尽量允许其他聊天前进。
-- **出站。** 只接受本通道和本账号的目标。`send()` 返回已接受（带消息 ID）、未确认（平台接受但无 ID）或失败（带原因码）；平台要求等待时填入 `retryAfterMs`，核心持久重试会保留该下限。`typing()` 可选。
-- **交互。** 提问和审批的文本渲染、解析和等待队列由核心提供。旧 `interactions` 字段保留为可选兼容接口，核心不调用它；新适配器无需实现。`Outgoing.bubbles` 及未实现的按钮、编辑等能力标志也已弃用；文本分条使用核心配置，正在输入提示通过可选 `typing()` 方法提供。
+- **出站。** 只接受本通道和本账号的目标。`send()` 返回已接受（带消息 ID）、未确认（平台接受但无 ID）或失败（带原因码）；平台要求等待时填入 `retryAfterMs`，核心持久重试会保留该下限。`typing()` 可选。若平台支持原生按钮，声明 `capabilities.actions: true` 并读取 `Outgoing.actions`（`label`/`value`）；按钮回传时把 `value` 当作该发送者的一条文本输入，进入同一套交互解析。若平台支持编辑，声明 `capabilities.edit: true` 并实现 `edit(target, messageId, outgoing)`；核心会把接收回执编辑成“执行中/仍在处理/已完成/失败”的任务卡。
+- **交互。** 提问和审批的文本渲染、解析和等待队列由核心提供；有 `actions` 时渲染原生按钮，没有时退回编号文本。旧 `interactions` 字段保留为可选兼容接口，核心不调用它；`Outgoing.bubbles` 和未实现的编辑能力标志已弃用。
+- **driver 入口（推荐）。** 实现 `startWithSink(sink)`：完成平台补全后调用 `await sink.offer(message, { priority })`。核心按聊天串行 durable handoff，并在 `DSH_INBOUND_RETRY` 时退避重试；适配器只保留平台游标/批次确认和媒体顺序。`onInbound()` 仍兼容旧适配器，核心优先调用 `startWithSink`。
 - **生命周期。** `start()` 和 `stop()` 应可重复调用；`stop()` 要中止轮询和入站下载并等待退出。`onInbound()` 返回注销函数。
 
 ### 附件预检

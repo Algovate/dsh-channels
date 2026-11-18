@@ -78,7 +78,7 @@ test('partial attachment failures are visible in the model input', async () => {
 
 test('automatic delivery uploads a bounded private snapshot and cleans it after the adapter reads it', async () => {
   const root = temp(); let output = ''; const h = createHarness({ onFollowup: () => { fs.writeFileSync(path.join(output, 'result.txt'), 'original') } })
-  const runtime = createChannelsRuntime({ ctx: h.ctx, stateRoot: root, workingDirectory: root, createUserMessage: (fields) => {
+  const runtime = createChannelsRuntime({ ctx: h.ctx, stateRoot: root, workingDirectory: root, config: { legacyOutputScan: true }, createUserMessage: (fields) => {
     const content = fields.content as Array<{ text: string }>
     const match = /output directory: ([^\n]+)\./.exec(content[0]!.text)
     output = match![1]!

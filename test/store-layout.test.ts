@@ -98,7 +98,7 @@ test('real core writers keep every generated path in the declared inventory', as
     new Outbox({ stateRoot: root }).add({ channel: 'fake', accountId: 'a', conversationId: 'c' }, { kind: 'reply', text: 'hi' }, {})
     createLogger({ stateRoot: root }).info('test')
     assert.equal(saveConfigOverlay(root, { allowedSenders: ['sender'] }), true)
-    assert.deepEqual(fs.readdirSync(root).sort(), ['config.json', 'counters.json', 'inbox.json', 'journal', 'lines.json', 'logs', 'outbox.json'])
+    assert.deepEqual(fs.readdirSync(root).sort(), ['config.json', 'counters.json', 'inbox.json', 'journal', 'lines.json', 'logs', 'outbox.json', 'state.json'])
     assert.deepEqual(stateInventory(root).unlisted, [])
   } finally { fs.rmSync(root, { recursive: true }) }
 })

@@ -5,6 +5,7 @@ import os from 'node:os'
 import test from 'node:test'
 import { ChannelsRuntime } from '../packages/core/src/runtime.js'
 import { createChannelsRuntime, createFakeAdapter, createFakeUserMessage } from './runtime-helper.js'
+import { stateFile } from '../packages/core/src/store/state.js'
 import { createHarness, inbound } from './harness.js'
 
 const tick = (ms = 0) => new Promise((resolve) => setTimeout(resolve, ms))
@@ -134,7 +135,7 @@ test('completed execution with failed delivery remains completed and pending ret
 
 test('task state write failure keeps accepted work queued without executing or charging it', async () => {
   const { h, runtime, root } = setup()
-  fs.mkdirSync(path.join(root, 'tasks.json'))
+  stateFile(root).failNextWrite('tasks')
   try {
     runtime.dispatch(inbound({ text: 'must not disappear' }))
     await tick(30)
@@ -149,9 +150,7 @@ test('clear write failure preserves queue and never reports successful removal',
     runtime.dispatch(inbound({ text: 'running' }))
     await until(() => h.followedUp.length === 1)
     runtime.dispatch(inbound({ text: 'keep this' }))
-    const file = path.join(root, 'inbox.json')
-    fs.renameSync(file, `${file}.saved`)
-    fs.mkdirSync(file)
+    stateFile(root).failNextWrite('inbox')
     runtime.dispatch(inbound({ text: '/clear' }))
     await until(() => /未能清除排队消息/.test(text()))
     assert.equal(runtime.pendingInputs(), 1)
@@ -262,17 +261,42 @@ test('cleared work never executes or reappears on provider redelivery', async ()
   } finally { await runtime.dispose() }
 })
 
-test('timeout without host termination evidence is unknown rather than execution failure', async () => {
+test('a wait timeout keeps a running task visible instead of reporting a failure', async () => {
   const h = createHarness({ silent: true })
   const runtime = h.makeRuntime({ maxTurnWaitMs: 20, senderPerMinute: 0 })
   const adapter = createFakeAdapter()
   runtime.register(adapter)
   try {
     runtime.dispatch(inbound())
-    await tick(70)
+    await until(() => adapter.sent.some((item) => item.outgoing.text?.includes('任务仍在后台处理')))
     runtime.dispatch(inbound({ text: '/status' }))
-    await until(() => adapter.sent.some((item) => item.outgoing.text?.includes('执行状态：未知')))
+    await until(() => adapter.sent.some((item) => /当前任务：你好/.test(item.outgoing.text ?? '') && /执行中/.test(item.outgoing.text ?? '')))
     assert.equal(h.followedUp.length, 1)
+  } finally { await runtime.dispose() }
+})
+
+test('a timed-out turn keeps running and delivers its late result', async () => {
+  const h = createHarness({ silent: true })
+  const runtime = h.makeRuntime({ maxTurnWaitMs: 20, senderPerMinute: 0 })
+  const adapter = createFakeAdapter()
+  runtime.register(adapter)
+  try {
+    runtime.dispatch(inbound({ text: 'slow task' }))
+    await until(() => h.followedUp.length === 1)
+    const agent = [...h.agents.values()][0]!
+    let cancels = 0
+    Object.assign(agent, { cancel() { cancels++ } })
+    await until(() => adapter.sent.some((item) => item.outgoing.text?.includes('任务仍在后台处理')))
+    const turn = 1
+    const base = h.events.length
+    h.events.push(
+      { seq: base + 1, type: 'turn/start', data: { turn } },
+      { seq: base + 2, type: 'user/message', data: h.followedUp[0]!.message as Record<string, unknown> },
+      { seq: base + 3, type: 'assistant/message', data: { turn, message: { content: [{ type: 'text', text: 'late answer' }] } } },
+      { seq: base + 4, type: 'turn/end', data: { turn, reason: { kind: 'completed' } } },
+    )
+    await until(() => adapter.sent.some((item) => item.outgoing.kind === 'reply' && item.outgoing.text === 'late answer'))
+    assert.equal(cancels, 0, 'a wait timeout must not cancel the host turn')
   } finally { await runtime.dispose() }
 })
 

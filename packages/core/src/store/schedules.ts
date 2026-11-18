@@ -1,7 +1,5 @@
 /** Native execution stays in DSH; this file owns only channel attribution and result handoff. */
-import fs from 'node:fs'
-import { atomicWriteJson } from './atomic.js'
-import { statePath } from './layout.js'
+import { stateFile, type StateFile } from './state.js'
 import type { InboundMessage } from '../types.js'
 import type { TurnProgressSnapshot } from '../turn-progress.js'
 
@@ -37,18 +35,19 @@ function validState(value: unknown): value is ScheduleState {
     && new Set(value.pending.map((item) => item.id)).size === value.pending.length
 }
 export class ChannelSchedulesStore {
-  readonly #file: string
+  readonly #store: StateFile
   readonly #warn: (line: string) => void
   #state: ScheduleState = { version: 1, bindings: [], pending: [] }
   #unreadable = false
   constructor(root: string, warn: (line: string) => void) {
-    this.#file = statePath(root, 'schedules'); this.#warn = warn
+    this.#store = stateFile(root, warn); this.#warn = warn
     try {
-      const saved: unknown = JSON.parse(fs.readFileSync(this.#file, 'utf8'))
+      const saved: unknown = this.#store.read<unknown>('schedules')
+      if (saved === undefined) return
       if (!validState(saved)) throw new Error('invalid schedule state')
       this.#state = saved
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') { this.#unreadable = true; warn('channel schedule state is unreadable; owned schedule activation is blocked') }
+      this.#unreadable = true; warn('channel schedule state is unreadable; owned schedule activation is blocked')
     }
   }
   read(): ScheduleState {
@@ -56,7 +55,7 @@ export class ChannelSchedulesStore {
     return structuredClone(this.#state)
   }
   save(state: ScheduleState): void {
-    if (this.#unreadable || !validState(state) || !atomicWriteJson(this.#file, state, { warn: this.#warn })) throw new Error('计划状态未能保存，请在 DSH 检查 schedules.json')
+    if (this.#unreadable || !validState(state) || !this.#store.write('schedules', state)) throw new Error('计划状态未能保存，请在 DSH 检查 state.json')
     this.#state = structuredClone(state)
   }
 }

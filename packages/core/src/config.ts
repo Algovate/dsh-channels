@@ -12,6 +12,9 @@ import z from '@deepseek-ai/schemastery'
 const DEFAULTS: ChannelsConfig = {
   enabled: true,
   allowedSenders: [],
+  owners: [],
+  groupTrigger: 'all',
+  groupPrefix: '/ask',
   allowlistPerAccount: {},
   allowedChats: [],
   adapters: [],
@@ -26,6 +29,7 @@ const DEFAULTS: ChannelsConfig = {
   approvalsEnabled: true,
   interactionTimeoutMs: 600_000,
   autoSendFiles: true,
+  legacyOutputScan: false,
   maxProducedFiles: 3,
   maxProducedBytes: 20 * 1024 * 1024,
   workingDirectory: '',
@@ -37,20 +41,24 @@ export const Config = z.object({
   projects: z.dict(z.string()).default(DEFAULTS.projects).description('Project aliases mapped to absolute working directories. The name default is reserved.'),
   enabled: z.boolean().default(DEFAULTS.enabled).description('Start the configured channel adapters when the plugin loads.'),
   allowedSenders: z.array(z.string()).default(DEFAULTS.allowedSenders).description('Sender ids allowed to drive the agent; empty denies everyone.'),
+  owners: z.array(z.string()).default(DEFAULTS.owners).description('Senders allowed to switch projects or manage schedules. Empty means every allowed sender is an owner.'),
+  groupTrigger: z.union([z.const('all'), z.const('prefix')]).default(DEFAULTS.groupTrigger).description('Group chats: answer every allowed message, or only messages starting with groupPrefix.'),
+  groupPrefix: z.string().default(DEFAULTS.groupPrefix).description('Prefix required in group chats when groupTrigger is prefix; stripped before the turn.'),
   allowlistPerAccount: z.dict(z.array(z.string())).default(DEFAULTS.allowlistPerAccount).description('Per-account override of allowedSenders (same semantics: empty denies).'),
   allowedChats: z.array(z.string()).default(DEFAULTS.allowedChats).description('Optional conversation allowlist; empty allows any conversation of an allowed sender.'),
   adapters: z.array(z.string()).default(DEFAULTS.adapters).description('Adapter package names to load, in order.'),
   adapterConfig: z.dict(z.any()).default(DEFAULTS.adapterConfig).description('Per-adapter configuration, keyed by package name.'),
   maxTextChars: z.number().default(DEFAULTS.maxTextChars).description('Characters per outbound bubble on channels that do not impose their own limit.'),
   bubbleGapMs: z.number().default(DEFAULTS.bubbleGapMs).description('Pause between bubbles of one reply, so a split reply reads as one answer.'),
-  maxTurnWaitMs: z.number().default(DEFAULTS.maxTurnWaitMs).description('How long one turn may run before the reply is reported as timed out.'),
-  turnPollMs: z.number().default(DEFAULTS.turnPollMs).description('Reply polling interval.'),
+  maxTurnWaitMs: z.number().default(DEFAULTS.maxTurnWaitMs).description('How long to wait for a turn before detaching; the host turn keeps running and its late result is still delivered.'),
+  turnPollMs: z.number().default(DEFAULTS.turnPollMs).description('Fallback reply polling interval when the host has no session event feed.'),
   senderPerMinute: z.number().default(DEFAULTS.senderPerMinute).description('Per sender, per minute. 0 disables the gate.'),
   senderPerDay: z.number().default(DEFAULTS.senderPerDay).description('Per sender, per day. 0 disables the gate.'),
   questionsEnabled: z.boolean().default(DEFAULTS.questionsEnabled).description('Let the agent ask its questions in the chat and take the answer back.'),
   approvalsEnabled: z.boolean().default(DEFAULTS.approvalsEnabled).description('Let the chat approve or reject tool calls (allowed once only).'),
   interactionTimeoutMs: z.number().default(DEFAULTS.interactionTimeoutMs).description('How long one question or approval waits for a chat reply before falling back to the desktop.'),
-  autoSendFiles: z.boolean().default(DEFAULTS.autoSendFiles).description('Send files the agent wrote in its working directory during a turn as chat attachments.'),
+  autoSendFiles: z.boolean().default(DEFAULTS.autoSendFiles).description('Send files the agent declared with present during a turn as chat attachments.'),
+  legacyOutputScan: z.boolean().default(DEFAULTS.legacyOutputScan).description('Legacy fallback: instruct the model to copy files into a per-turn output directory and scan it after the turn.'),
   maxProducedFiles: z.number().default(DEFAULTS.maxProducedFiles).description('How many produced files one turn may send.'),
   maxProducedBytes: z.number().default(DEFAULTS.maxProducedBytes).description('Largest produced file that is sent (bytes).'),
   workingDirectory: z.string().default(DEFAULTS.workingDirectory).description('Where channel sessions run and their output directories are created. Empty means the plugin state root workspace.'),
@@ -59,6 +67,9 @@ export const Config = z.object({
 export interface ChannelsConfig {
   enabled: boolean
   allowedSenders: string[]
+  owners: string[]
+  groupTrigger: 'all' | 'prefix'
+  groupPrefix: string
   allowlistPerAccount: Record<string, string[]>
   allowedChats: string[]
   adapters: string[]
@@ -73,6 +84,7 @@ export interface ChannelsConfig {
   approvalsEnabled: boolean
   interactionTimeoutMs: number
   autoSendFiles: boolean
+  legacyOutputScan: boolean
   maxProducedFiles: number
   maxProducedBytes: number
   workingDirectory: string
@@ -86,6 +98,9 @@ export function resolveConfig(raw: Partial<ChannelsConfig> | undefined): Channel
     projects: Object.fromEntries(Object.entries(record(input.projects)).filter(([key, value]) => key !== 'default' && /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,39}$/.test(key) && typeof value === 'string' && value.startsWith('/')).map(([key, value]) => [key, (value as string).trim()])),
     enabled: typeof input.enabled === 'boolean' ? input.enabled : DEFAULTS.enabled,
     allowedSenders: Array.isArray(input.allowedSenders) ? input.allowedSenders.map(String) : [...DEFAULTS.allowedSenders],
+    owners: Array.isArray(input.owners) ? input.owners.map(String) : [...DEFAULTS.owners],
+    groupTrigger: input.groupTrigger === 'prefix' ? 'prefix' : 'all',
+    groupPrefix: typeof input.groupPrefix === 'string' && input.groupPrefix.trim() !== '' ? input.groupPrefix.trim() : DEFAULTS.groupPrefix,
     allowlistPerAccount: Object.fromEntries(Object.entries(record(input.allowlistPerAccount)).filter(([, value]) => Array.isArray(value)).map(([key, value]) => [key, (value as unknown[]).map(String)])),
     allowedChats: Array.isArray(input.allowedChats) ? input.allowedChats.map(String) : [...DEFAULTS.allowedChats],
     adapters: Array.isArray(input.adapters) ? input.adapters.map(String) : [...DEFAULTS.adapters],
@@ -100,6 +115,7 @@ export function resolveConfig(raw: Partial<ChannelsConfig> | undefined): Channel
     approvalsEnabled: typeof input.approvalsEnabled === 'boolean' ? input.approvalsEnabled : DEFAULTS.approvalsEnabled,
     interactionTimeoutMs: bounded(input.interactionTimeoutMs, DEFAULTS.interactionTimeoutMs, 1, 2147483647),
     autoSendFiles: typeof input.autoSendFiles === 'boolean' ? input.autoSendFiles : DEFAULTS.autoSendFiles,
+    legacyOutputScan: typeof input.legacyOutputScan === 'boolean' ? input.legacyOutputScan : DEFAULTS.legacyOutputScan,
     maxProducedFiles: bounded(input.maxProducedFiles, DEFAULTS.maxProducedFiles, 0, 10000),
     maxProducedBytes: bounded(input.maxProducedBytes, DEFAULTS.maxProducedBytes, 0, 9007199254740991),
     workingDirectory: typeof input.workingDirectory === 'string' ? input.workingDirectory.trim() : DEFAULTS.workingDirectory,

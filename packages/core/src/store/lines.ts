@@ -1,7 +1,5 @@
 /** Atomic routing identity; numeric entries from older releases remain readable. */
-import fs from 'node:fs'
-import { atomicWriteJson } from './atomic.js'
-import { statePath } from './layout.js'
+import { stateFile, type StateFile } from './state.js'
 
 export interface SessionSelection { current: number; max: number }
 export interface ChatRouting { project: string; sessions: Record<string, SessionSelection> }
@@ -14,19 +12,20 @@ function validRouting(value: unknown): value is ChatRouting {
 }
 
 export class SessionLines {
-  readonly #file: string
+  readonly #store: StateFile
   readonly #warn: (line: string) => void
   #values: Record<string, number | ChatRouting> = {}
   #unreadable = false
   constructor(root: string, warn: (line: string) => void) {
-    this.#file = statePath(root, 'lines')
+    this.#store = stateFile(root, warn)
     this.#warn = warn
     try {
-      const saved: unknown = JSON.parse(fs.readFileSync(this.#file, 'utf8'))
+      const saved: unknown = this.#store.read<unknown>('lines')
+      if (saved === undefined) return
       if (saved === null || typeof saved !== 'object' || Array.isArray(saved) || !Object.values(saved).every((value) => validLine(value) || validRouting(value))) throw new Error('invalid routing state')
       this.#values = saved as Record<string, number | ChatRouting>
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') { this.#unreadable = true; warn(`session routing could not be loaded: ${String(error)}`) }
+      this.#unreadable = true; warn(`session routing could not be loaded: ${String(error)}`)
     }
   }
   routing(key: string, legacy: number): ChatRouting {
@@ -39,7 +38,7 @@ export class SessionLines {
   saveRouting(key: string, state: ChatRouting): boolean { return validRouting(state) && this.#write(key, state) }
   #write(key: string, value: number | ChatRouting): boolean {
     const next = { ...this.#values, [key]: value }
-    if (this.#unreadable || !atomicWriteJson(this.#file, next, { warn: this.#warn })) return false
+    if (this.#unreadable || !this.#store.write('lines', next)) return false
     this.#values = next
     return true
   }

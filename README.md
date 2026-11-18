@@ -4,7 +4,7 @@
 
 ![模拟演示：从微信发消息，DSH 处理回合并回复到原聊天](docs/demo.gif)
 
-**默认拒绝所有发送者。** 只把信任的人加入白名单。获准的发送者可以用聊天驱动 agent，并按宿主规则审批工具调用。
+**默认拒绝所有发送者。** 只把信任的人加入白名单。获准的发送者可以用聊天驱动 agent，并按宿主规则审批工具调用。可选的 `owners` 名单只允许指定人员切换项目/会话和管理计划；群聊可设 `groupTrigger: prefix`，只响应 `/ask ...`。
 
 | 包 | 用途 |
 |---|---|
@@ -17,7 +17,7 @@
 1. 准备装有 DSH 的机器（桌面版或 CLI）和 Node.js 22.13 或更高版本。此前的宿主集成验证使用 DSH `0.2.2-rc.3`；其他版本见[验证状态](docs/STATUS.md)。
 2. 按[安装指南](docs/OPERATIONS.md#安装)安装核心及所需适配器；`0.1.0` 发布到 npm 前走该节的源码构建路径。只把核心加进 DSH profile 的 bundle 列表。
 3. 按[微信](docs/OPERATIONS.md#微信)或 [Telegram](docs/OPERATIONS.md#telegram)一节配置凭证和适配器，再启动宿主。
-4. 给机器人发一条测试消息。从状态目录的 `logs/` 找到 `refused … not-allowed`，核对自己的发送者 ID（微信拒绝行会保留 ID，其他日志会脱敏），再把它加入状态卡片白名单或 `config.json`。通过白名单后，用 `/whoami` 核对发送者、账号和会话 ID。
+4. 给机器人发一条测试消息。未知发送者会收到“等待批准”的提示，并在 DSH 插件状态卡片出现“待批准”；点“允许”后重发即可。也可以从状态目录的 `logs/` 核对 `refused … not-allowed` 的发送者 ID，再手动加入白名单。通过白名单后，用 `/whoami` 核对发送者、账号和会话 ID。
 
 默认状态目录是 `~/.dsh/channels`；`DSH_CHANNELS_STATE_DIR` 可覆盖。手动编辑 `config.json` 后重启宿主。[配置参考](docs/OPERATIONS.md#配置)列出了默认值和可实时修改的设置。
 
@@ -68,5 +68,6 @@ npm test
 - [设计](docs/DESIGN.md)与[决策记录](docs/DECISIONS.md)：消息如何进入回合，以及主要设计取舍。
 - [适配器指南](docs/ADAPTERS.md)：平台能力、接口和接入步骤。
 - [验证状态](docs/STATUS.md)与[变更记录](CHANGELOG.md)：测试范围、已知限制和升级注意事项。
+- [真机测试](docs/REAL-DEVICE-TEST.md)：微信/Telegram 账号上的验收步骤、结果记录和排障。
 
 包清单声明 MIT 许可。微信内置传输层的来源与许可见[第三方声明](packages/adapter-weixin/THIRD-PARTY-NOTICES.md)。

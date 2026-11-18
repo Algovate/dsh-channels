@@ -9,8 +9,8 @@ import { formatBytes } from './media.js'
 import type { TaskRecord, Tasks } from './store/tasks.js'
 import type { InboundMessage, Outgoing, OutgoingMedia, SendResult } from './types.js'
 
-export async function captureArtifacts(directory: string): Promise<Pick<TaskRecord, 'outputDirectory' | 'artifacts' | 'artifactsIncomplete'>> {
-  const scan = await scanProducedFiles({ dir: directory, sinceMs: 0, maxFiles: 100, maxBytes: Number.MAX_SAFE_INTEGER })
+export async function captureArtifacts(directory: string, options: { includeAll?: boolean } = {}): Promise<Pick<TaskRecord, 'outputDirectory' | 'artifacts' | 'artifactsIncomplete'>> {
+  const scan = await scanProducedFiles({ dir: directory, sinceMs: 0, maxFiles: 100, maxBytes: Number.MAX_SAFE_INTEGER, ...(options.includeAll === true ? { includeAll: true } : {}) })
   return {
     outputDirectory: directory,
     artifacts: scan.files.map((file) => path.relative(directory, file.path)).sort(),
@@ -73,6 +73,67 @@ async function snapshotFile(file: ArtifactFile, maxBytes: number): Promise<{ pat
     if (temporary !== undefined) await fs.rm(temporary, { recursive: true, force: true })
     throw error
   } finally { await source.close() }
+}
+
+/** Copy one host-declared deliverable into the task's artifact directory. */
+export async function copyDeliverable(source: string, directory: string, maxBytes: number, root?: string): Promise<string | undefined> {
+  let actual = source
+  if (root !== undefined) {
+    try {
+      const base = await fs.realpath(root)
+      actual = await fs.realpath(source)
+      const relative = path.relative(base, actual)
+      if (relative === '' || relative.startsWith('..') || path.isAbsolute(relative)) return undefined
+    } catch {
+      return undefined
+    }
+  }
+  let sourceFile
+  try {
+    sourceFile = await fs.open(actual, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK)
+  } catch {
+    return undefined
+  }
+  let destination: Awaited<ReturnType<typeof fs.open>> | undefined
+  let name: string | undefined
+  let complete = false
+  try {
+    const stat = await sourceFile.stat()
+    if (!stat.isFile() || stat.size <= 0 || stat.size > maxBytes) return undefined
+    const base = (path.basename(source).replace(/[^A-Za-z0-9._-]/g, '_').replace(/^\.+/, '') || 'deliverable').slice(0, 120)
+    const safe = base === '' || base === '.' || base === '..' ? 'deliverable' : base
+    const extension = path.extname(safe)
+    const stem = path.basename(safe, extension)
+    for (let index = 1; index <= 999; index += 1) {
+      const candidate = index === 1 ? safe : `${stem}-${index}${extension}`
+      try {
+        destination = await fs.open(path.join(directory, candidate), 'wx', 0o600)
+        name = candidate
+        break
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'EEXIST') return undefined
+      }
+    }
+    if (destination === undefined || name === undefined) return undefined
+    const buffer = Buffer.alloc(64 * 1024)
+    let total = 0
+    for (;;) {
+      const { bytesRead } = await sourceFile.read(buffer, 0, Math.min(buffer.length, maxBytes - total + 1), total)
+      if (bytesRead === 0) break
+      total += bytesRead
+      if (total > maxBytes) throw new Error('deliverable exceeds size limit')
+      await destination.writeFile(buffer.subarray(0, bytesRead))
+    }
+    if (total === 0) throw new Error('deliverable became empty')
+    complete = true
+    return name
+  } catch {
+    return undefined
+  } finally {
+    try { await destination?.close() } catch { /* Nothing to close. */ }
+    try { await sourceFile.close() } catch { /* Nothing to close. */ }
+    if (!complete && name !== undefined) await fs.rm(path.join(directory, name), { force: true }).catch(() => {})
+  }
 }
 
 /** The automatic and manual delivery paths share containment checks and private upload bytes. */

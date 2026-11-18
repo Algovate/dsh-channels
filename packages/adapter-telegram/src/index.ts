@@ -13,7 +13,7 @@ import { createHash } from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
 
-import type { AccountInfo, AdapterRuntime, ChannelAdapter, InboundMedia, InboundMessage, Outgoing, SendResult, Target } from '@derekluo/dsh-channels'
+import type { AccountInfo, AdapterRuntime, ChannelAdapter, InboundMedia, InboundMessage, IngressSink, Outgoing, SendResult, Target } from '@derekluo/dsh-channels'
 import { DEFAULT_API_BASE, MAX_TEXT_CHARS, TelegramTransport, type FetchLike } from './transport.js'
 import { runTelegramPolling } from './polling.js'
 import { CHANNEL_ID, mediaOf, type NormalizedInbound } from './normalize.js'
@@ -74,6 +74,7 @@ export async function createAdapter({ runtime, config = {}, stateRoot = '' }: Te
     logger,
   })
   const handlers = new Set<(message: InboundMessage) => void>()
+  let sink: IngressSink | undefined
   let loop: Promise<void> | undefined
 
   /** One attachment: fetch it, write it, and report where it went. */
@@ -109,12 +110,17 @@ export async function createAdapter({ runtime, config = {}, stateRoot = '' }: Te
   }
 
   const handleMessage = async (message: NormalizedInbound): Promise<void> => {
+    const callbackId = message.callbackQueryId
+    if (callbackId !== undefined) delete message.callbackQueryId
     const descriptors = message.mediaItems ?? []
     const items = descriptors.slice(0, MAX_INBOUND_MEDIA)
     message.attachmentErrors ??= []
     if (descriptors.length > items.length) message.attachmentErrors.push('附件数量超过上限，其余附件未接收。')
     if (items.length && !mediaEnabled) message.attachmentErrors.push('附件接收未启用，请发送文字。')
-    if (runtime?.canReceive?.(message, items.length > 0 || message.media.length > 0, legacyAccountId) === false) return
+    if (runtime?.canReceive?.(message, items.length > 0 || message.media.length > 0, legacyAccountId) === false) {
+      if (callbackId !== undefined) await transport.answerCallbackQuery(callbackId)
+      return
+    }
     try {
       delete message.mediaItems
       if (items.length > 0 && mediaEnabled) {
@@ -125,9 +131,11 @@ export async function createAdapter({ runtime, config = {}, stateRoot = '' }: Te
           else message.attachmentErrors.push(`${item.kind} 附件未能下载或超过大小上限，请重新发送。`)
         }
       }
-      for (const handler of handlers) handler(message)
+      if (sink !== undefined) await sink.offer(message, { priority: runtime?.canBypassInbound?.(message) === true })
+      else for (const handler of handlers) await handler(message)
     } finally {
       runtime?.cancelReceive?.(message)
+      if (callbackId !== undefined) await transport.answerCallbackQuery(callbackId)
     }
   }
 
@@ -136,6 +144,8 @@ export async function createAdapter({ runtime, config = {}, stateRoot = '' }: Te
     label: { zh: '电报', en: 'Telegram' },
     capabilities: {
       media: { image: true, file: true, voice: false, video: true },
+      actions: true,
+      edit: true,
       maxTextChars: MAX_TEXT_CHARS,
     },
     accounts: {
@@ -144,6 +154,10 @@ export async function createAdapter({ runtime, config = {}, stateRoot = '' }: Te
       },
     },
 
+    async startWithSink(next: IngressSink): Promise<void> {
+      sink = next
+      try { await adapter.start() } catch (error) { sink = undefined; throw error }
+    },
     async start(): Promise<void> {
       if (loop !== undefined) return
       transport.start()
@@ -158,6 +172,7 @@ export async function createAdapter({ runtime, config = {}, stateRoot = '' }: Te
       transport.stop()
       await loop?.catch(() => {})
       loop = undefined
+      sink = undefined
     },
     onInbound(handler: (message: InboundMessage) => void): () => void {
       handlers.add(handler)
@@ -177,7 +192,14 @@ export async function createAdapter({ runtime, config = {}, stateRoot = '' }: Te
       }
       const text = outgoing.text ?? ''
       if (text === '') return { ok: false, code: 'empty' }
-      return transport.sendText(target.conversationId, text)
+      return transport.sendText(target.conversationId, text, outgoing.actions)
+    },
+    async edit(target: Target, messageId: string, outgoing: Outgoing): Promise<SendResult> {
+      if (target.channel !== CHANNEL_ID || target.accountId !== accountId) return { ok: false, code: 'account-mismatch' }
+      if ((outgoing.media ?? []).length > 0) return { ok: false, code: 'media-unsupported' }
+      const text = outgoing.text ?? ''
+      if (text === '') return { ok: false, code: 'empty' }
+      return transport.editMessageText(target.conversationId, messageId, text, outgoing.actions)
     },
     async typing(target: Target): Promise<void> {
       if (target.channel !== CHANNEL_ID || target.accountId !== accountId) return
