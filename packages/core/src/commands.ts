@@ -15,11 +15,13 @@
  */
 import { chatParagraphs } from './outbound.js'
 
-export type CommandName = 'help' | 'status' | 'tasks' | 'whoami' | 'new' | 'cancel' | 'clear' | 'files' | 'resend' | 'projects' | 'project' | 'sessions' | 'session'
+export type CommandName = 'help' | 'status' | 'tasks' | 'whoami' | 'new' | 'cancel' | 'clear' | 'files' | 'resend' | 'projects' | 'project' | 'sessions' | 'session' | 'schedule' | 'schedules'
 
-export const TASK_CONTROLS: ReadonlySet<CommandName> = new Set(['projects', 'project', 'sessions', 'session', 'status', 'tasks', 'cancel', 'clear', 'files', 'resend'])
+export const TASK_CONTROLS: ReadonlySet<CommandName> = new Set(['schedule', 'schedules', 'projects', 'project', 'sessions', 'session', 'status', 'tasks', 'cancel', 'clear', 'files', 'resend'])
 
 export const COMMANDS: Record<CommandName, { usage: string; summary: { en: string; zh: string } }> = {
+  schedules: { usage: '/schedules', summary: { en: 'list your channel schedules', zh: '查看你在此聊天创建的计划' } },
+  schedule: { usage: '/schedule after|every <分钟> <任务>', summary: { en: 'create a native schedule; pause/resume/delete by id', zh: '创建计划；也可 pause/resume/delete <计划ID>' } },
   projects: { usage: '/projects', summary: { en: 'list configured projects', zh: '查看可用项目' } },
   project: { usage: '/project <别名>', summary: { en: 'switch project', zh: '切换后续消息的项目' } },
   sessions: { usage: '/sessions', summary: { en: 'list session lines', zh: '查看当前项目的会话编号' } },

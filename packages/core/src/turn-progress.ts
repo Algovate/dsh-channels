@@ -11,6 +11,16 @@ export function assistantTextOf(event: Record<string, unknown>): string | undefi
   return texts.length === 0 ? undefined : texts.join('\n').trim()
 }
 
+export interface TurnProgressSnapshot {
+  messageId: string
+  lastSeq: number
+  activeTurn?: number
+  matchingTurn?: number
+  inboxIndex?: number
+  text: string
+  cancelled: boolean
+}
+
 /** Incremental host events shared by reply waiting and interaction ownership. */
 export class TurnProgress {
   #lastSeq: number
@@ -23,6 +33,20 @@ export class TurnProgress {
 
   readonly messageId: string
   constructor(before: number, messageId: string) { this.#lastSeq = before; this.messageId = messageId }
+
+  snapshot(): TurnProgressSnapshot {
+    return { messageId: this.messageId, lastSeq: this.#lastSeq, activeTurn: this.#activeTurn, matchingTurn: this.#matchingTurn, inboxIndex: this.#inboxIndex, text: this.#text.slice(0, 16000), cancelled: this.cancelled }
+  }
+
+  static restore(state: TurnProgressSnapshot): TurnProgress {
+    const progress = new TurnProgress(state.lastSeq, state.messageId)
+    progress.#activeTurn = state.activeTurn
+    progress.#matchingTurn = state.matchingTurn
+    progress.#inboxIndex = state.inboxIndex
+    progress.#text = state.text
+    progress.cancelled = state.cancelled
+    return progress
+  }
 
   get nextSeq(): number { return Math.max(0, this.#lastSeq + 1) }
 

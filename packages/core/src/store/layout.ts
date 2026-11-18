@@ -65,6 +65,10 @@ export const STATE_LAYOUT: Readonly<Record<string, LayoutEntry>> = Object.freeze
     store: STORE.FILE,
     reason: '只保存任务摘要与执行和投递状态；重启不重放已开始的任务',
   },
+  schedules: {
+    kind: 'file', relative: 'schedules.json', label: '通道计划与结果回传', store: STORE.FILE,
+    reason: '原聊天归属、创建意图、执行进度和待回传结果须一起原子保存',
+  },
   outbox: {
     kind: 'file',
     relative: 'outbox.json',

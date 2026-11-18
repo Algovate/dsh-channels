@@ -20,6 +20,7 @@ import type { CounterStore } from './store/counters.js'
 import { allowlistFor, type ChannelsConfig } from './config.js'
 import { lineKey, sameTarget } from './ids.js'
 import { helpText, parseCommand, TASK_CONTROLS, type CommandName } from './commands.js'
+import { ChannelSchedules } from './schedules.js'
 import { ChannelRoutes } from './routing.js'
 import { Inbox, type InboxEntry } from './store/inbox.js'
 import { Outbox } from './store/outbox.js'
@@ -37,7 +38,7 @@ export interface RuntimeLogger {
 }
 
 export interface RuntimeOptions {
-  ctx: { get?: (name: string) => unknown }
+  ctx: { get?: (name: string) => unknown; on?: (event: string, listener: (...args: never[]) => unknown, options?: Record<string, unknown>) => () => void }
   config: ChannelsConfig
   logger: RuntimeLogger
   stateRoot: string
@@ -66,6 +67,7 @@ export class ChannelsRuntime {
   /** Sessions already reported to the host's workspace grouping. */
   readonly #grouped = new Set<string>()
   /** All project authorization and session identity decisions. */
+  readonly #schedules: ChannelSchedules
   readonly #routes: ChannelRoutes
   readonly #routeNotices = new Set<string>()
   /** Built once: a limiter recreated per message would never accumulate. */
@@ -123,6 +125,23 @@ export class ChannelsRuntime {
         }
 
       },
+    })
+    this.#schedules = new ChannelSchedules({
+      ctx: options.ctx, stateRoot: options.stateRoot, logger: options.logger,
+      route: (message) => this.#routes.snapshot(message),
+      attach: async (message, sessionId, workingDirectory) => { await this.#driver.attach(message, { sessionId, workingDirectory }) },
+      authorized: async (binding) => {
+        if (this.#disposed || !authorizeMessage(binding.message, this.gateContext()).allow || !this.#routes.acceptsQueued({ id: binding.id, message: binding.message, sessionId: binding.sessionId, project: binding.project, workingDirectory: binding.workingDirectory })) return false
+        try { if (!fs.statSync(binding.workingDirectory).isDirectory()) return false } catch { return false }
+        const adapter = this.#adapters.get(binding.message.channel)
+        if (!adapter) return false
+        try { return (await adapter.accounts.list()).some((account) => account.accountId === binding.message.accountId && !account.expired) } catch { return false }
+      },
+      send: async (message, text, deliveryId) => {
+        if (deliveryId) this.#adapters.get(message.channel)?.restoreInbound?.(message)
+        return this.send(message, { kind: deliveryId ? 'reply' : 'notice', text }, deliveryId)
+      },
+      queued: (id) => this.#outbox.list().some((entry) => entry.taskId === id),
     })
   }
 
@@ -355,6 +374,8 @@ export class ChannelsRuntime {
     return access
   }
 
+  syncSchedules(): Promise<void> { return this.#schedules.sync() }
+
   /** Schedule saved work only after its channel has started; retry quota waits periodically. */
   async resumePending(): Promise<void> {
     if (this.#disposed || this.#resuming) return
@@ -378,6 +399,7 @@ export class ChannelsRuntime {
         } catch (error) { this.logger.warn(`queued input could not resume: ${String(error)}`) }
       }
     } finally { this.#resuming = false }
+    await this.#schedules.sync().catch((error) => this.logger.warn(`schedule recovery failed: ${String(error)}`))
   }
 
   #enqueueTurn(message: InboundMessage, reservation: Reservation, saved?: InboxEntry): void {
@@ -470,6 +492,7 @@ export class ChannelsRuntime {
 
   /** Run one chat command and answer in the chat. Never starts a turn. */
   async #runCommand(message: InboundMessage, name: CommandName, args: string): Promise<void> {
+    if (name === 'schedule' || name === 'schedules') { await this.#schedules.command(message, name, args); return }
     if (name === 'projects' || name === 'project' || name === 'sessions' || name === 'session' || name === 'new') {
       await this.send(message, { kind: 'notice', text: this.#routes.command(message, name, args) })
       return
@@ -629,6 +652,9 @@ export class ChannelsRuntime {
     if (this.#disposed) return [{ ok: false, code: 'stopped' }]
     const adapter = this.#adapters.get(target.channel)
     if (adapter === undefined) return [{ ok: false, code: 'unknown-channel', detail: target.channel }]
+    const scheduledId = taskId?.startsWith('schedule:') ? taskId : undefined
+    if (scheduledId !== undefined && !await this.#schedules.canDeliver(scheduledId, target)) return [{ ok: false, code: 'schedule-delivery-cancelled' }]
+    if (this.#disposed) return [{ ok: false, code: 'stopped' }]
     const text = outgoing.text === undefined ? '' : plainText(outgoing.text)
     const limit = Number.isFinite(adapter.capabilities.maxTextChars) && adapter.capabilities.maxTextChars > 0 ? adapter.capabilities.maxTextChars : this.#options.config.maxTextChars
     const bubbles = splitIntoBubbles(text, limit)
@@ -640,6 +666,8 @@ export class ChannelsRuntime {
     const base = { kind: outgoing.kind }
     for (const [index, bubble] of bubbles.entries()) {
       if (index > 0 && this.#options.config.bubbleGapMs > 0) await new Promise((resolve) => setTimeout(resolve, this.#options.config.bubbleGapMs))
+      if (this.#disposed) return [...results, { ok: false, code: 'stopped' }]
+      if (scheduledId !== undefined && !await this.#schedules.canDeliver(scheduledId, target)) return [...results, { ok: false, code: 'schedule-delivery-cancelled' }]
       if (this.#disposed) return [...results, { ok: false, code: 'stopped' }]
       const id = `out-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
       const result = await this.#deliver(adapter, target, { ...base, text: bubble }, bubble, id)
@@ -747,6 +775,10 @@ export class ChannelsRuntime {
           if (this.#disposed || this.#adapters.get(entry.target.channel) !== adapter) return { ok: false as const, code: 'stopped' }
           if ((entry.part ?? 0) > 0 && this.config.bubbleGapMs > 0) await new Promise((resolve) => setTimeout(resolve, this.config.bubbleGapMs))
           if (this.#disposed) return { ok: false as const, code: 'stopped' }
+          if (entry.taskId?.startsWith('schedule:') && !await this.#schedules.canDeliver(entry.taskId, entry.target)) {
+            return { ok: false as const, code: this.#outbox.drop(entry.id) ? 'schedule-delivery-cancelled' : 'outbox-persist' }
+          }
+          if (this.#disposed) return { ok: false as const, code: 'stopped' }
           const result = await this.#deliver(adapter, entry.target, entry.outgoing, entry.outgoing.text ?? '', entry.part === undefined ? entry.id : `${entry.id}:${entry.part}`)
           if (entry.taskId !== undefined && result.ok) {
             const previous = retryTasks.get(entry.taskId)
@@ -778,6 +810,7 @@ export class ChannelsRuntime {
     this.#queue.dispose()
     for (const stop of this.#stopTimers.splice(0)) stop()
     this.#interactions.dispose()
+    this.#schedules.dispose()
     return this.#driver.dispose()
   }
 }
