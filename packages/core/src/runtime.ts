@@ -11,6 +11,7 @@
 import fs from 'node:fs'
 import path from 'node:path'
 
+import { answerArtifactCommand, captureArtifacts } from './artifacts.js'
 import { InteractionQueue } from './interaction/queue.js'
 import { isApprovalReply } from './interaction/approval.js'
 import { ConversationQueue } from './inbound/queue.js'
@@ -325,7 +326,7 @@ export class ChannelsRuntime {
     if (command !== null && TASK_CONTROLS.has(command.name)) {
       reservation?.(false)
       this.#acceptInbound(message)
-      void this.#runCommand(message, command.name).catch((error: unknown) => this.logger.warn(`command /${command.name} failed: ${String(error)}`))
+      void this.#runCommand(message, command.name, command.args).catch((error: unknown) => this.logger.warn(`command /${command.name} failed: ${String(error)}`))
       return access
     }
     if (reservation === undefined) {
@@ -338,7 +339,7 @@ export class ChannelsRuntime {
       void this.send(message, { text: claim.hint, kind: 'notice' })
     } else if (command !== null) {
       this.#acceptInbound(message, reservation)
-      void this.#runCommand(message, command.name).catch((error: unknown) => {
+      void this.#runCommand(message, command.name, command.args).catch((error: unknown) => {
         this.#options.logger.warn(`command /${command.name} failed: ${String((error as Error)?.message ?? error)}`)
       })
     } else {
@@ -455,7 +456,17 @@ export class ChannelsRuntime {
   }
 
   /** Run one chat command and answer in the chat. Never starts a turn. */
-  async #runCommand(message: InboundMessage, name: CommandName): Promise<void> {
+  async #runCommand(message: InboundMessage, name: CommandName, args: string): Promise<void> {
+    if (name === 'files' || name === 'resend') {
+      await answerArtifactCommand({
+        message, name, args, tasks: this.#tasks,
+        workspace: this.#options.workingDirectory,
+        maxBytes: this.config.maxProducedBytes,
+        authorized: () => !this.#disposed && authorizeMessage(message, this.gateContext()).allow,
+        send: (outgoing) => this.send(message, outgoing),
+      })
+      return
+    }
     if (name === 'help') {
       await this.send(message, { text: helpText(), kind: 'notice' })
       return
@@ -577,7 +588,9 @@ export class ChannelsRuntime {
         return
       }
       this.#activeTasks.delete(key)
-      this.#tasks.update(message, taskId, { execution: reply.interrupted === true ? 'unknown' : reply.failed === true ? 'failed' : 'completed', endedAt: Date.now(), delivery: reply.failed === true ? 'none' : 'sending' })
+      const artifacts = !reply.failed && outputDir !== undefined ? await captureArtifacts(outputDir) : {}
+      const saved = this.#tasks.update(message, taskId, { ...artifacts, execution: reply.interrupted === true ? 'unknown' : reply.failed === true ? 'failed' : 'completed', endedAt: Date.now(), delivery: reply.failed === true ? 'none' : 'sending' })
+      if (!saved && !reply.failed && outputDir !== undefined) await this.send(message, { kind: 'notice', text: '产物索引未能保存，本轮结果仍会发送。请在 DSH 保留文件，历史取回暂不可用。' })
       this.logger.info(`turn for ${key} settled in ${Date.now() - record.startedAt}ms (${reply.text.length} chars)`)
       if (reply.failed === true) {
         this.logger.warn(`turn failed for ${key}: ${reply.text}`)

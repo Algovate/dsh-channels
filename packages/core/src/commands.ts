@@ -15,13 +15,15 @@
  */
 import { chatParagraphs } from './outbound.js'
 
-export type CommandName = 'help' | 'status' | 'tasks' | 'whoami' | 'new' | 'cancel' | 'clear'
+export type CommandName = 'help' | 'status' | 'tasks' | 'whoami' | 'new' | 'cancel' | 'clear' | 'files' | 'resend'
 
-export const TASK_CONTROLS: ReadonlySet<CommandName> = new Set(['status', 'tasks', 'cancel', 'clear'])
+export const TASK_CONTROLS: ReadonlySet<CommandName> = new Set(['status', 'tasks', 'cancel', 'clear', 'files', 'resend'])
 
 export const COMMANDS: Record<CommandName, { usage: string; summary: { en: string; zh: string } }> = {
   status: { usage: '/status', summary: { en: 'current task, execution, delivery and queues', zh: '查看任务、排队和发送状态' } },
   tasks: { usage: '/tasks', summary: { en: 'list recent tasks', zh: '查看最近 5 项任务' } },
+  files: { usage: '/files [任务ID]', summary: { en: 'list recorded task artifacts', zh: '查看已完成任务的产物' } },
+  resend: { usage: '/resend <任务ID> [序号]', summary: { en: 'resend one task artifact', zh: '重新发送任务产物，默认第 1 个' } },
   cancel: { usage: '/cancel', summary: { en: 'stop the current task', zh: '停止当前任务，保留排队消息' } },
   clear: { usage: '/clear', summary: { en: 'clear your queued messages', zh: '清除自己的排队消息' } },
   help: { usage: '/help', summary: { en: 'list the commands', zh: '列出可用命令' } },

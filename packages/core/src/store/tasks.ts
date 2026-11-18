@@ -22,6 +22,9 @@ export interface TaskRecord {
   delivery: DeliveryState
   unconfirmed?: boolean
   filesUnsent?: boolean
+  outputDirectory?: string
+  artifacts?: string[]
+  artifactsIncomplete?: boolean
 }
 export class Tasks {
   readonly #file: string
@@ -48,9 +51,11 @@ export class Tasks {
   get(target: Target, id: string): TaskRecord | undefined {
     return this.#items.find((task) => task.id === id && sameTarget(task.target, target))
   }
+  forTarget(target: Target, senderId?: string): TaskRecord[] {
+    return this.#items.filter((task) => sameTarget(task.target, target) && (senderId === undefined || task.senderId === senderId))
+  }
   recent(target: Target, senderId?: string): TaskRecord[] {
-    return this.#items
-      .filter((task) => sameTarget(task.target, target) && (senderId === undefined || task.senderId === senderId))
+    return this.forTarget(target, senderId)
       .slice(-5)
       .reverse()
   }
@@ -68,16 +73,18 @@ export class Tasks {
     this.#items = items
     return true
   }
-  update(target: Target, id: string, patch: Partial<Pick<TaskRecord, 'execution' | 'delivery' | 'endedAt' | 'unconfirmed' | 'filesUnsent'>>): void {
+  update(target: Target, id: string, patch: Partial<Pick<TaskRecord, 'execution' | 'delivery' | 'endedAt' | 'unconfirmed' | 'filesUnsent' | 'outputDirectory' | 'artifacts' | 'artifactsIncomplete'>>): boolean {
     const index = this.#items.findIndex((item) => item.id === id && sameTarget(item.target, target))
     const task = this.#items[index]
-    if (task === undefined) return
+    if (task === undefined) return false
     const items = this.#items.slice()
     items[index] = { ...task, ...patch }
     if (!this.#write(items)) {
       this.#items[index] = { ...task, execution: 'unknown', delivery: 'unknown' }
       this.#warn('task status could not be saved')
+      return false
     }
+    return true
   }
 }
 
@@ -92,6 +99,9 @@ function validTask(value: unknown): value is TaskRecord {
   const task = value as Partial<TaskRecord>
   return typeof task.id === 'string' && typeof task.senderId === 'string' && typeof task.summary === 'string'
     && (task.unconfirmed === undefined || typeof task.unconfirmed === 'boolean')
+    && (task.outputDirectory === undefined || typeof task.outputDirectory === 'string')
+    && (task.artifacts === undefined || (Array.isArray(task.artifacts) && task.artifacts.length <= 100 && task.artifacts.every((file) => typeof file === 'string')))
+    && (task.artifactsIncomplete === undefined || typeof task.artifactsIncomplete === 'boolean')
     && (task.filesUnsent === undefined || typeof task.filesUnsent === 'boolean')
     && Number.isFinite(task.startedAt) && (task.endedAt === undefined || Number.isFinite(task.endedAt))
     && task.target !== null && typeof task.target === 'object'
