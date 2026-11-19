@@ -64,3 +64,4 @@
 
 - PR follow-up: pushed the branch and created draft PR #1 against main, including the pre-existing durable-delivery commits.
 - CI diagnosis: Node 22 cancelled 39 interaction tests because only unref timers remained. Reproduced locally with Node 22.23.5 (7/46 passed, 39 cancelled); a test-only live-host fixture changed the focused run to 46/46 passing and the full Node 22 suite to 463/463. Production timer behavior is unchanged.
+- The next Linux Node 22 run exposed the same missing-host condition in the mobile-task approval-at-turn-deadline test (four cancelled tests). Applied the same fixture to that suite; no production changes or timeout relaxation.

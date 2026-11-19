@@ -4,10 +4,13 @@ import fs from 'node:fs'
 import path from 'node:path'
 import os from 'node:os'
 import test from 'node:test'
+import { keepHostAlive } from './host-lifetime.js'
 import { ChannelsRuntime } from '../packages/core/src/runtime.js'
 import { createChannelsRuntime, createFakeAdapter, createFakeUserMessage } from './runtime-helper.js'
 import { stateFile } from '../packages/core/src/store/state.js'
 import { createHarness, inbound } from './harness.js'
+
+keepHostAlive()
 
 const tick = (ms = 0) => new Promise((resolve) => setTimeout(resolve, ms))
 async function until(check: () => boolean): Promise<void> {
