@@ -39,7 +39,7 @@ test('/whoami answers with the ids an allowlist needs, and starts no turn', asyn
   runtime.dispose()
 })
 
-test('/status groups mobile information and keeps only recent results', async () => {
+test('/status keeps task and queue state without reading or repeating journal previews', async () => {
   const runtime = createHarness().makeRuntime()
   const adapter = createFakeAdapter()
   runtime.register(adapter)
@@ -48,13 +48,17 @@ test('/status groups mobile information and keeps only recent results', async ()
     await runtime.send(target, { kind: 'reply', text: '第一行\n第二行' })
     await runtime.send(target, { kind: 'reply', text: '第一行\n第二行' })
     await runtime.send(target, { kind: 'notice', text: '已接收，准备处理。' })
+    const outbound = runtime.journal.outbound.bind(runtime.journal)
+    let reads = 0
+    runtime.journal.outbound = (...args) => { reads++; return outbound(...args) }
     runtime.dispatch(inbound({ text: '/status' }))
     runtime.dispatch(inbound({ text: '/status' }))
     await tick(50)
     const text = adapter.sent.at(-1)?.outgoing.text ?? ''
     assert.match(text, /^【任务状态 · 测试】\n\n当前任务：无\n\n【队列】排队：0 条　｜　待重发：0 条/)
-    assert.match(text, /\n\n【最近结果】\n\n· 已发送｜第一行 第二行（2 条）$/)
-    assert.doesNotMatch(text, /状态目录|允许的发送者|accepted|已接收/)
+    assert.doesNotMatch(text, /最近结果|第一行|状态目录|允许的发送者|accepted|已接收/)
+    assert.equal(reads, 0)
+    assert.equal(outbound(undefined, target, 'reply').length, 2, 'delivery diagnostics remain available to the desktop')
     assert.equal(text.match(/【任务状态/g)?.length, 1)
   } finally { await runtime.dispose() }
 })

@@ -792,7 +792,6 @@ export class ChannelsRuntime {
           queued: this.pendingInputs(message),
           pending: outbox.length,
           promptSending: context.interaction === undefined && this.#interactions.busy(message),
-          recent: this.#journal.outbound(undefined, message, 'reply'),
           context,
         })
       const blocked = this.#inbox.list().some((entry) => sameTarget(entry.message, message) && this.#queuedInputs.get(entry.id)?.blocked)
