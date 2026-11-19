@@ -46,6 +46,7 @@ export function plainText(markdown: string): string {
     fences.push(code.replace(/\n$/, ''))
     return `\u0000FENCE${fences.length - 1}\u0000`
   })
+  for (const image of localImageReferences(out)) out = out.replace(image.markup, image.label)
   out = out.replace(/`([^`]+)`/g, '$1')
   out = out.replace(/\*\*([^*]+)\*\*/g, '$1')
   out = out.replace(/(^|[^*])\*([^*]+)\*/g, '$1$2')
@@ -53,6 +54,27 @@ export function plainText(markdown: string): string {
   out = out.replace(/^#{1,6}\s+/gm, '')
   out = out.replace(/\u0000FENCE(\d+)\u0000/g, (_whole, index: string) => fences[Number(index)] ?? '')
   return out
+}
+
+/** Only standalone image paragraphs declare files; code, quotes, HTML and URLs do not. */
+export function localImageReferences(markdown: string): Array<{ path: string; label: string; markup: string }> {
+  const source = markdown
+    .replace(/(^|\n)[ \t]*(`{3,}|~{3,})[^\n]*\n[\s\S]*?(?:\n[ \t]*\2[ \t]*(?=\n|$)|$)/g, '')
+    .replace(/^(?: {4}|\t).*$/gm, '')
+    .replace(/<!--[\s\S]*?(?:-->|$)/g, '')
+    .replace(/<([a-z][\w:-]*)\b[^>]*>[\s\S]*?(?:<\/\1\s*>|$)/gi, '')
+    .replace(/(`+)[\s\S]*?\1/g, '')
+  const files: Array<{ path: string; label: string; markup: string }> = []
+  const pattern = /^ {0,3}!\[([^\]\r\n]*)\]\([ \t]*(?:<([^>\r\n]+)>|((?:\\.|[^()\s])+))(?:[ \t]+"[^"\r\n]*")?[ \t]*\)[ \t]*$/gm
+  for (const match of source.matchAll(pattern)) {
+    let destination = (match[2] ?? match[3] ?? '').trim()
+    if (!destination || /^(?:[a-z][a-z0-9+.-]*:|\/\/|#)/i.test(destination)) continue
+    try { destination = decodeURIComponent(destination) } catch { continue }
+    destination = destination.replace(/\\([\\()[\] ])/g, '$1')
+    if (destination.includes('\0')) continue
+    files.push({ path: destination, label: match[1]?.trim() || '图片附件', markup: match[0] })
+  }
+  return files
 }
 
 /** WeChat collapses single newlines in chat. Blank lines keep separate instructions readable. */

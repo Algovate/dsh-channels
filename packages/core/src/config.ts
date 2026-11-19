@@ -13,8 +13,9 @@ const DEFAULTS: ChannelsConfig = {
   enabled: true,
   allowedSenders: [],
   owners: [],
-  groupTrigger: 'all',
+  groupTrigger: 'prefix',
   groupPrefix: '/ask',
+  groupMention: '',
   allowlistPerAccount: {},
   allowedChats: [],
   adapters: [],
@@ -42,8 +43,9 @@ export const Config = z.object({
   enabled: z.boolean().default(DEFAULTS.enabled).description('Start the configured channel adapters when the plugin loads.'),
   allowedSenders: z.array(z.string()).default(DEFAULTS.allowedSenders).description('Sender ids allowed to drive the agent; empty denies everyone.'),
   owners: z.array(z.string()).default(DEFAULTS.owners).description('Senders allowed to switch projects or manage schedules. Empty means every allowed sender is an owner.'),
-  groupTrigger: z.union([z.const('all'), z.const('prefix')]).default(DEFAULTS.groupTrigger).description('Group chats: answer every allowed message, or only messages starting with groupPrefix.'),
-  groupPrefix: z.string().default(DEFAULTS.groupPrefix).description('Prefix required in group chats when groupTrigger is prefix; stripped before the turn.'),
+  groupTrigger: z.union([z.const('all'), z.const('prefix'), z.const('mention')]).default(DEFAULTS.groupTrigger).description('Group chats: answer every allowed message, only groupPrefix messages, or messages that start with groupPrefix or groupMention.'),
+  groupPrefix: z.string().default(DEFAULTS.groupPrefix).description('Prefix accepted in group chats unless groupTrigger is all; stripped before the turn.'),
+  groupMention: z.string().default(DEFAULTS.groupMention).description('Bot handle accepted by groupTrigger mention, e.g. @my_bot; stripped before the turn.'),
   allowlistPerAccount: z.dict(z.array(z.string())).default(DEFAULTS.allowlistPerAccount).description('Per-account override of allowedSenders (same semantics: empty denies).'),
   allowedChats: z.array(z.string()).default(DEFAULTS.allowedChats).description('Optional conversation allowlist; empty allows any conversation of an allowed sender.'),
   adapters: z.array(z.string()).default(DEFAULTS.adapters).description('Adapter package names to load, in order.'),
@@ -57,7 +59,7 @@ export const Config = z.object({
   questionsEnabled: z.boolean().default(DEFAULTS.questionsEnabled).description('Let the agent ask its questions in the chat and take the answer back.'),
   approvalsEnabled: z.boolean().default(DEFAULTS.approvalsEnabled).description('Let the chat approve or reject tool calls (allowed once only).'),
   interactionTimeoutMs: z.number().default(DEFAULTS.interactionTimeoutMs).description('How long one question or approval waits for a chat reply before falling back to the desktop.'),
-  autoSendFiles: z.boolean().default(DEFAULTS.autoSendFiles).description('Send files the agent declared with present during a turn as chat attachments.'),
+  autoSendFiles: z.boolean().default(DEFAULTS.autoSendFiles).description('Send files declared with present or standalone local Markdown images as durable chat attachments.'),
   legacyOutputScan: z.boolean().default(DEFAULTS.legacyOutputScan).description('Legacy fallback: instruct the model to copy files into a per-turn output directory and scan it after the turn.'),
   maxProducedFiles: z.number().default(DEFAULTS.maxProducedFiles).description('How many produced files one turn may send.'),
   maxProducedBytes: z.number().default(DEFAULTS.maxProducedBytes).description('Largest produced file that is sent (bytes).'),
@@ -68,8 +70,9 @@ export interface ChannelsConfig {
   enabled: boolean
   allowedSenders: string[]
   owners: string[]
-  groupTrigger: 'all' | 'prefix'
+  groupTrigger: 'all' | 'prefix' | 'mention'
   groupPrefix: string
+  groupMention: string
   allowlistPerAccount: Record<string, string[]>
   allowedChats: string[]
   adapters: string[]
@@ -99,8 +102,9 @@ export function resolveConfig(raw: Partial<ChannelsConfig> | undefined): Channel
     enabled: typeof input.enabled === 'boolean' ? input.enabled : DEFAULTS.enabled,
     allowedSenders: Array.isArray(input.allowedSenders) ? input.allowedSenders.map(String) : [...DEFAULTS.allowedSenders],
     owners: Array.isArray(input.owners) ? input.owners.map(String) : [...DEFAULTS.owners],
-    groupTrigger: input.groupTrigger === 'prefix' ? 'prefix' : 'all',
+    groupTrigger: input.groupTrigger === 'prefix' || input.groupTrigger === 'mention' || input.groupTrigger === 'all' ? input.groupTrigger : DEFAULTS.groupTrigger,
     groupPrefix: typeof input.groupPrefix === 'string' && input.groupPrefix.trim() !== '' ? input.groupPrefix.trim() : DEFAULTS.groupPrefix,
+    groupMention: mention(input.groupMention),
     allowlistPerAccount: Object.fromEntries(Object.entries(record(input.allowlistPerAccount)).filter(([, value]) => Array.isArray(value)).map(([key, value]) => [key, (value as unknown[]).map(String)])),
     allowedChats: Array.isArray(input.allowedChats) ? input.allowedChats.map(String) : [...DEFAULTS.allowedChats],
     adapters: Array.isArray(input.adapters) ? input.adapters.map(String) : [...DEFAULTS.adapters],
@@ -126,6 +130,12 @@ export function resolveConfig(raw: Partial<ChannelsConfig> | undefined): Channel
 export function allowlistFor(config: ChannelsConfig, accountId: string): string[] {
   const scoped = config.allowlistPerAccount[accountId]
   return Array.isArray(scoped) ? scoped : config.allowedSenders
+}
+
+function mention(value: unknown): string {
+  if (typeof value !== 'string') return DEFAULTS.groupMention
+  const trimmed = value.trim().replace(/^@+/, '')
+  return trimmed === '' ? '' : `@${trimmed}`
 }
 
 function bounded(value: number | undefined, fallback: number, min: number, max: number): number {

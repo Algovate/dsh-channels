@@ -13,7 +13,7 @@ test('the ingress sink accepts a message and the turn reaches the host', async (
   try {
     await runtime.ingress().offer(inbound({ text: 'through the sink' }))
     for (let i = 0; i < 50 && h.followedUp.length === 0; i++) await delay(5)
-    assert.equal((h.followedUp[0]?.message as { content: Array<{ text: string }> }).content[0]?.text, 'through the sink')
+    assert.equal((h.followedUp[0]?.message as { content: Array<{ text: string }> }).content.at(-1)?.text, 'through the sink')
   } finally { await runtime.dispose() }
 })
 
@@ -25,7 +25,7 @@ test('ordinary sink offers preserve their per-chat order', async () => {
     const sink = runtime.ingress()
     await Promise.all([sink.offer(inbound({ text: 'first' })), sink.offer(inbound({ text: 'second' }))])
     for (let i = 0; i < 50 && h.followedUp.length < 2; i++) await delay(5)
-    const texts = h.followedUp.map((entry) => (entry.message as { content: Array<{ text: string }> }).content[0]?.text)
+    const texts = h.followedUp.map((entry) => (entry.message as { content: Array<{ text: string }> }).content.at(-1)?.text)
     assert.deepEqual(texts, ['first', 'second'])
   } finally { await runtime.dispose() }
 })

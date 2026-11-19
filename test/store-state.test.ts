@@ -15,7 +15,7 @@ function temp(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'channels-state-'))
 }
 
-test('the edge state document is canonical and the old files are readable mirrors', () => {
+test('the edge state document is canonical and no legacy mirrors are created', () => {
   const root = temp()
   try {
     const inbox = new Inbox(root, () => {})
@@ -25,7 +25,7 @@ test('the edge state document is canonical and the old files are readable mirror
     assert.equal(new SessionLines(root, () => {}).saveRouting('chat', { project: 'default', sessions: { default: { current: 2, max: 2 } } }), true)
     assert.equal(new Outbox({ stateRoot: root }).add(inbound(), { kind: 'reply', text: 'later' }, {})?.outgoing.text, 'later')
     assert.ok(fs.existsSync(path.join(root, 'state.json')))
-    assert.ok(fs.existsSync(path.join(root, 'inbox.json')), 'legacy mirror is still written')
+    assert.equal(fs.existsSync(path.join(root, 'inbox.json')), false)
 
     // A fresh process sees the canonical document even if a mirror is stale.
     resetStateFile(root)
@@ -34,7 +34,7 @@ test('the edge state document is canonical and the old files are readable mirror
   } finally { fs.rmSync(root, { recursive: true, force: true }) }
 })
 
-test('a newer legacy mirror is imported once and then the canonical copy wins', () => {
+test('a newer legacy file cannot overwrite canonical state after migration', () => {
   const root = temp()
   try {
     const first = new Inbox(root, () => {})
@@ -43,8 +43,10 @@ test('a newer legacy mirror is imported once and then the canonical copy wins', 
     fs.writeFileSync(legacy, JSON.stringify([{ ...entry, message: { ...entry.message, text: 'edited' } }]))
     const future = Date.now() + 10_000
     fs.utimesSync(legacy, future, future)
-    assert.equal(new Inbox(root, () => {}).list()[0]?.message.text, 'edited')
-    assert.equal(JSON.parse(fs.readFileSync(path.join(root, 'state.json'), 'utf8')).sections.inbox[0].message.text, 'edited')
+    resetStateFile(root)
+    assert.equal(new Inbox(root, () => {}).list()[0]?.message.text, 'first')
+    assert.equal(JSON.parse(fs.readFileSync(path.join(root, 'state.json'), 'utf8')).sections.inbox[0].message.text, 'first')
+    assert.ok(fs.existsSync(path.join(root, 'legacy-state/inbox.json.bak')))
   } finally { fs.rmSync(root, { recursive: true, force: true }) }
 })
 
@@ -53,6 +55,7 @@ test('a corrupt canonical document fails closed instead of falling back to mirro
   try {
     new Inbox(root, () => {}).add(inbound(), 'session')
     fs.writeFileSync(path.join(root, 'state.json'), '{')
+    fs.writeFileSync(path.join(root, 'inbox.json'), '[]')
     resetStateFile(root)
     const inbox = new Inbox(root, () => {})
     assert.throws(() => inbox.add(inbound(), 'session'), /persist/)
@@ -66,8 +69,28 @@ test('the canonical document is a single atomically replaced object', () => {
     new Inbox(root, () => {}).add(inbound(), 'session')
     new Tasks(root, () => {}).save({ id: 'task', target: inbound(), senderId: 'sender', summary: 'x', startedAt: 1, execution: 'running', delivery: 'none' })
     const saved = JSON.parse(fs.readFileSync(path.join(root, 'state.json'), 'utf8')) as { version: number; sections: Record<string, unknown> }
-    assert.equal(saved.version, 1)
+    assert.equal(saved.version, 2)
     assert.deepEqual(Object.keys(saved.sections).sort(), ['inbox', 'tasks'])
     assert.ok(stateFile(root).read('inbox'))
+  } finally { fs.rmSync(root, { recursive: true, force: true }) }
+})
+
+test('a failed multi-section commit changes neither section on disk or in memory', () => {
+  const root = temp()
+  try {
+    const store = stateFile(root)
+    store.write('counters', { old: 1 })
+    store.write('lines', { old: 1 })
+    const commit = store.writeMany.bind(store)
+    store.failNextWrite('lines')
+    assert.equal(commit({ counters: { new: 2 }, lines: { new: 2 } }), false)
+    assert.deepEqual(store.read('counters'), { old: 1 })
+    assert.deepEqual(store.read('lines'), { old: 1 })
+    resetStateFile(root)
+    assert.deepEqual(stateFile(root).read('counters'), { old: 1 })
+    assert.equal(commit({ counters: { new: 2 }, lines: { new: 2 } }), true)
+    resetStateFile(root)
+    assert.deepEqual(stateFile(root).read('counters'), { new: 2 })
+    assert.deepEqual(stateFile(root).read('lines'), { new: 2 })
   } finally { fs.rmSync(root, { recursive: true, force: true }) }
 })

@@ -1,3 +1,4 @@
+import { readSectionJson, writeSectionJson } from './state-helper.js'
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import os from 'node:os'
@@ -25,7 +26,7 @@ function fixture(offThrows = false) {
   let runtime = open(); runtime.register(adapter)
   const send = (text: string, extra = {}) => runtime.dispatch(inbound({ text, ...extra }))
   const text = () => adapter.sent.map((item) => item.outgoing.text ?? '').join('\n')
-  const binding = () => JSON.parse(fs.readFileSync(path.join(root, 'schedules.json'), 'utf8')).bindings[0]
+  const binding = () => JSON.parse(readSectionJson(root, 'schedules')).bindings[0]
   const sync = () => (runtime as unknown as { syncSchedules(): Promise<void> }).syncSchedules()
   return { root, h, adapter, get runtime() { return runtime }, async restart() { await runtime.dispose(); runtime = open(); runtime.register(adapter) }, service, persistence, records, creates, edits, events, hooks, send, text, binding, sync, closes: () => closes, async close() { await runtime.dispose(); fs.rmSync(root, { recursive: true, force: true }) } }
 }
@@ -114,7 +115,7 @@ test('native completion is handed to durable outbox once when the platform send 
     f.records[0]!.receipts = [{ messageId: 'scheduled', targetSessionId: saved.sessionId }]
     f.events.set(saved.sessionId, [{ seq: 0, type: 'turn/start', data: { turn: 1 } }, { seq: 1, type: 'user/message', data: { id: 'scheduled' } }, { seq: 2, type: 'assistant/message', data: { turn: 1, message: { content: [{ type: 'text', text: '任务结果' }] } } }, { seq: 3, type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } }])
     f.adapter.send = async () => ({ ok: false, code: 'temporary' })
-    await f.sync(); assert.equal(f.runtime.outbox.list().length, 1); assert.equal(JSON.parse(fs.readFileSync(path.join(f.root, 'schedules.json'), 'utf8')).pending.length, 0)
+    await f.sync(); assert.equal(f.runtime.outbox.list().length, 1); assert.equal(JSON.parse(readSectionJson(f.root, 'schedules')).pending.length, 0)
     await f.restart(); await f.sync(); assert.equal(f.runtime.outbox.list().length, 1); assert.equal(f.h.followedUp.length, 0)
   } finally { await f.close() }
 })
@@ -129,7 +130,7 @@ test('outbox retries cancel scheduled results after the sender is revoked', asyn
   try {
     f.send('/schedule after 1 检查部署'); await until(() => f.creates.length === 1); completed(f)
     const send = f.adapter.send; f.adapter.send = async () => ({ ok: false, code: 'temporary' }); await f.sync()
-    const file = path.join(f.root, 'outbox.json'); const saved = JSON.parse(fs.readFileSync(file, 'utf8')); saved.items[0].nextAt = 0; fs.writeFileSync(file, JSON.stringify(saved))
+    const file = path.join(f.root, 'outbox.json'); const saved = JSON.parse(readSectionJson(f.root, 'outbox')); saved.items[0].nextAt = 0; writeSectionJson(f.root, 'outbox', JSON.stringify(saved))
     f.adapter.send = send; f.runtime.updateAllowlist({ remove: 'sender' }); f.runtime.startOutboxRetry(5)
     await until(() => f.runtime.outbox.list().length === 0)
     assert.doesNotMatch(f.text(), /private scheduled output/)
@@ -140,10 +141,10 @@ test('durable pending results do not send after native destination reassignment'
   const f = fixture()
   try {
     f.send('/schedule after 1 检查部署'); await until(() => f.creates.length === 1); completed(f)
-    const send = f.adapter.send; fs.writeFileSync(path.join(f.root, 'outbox.json'), '{'); f.adapter.send = async () => ({ ok: false, code: 'temporary' }); await f.sync()
-    assert.equal(JSON.parse(fs.readFileSync(path.join(f.root, 'schedules.json'), 'utf8')).pending.length, 1)
+    const send = f.adapter.send; writeSectionJson(f.root, 'outbox', '{'); f.adapter.send = async () => ({ ok: false, code: 'temporary' }); await f.sync()
+    assert.equal(JSON.parse(readSectionJson(f.root, 'schedules')).pending.length, 1)
     f.records[0]!.target.sessionId = 'foreign'; f.adapter.send = send
-    fs.writeFileSync(path.join(f.root, 'outbox.json'), JSON.stringify({ schemaVersion: 1, items: [] }))
+    writeSectionJson(f.root, 'outbox', JSON.stringify({ schemaVersion: 1, items: [] }))
     await f.sync(); assert.doesNotMatch(f.text(), /private scheduled output/)
   } finally { await f.close() }
 })
@@ -153,7 +154,7 @@ test('an unconfirmed failed creation can be cancelled and late native activation
   try {
     f.send('/schedule after 1 检查部署'); await until(() => f.text().includes('create uncertain')); const saved = f.binding()
     f.send(`/schedule delete ${saved.id.slice(0, 8)}`); await until(() => f.text().includes('删除') || f.text().includes('取消'))
-    assert.equal(JSON.parse(fs.readFileSync(path.join(f.root, 'schedules.json'), 'utf8')).bindings.length, 0)
+    assert.equal(JSON.parse(readSectionJson(f.root, 'schedules')).bindings.length, 0)
     await assert.rejects(f.hooks.get('schedule/resolve-agent')!(saved.sessionId, async () => ({})))
   } finally { await f.close() }
 })
@@ -188,7 +189,7 @@ test('shutdown during outbox authorization retains the result without sending or
   try {
     f.send('/schedule after 1 检查部署'); await until(() => f.creates.length === 1); completed(f)
     const send = f.adapter.send; f.adapter.send = async () => ({ ok: false, code: 'temporary' }); await f.sync()
-    const file = path.join(f.root, 'outbox.json'); const saved = JSON.parse(fs.readFileSync(file, 'utf8')); saved.items[0].nextAt = 0; fs.writeFileSync(file, JSON.stringify(saved))
+    const file = path.join(f.root, 'outbox.json'); const saved = JSON.parse(readSectionJson(f.root, 'outbox')); saved.items[0].nextAt = 0; writeSectionJson(f.root, 'outbox', JSON.stringify(saved))
     let reads = 0; const pending = new Promise<typeof f.records>((resolve) => { release = resolve })
     Object.assign(f.service, { catalog() { reads++; return pending } }); f.adapter.send = send
     f.runtime.startOutboxRetry(5); await until(() => reads >= 2)
@@ -253,7 +254,7 @@ test('deleting a binding while activation awaits a stale native catalog prevents
     Object.assign(f.service, { catalog() { return ++lookups === 1 ? wait : f.records } })
     let activated = false; const activation = f.hooks.get('schedule/resolve-agent')!(saved.sessionId, async () => { activated = true; return {} }); const refused = assert.rejects(activation)
     await until(() => lookups > 0); f.send(`/schedule delete ${saved.id.slice(0, 8)}`)
-    await until(() => JSON.parse(fs.readFileSync(path.join(f.root, 'schedules.json'), 'utf8')).bindings.length === 0)
+    await until(() => JSON.parse(readSectionJson(f.root, 'schedules')).bindings.length === 0)
     release(stale); await refused; assert.equal(activated, false)
   } finally { release?.(f.records); await f.close() }
 })
@@ -278,6 +279,6 @@ test('an authorized owner can delete a schedule after its original project is re
     f.send('/schedule after 1 检查部署'); await until(() => f.creates.length === 1); const saved = f.binding()
     delete f.runtime.config.projects.app; f.send(`/schedule delete ${saved.id.slice(0, 8)}`)
     await until(() => f.records.length === 0)
-    assert.equal(JSON.parse(fs.readFileSync(path.join(f.root, 'schedules.json'), 'utf8')).bindings.length, 0)
+    assert.equal(JSON.parse(readSectionJson(f.root, 'schedules')).bindings.length, 0)
   } finally { await f.close() }
 })

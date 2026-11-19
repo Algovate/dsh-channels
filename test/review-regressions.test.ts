@@ -1,3 +1,4 @@
+import { readSectionJson, writeSectionJson } from './state-helper.js'
 import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
 import fs from 'node:fs'
@@ -204,7 +205,7 @@ test('shutdown preserves queued work and rejects duplicate provider replay', asy
   runtime.dispose() // no microtask has started the queued turn
   const restarted = await open()
   assert.equal(restarted.canReceive({ ...message }), false)
-  assert.equal(JSON.parse(fs.readFileSync(path.join(stateRoot, 'inbox.json'), 'utf8')).length, 1)
+  assert.equal(JSON.parse(readSectionJson(stateRoot, 'inbox')).length, 1)
   restarted.dispose()
 })
 
@@ -241,9 +242,9 @@ test('outbox does not retry via a replacement account', async () => {
   const target = inbound()
   await runtime.send(target, { kind: 'reply', text: 'old account private reply' })
   const file = path.join(path.dirname(path.dirname(runtime.journal.file())), 'outbox.json')
-  const persisted = JSON.parse(fs.readFileSync(file, 'utf8'))
+  const persisted = JSON.parse(readSectionJson(path.dirname(file), 'outbox'))
   persisted.items[0].nextAt = 0
-  fs.writeFileSync(file, JSON.stringify(persisted))
+  writeSectionJson(path.dirname(file), 'outbox', JSON.stringify(persisted))
   const replacement = createFakeAdapter()
   replacement.accounts.list = async () => [{ accountId: 'replacement', expired: false }]
   // Use the same runtime and remove the prior adapter as if the loader restarted it.

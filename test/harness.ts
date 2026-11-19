@@ -175,7 +175,9 @@ export function createHarness(options: HarnessOptions = {}) {
     makeRuntime: (config: Record<string, unknown> = {}) =>
       createChannelsRuntime({
         ctx,
-        config,
+        // Group tests predate the prefix-by-default rule and mostly drive plain
+        // group text; opt them into `all` unless the test says otherwise.
+        config: { groupTrigger: 'all', ...config },
         ...(options.maxTurnWaitMs === undefined ? {} : { maxTurnWaitMs: options.maxTurnWaitMs }),
         ...(options.pollMs === undefined ? {} : { pollMs: options.pollMs }),
         createUserMessage: createFakeUserMessage,

@@ -1,3 +1,4 @@
+import { readSectionJson, writeSectionJson } from './state-helper.js'
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import os from 'node:os'
@@ -69,11 +70,11 @@ test('the domain store reads a cached row and writes through', async () => {
 
 test('many time windows occupy one durable row per subject and preserve session lines', async () => {
   const { root, instance } = store()
-  fs.writeFileSync(path.join(root, 'counters.json'), JSON.stringify({ 'day:sender:0': 2, 'day:sender:86400000': 3, 'line:conversation': 7 }))
+  writeSectionJson(root, 'counters', JSON.stringify({ 'day:sender:0': 2, 'day:sender:86400000': 3, 'line:conversation': 7 }))
   await instance.load()
   assert.equal(instance.get('day:sender:86400000'), 3)
   for (let index = 2; index < 100; index++) instance.set(`day:sender:${index * 86400000}`, index)
-  const rows = JSON.parse(fs.readFileSync(path.join(root, 'counters.json'), 'utf8'))
+  const rows = JSON.parse(readSectionJson(root, 'counters'))
   assert.equal(Object.keys(rows).length, 2)
   assert.equal(instance.get('line:conversation'), 7)
   instance.set('day:sender:0', 1000)

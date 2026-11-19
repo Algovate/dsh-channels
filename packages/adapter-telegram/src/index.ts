@@ -131,7 +131,7 @@ export async function createAdapter({ runtime, config = {}, stateRoot = '' }: Te
           else message.attachmentErrors.push(`${item.kind} 附件未能下载或超过大小上限，请重新发送。`)
         }
       }
-      if (sink !== undefined) await sink.offer(message, { priority: runtime?.canBypassInbound?.(message) === true })
+      if (sink !== undefined) await sink.offer(message, { priority: items.length === 0 && runtime?.canBypassInbound?.(message) === true })
       else for (const handler of handlers) await handler(message)
     } finally {
       runtime?.cancelReceive?.(message)

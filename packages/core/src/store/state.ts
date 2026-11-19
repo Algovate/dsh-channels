@@ -4,7 +4,7 @@
  * Before this module, inbox, tasks, outbox, routing, schedules and counters
  * were six independent JSON files rewritten one at a time. They now share one
  * atomically replaced document; the old files remain as read-compatible
- * mirrors so an upgrade, a manual edit, and the existing doctor keep working.
+ * migration inputs. Version2 archives them once and never reads or writes them again.
  *
  * The journal and config stay separate on purpose: the journal is append-only
  * diagnostics, and config is the operator's overlay.
@@ -13,13 +13,15 @@
  */
 import fs from 'node:fs'
 import path from 'node:path'
+import { randomUUID } from 'node:crypto'
+import { stateSectionsValid } from './schema.js'
 import { atomicWriteJson } from './atomic.js'
 import { statePath } from './layout.js'
 
 export type StateSection = 'inbox' | 'tasks' | 'outbox' | 'lines' | 'schedules' | 'counters' | 'pairings'
 
 interface StateDocument {
-  version: 1
+  version: 1 | 2
   savedAt: number
   sections: Partial<Record<StateSection, unknown>>
 }
@@ -54,9 +56,8 @@ export class StateFile {
   readonly #root: string
   readonly #file: string
   readonly #warn: (line: string) => void
-  readonly #mirrorAt = new Map<StateSection, number>()
   readonly #failNext = new Set<StateSection>()
-  #document: StateDocument = { version: 1, savedAt: 0, sections: {} }
+  #document: StateDocument = { version: 2, savedAt: 0, sections: {} }
   #loaded = false
   #error: string | undefined
 
@@ -64,74 +65,103 @@ export class StateFile {
     this.#root = root
     this.#file = statePath(root, 'state')
     this.#warn = warn
+    const lockError = this.#acquireLock()
+    if (lockError !== undefined) {
+      this.#error = lockError
+      this.#warn(lockError)
+    }
+  }
+
+  /**
+   * One process owns a state root. A lock held by a live pid refuses every
+   * read/write; a lock left by a dead pid is taken over. The same pid may
+   * reacquire after a runtime restart inside one process.
+   */
+  #acquireLock(): string | undefined {
+    const lock = statePath(this.#root, 'stateLock')
+    const claim = statePath(this.#root, 'stateClaim')
+    try { fs.mkdirSync(this.#root, { recursive: true, mode: 0o700 }) } catch (error) { return `could not create the state root: ${String(error)}` }
+    try {
+      fs.writeFileSync(claim, JSON.stringify({ pid: process.pid }), { flag: 'wx', mode: 0o600 })
+    } catch (error) {
+      return `state lock acquisition is busy or interrupted; inspect ${claim} before retrying: ${String(error)}`
+    }
+    try {
+      try {
+        const raw: unknown = JSON.parse(fs.readFileSync(lock, 'utf8'))
+        const pid = raw !== null && typeof raw === 'object' ? (raw as { pid?: unknown }).pid : undefined
+        if (!Number.isSafeInteger(pid) || (pid as number) <= 0) return 'invalid state.lock; inspect the owner before retrying'
+        if (pid !== process.pid && processAlive(pid as number)) return `another process (pid ${pid}) owns this state root: ${this.#root}`
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') return `could not read the state lock: ${String(error)}`
+      }
+      return atomicWriteJson(lock, { pid: process.pid, startedAt: Date.now() }, { warn: this.#warn })
+        ? undefined : 'could not claim the state root'
+    } finally {
+      try { fs.unlinkSync(claim) }
+      catch (error) { this.#warn(`could not release state lock acquisition: ${String(error)}`) }
+    }
   }
 
   #load(): void {
     if (this.#loaded) return
     this.#loaded = true
-    let text: string
+    if (this.#error !== undefined) return
     try {
-      text = fs.readFileSync(this.#file, 'utf8')
+      let previous: StateDocument | undefined
+      try {
+        const parsed: unknown = JSON.parse(fs.readFileSync(this.#file, 'utf8'))
+        if (!stateDocumentValid(parsed)) throw new Error('state.json has an invalid version, envelope or section')
+        previous = parsed as StateDocument
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+      }
+      const sections = structuredClone(previous?.sections ?? {})
+      const legacy: string[] = []
+      for (const [section, key] of Object.entries(LEGACY_KEY) as Array<[StateSection, string]>) {
+        const file = statePath(this.#root, key)
+        let stat: fs.Stats
+        try { stat = fs.lstatSync(file) }
+        catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue; throw error }
+        if (!stat.isFile()) throw new Error(`legacy ${key} is not a regular file`)
+        legacy.push(file)
+        if (previous?.version !== 2 && !Object.hasOwn(sections, section)) sections[section] = JSON.parse(fs.readFileSync(file, 'utf8'))
+      }
+      if (!stateSectionsValid(sections)) throw new Error('invalid legacy state section; repair the source before migrating')
+      if (previous?.version !== 2) {
+        if (previous) this.#archive(this.#file, 'state.v1.json', false)
+        this.#document = { version: 2, savedAt: Date.now(), sections }
+        if (!this.#persist()) throw new Error('migration could not commit state.json; legacy sources were retained')
+      } else this.#document = previous
+      for (const file of legacy) this.#archive(file, path.basename(file), true)
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return
-      this.#error = `could not read ${path.basename(this.#file)}: ${String(error)}`
-      this.#warn(this.#error)
-      return
-    }
-    try {
-      const parsed: unknown = JSON.parse(text)
-      if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('expected an object')
-      const document = parsed as Partial<StateDocument>
-      if (document.version !== 1 || typeof document.savedAt !== 'number' || document.sections === null || typeof document.sections !== 'object' || Array.isArray(document.sections)) throw new Error('invalid state document')
-      this.#document = document as StateDocument
-    } catch (error) {
-      this.#error = `state.json is invalid; refusing new work: ${String((error as Error)?.message ?? error)}`
+      this.#error = `state migration failed; refusing new work: ${String((error as Error)?.message ?? error)}`
       this.#warn(this.#error)
     }
+  }
+
+  #archive(source: string, name: string, remove: boolean): void {
+    const directory = statePath(this.#root, 'legacyState')
+    fs.mkdirSync(directory, { recursive: true, mode: 0o700 })
+    if (!fs.lstatSync(directory).isDirectory()) throw new Error('legacy-state is not a private directory')
+    let destination = path.join(directory, `${name}.bak`)
+    if (fs.existsSync(destination)) {
+      if (!fs.lstatSync(destination).isFile()) throw new Error('migration backup is not a regular file')
+      if (!fs.readFileSync(destination).equals(fs.readFileSync(source))) destination = path.join(directory, `${name}.${randomUUID()}.bak`)
+    }
+    if (!fs.existsSync(destination)) fs.copyFileSync(source, destination, fs.constants.COPYFILE_EXCL)
+    fs.chmodSync(destination, 0o600)
+    if (remove) fs.unlinkSync(source)
   }
 
   #refuse(): never {
     throw new Error(this.#error ?? 'state is unavailable')
   }
 
-  #legacyPath(section: StateSection): string | undefined {
-    const key = LEGACY_KEY[section]
-    return key === undefined ? undefined : statePath(this.#root, key)
-  }
-
-  #legacyMtime(section: StateSection): number | undefined {
-    const legacy = this.#legacyPath(section)
-    try { return legacy === undefined ? undefined : fs.statSync(legacy).mtimeMs } catch { return undefined }
-  }
-
-  /** Read one section; `undefined` means it has never been written. */
+  /** Read one canonical section; only an absent section means it is empty. */
   read<T>(section: StateSection): T | undefined {
     this.#load()
     if (this.#error !== undefined) this.#refuse()
-    const mirrorAt = this.#mirrorAt.get(section)
-    const mtime = this.#legacyMtime(section)
-    const legacy = this.#legacyPath(section)
-    // On first read, a mirror newer than the last state save is an external
-    // edit (or an old state file); afterwards only a newer mtime counts.
-    if (mtime !== undefined && (mirrorAt === undefined ? !Object.hasOwn(this.#document.sections, section) || mtime > this.#document.savedAt : mtime > mirrorAt)) {
-      try {
-        if (legacy === undefined) throw new Error('no legacy mirror')
-        const migrated = JSON.parse(fs.readFileSync(legacy, 'utf8'))
-        this.#document.sections[section] = migrated
-        this.#persist()
-        this.#mirrorAt.set(section, mtime)
-      } catch (error) {
-        if (!Object.hasOwn(this.#document.sections, section)) {
-          this.#error = `legacy ${LEGACY_KEY[section]} is unreadable and no canonical section exists: ${String((error as Error)?.message ?? error)}`
-          this.#warn(this.#error)
-          throw new Error(this.#error)
-        }
-        this.#warn(`legacy ${LEGACY_KEY[section]} could not be migrated; state.json remains authoritative: ${String((error as Error)?.message ?? error)}`)
-      }
-    } else if (mtime !== undefined && mirrorAt === undefined) {
-      this.#mirrorAt.set(section, mtime)
-    }
-    if (!Object.hasOwn(this.#document.sections, section)) return undefined
     const value = this.#document.sections[section]
     return value === undefined ? undefined : structuredClone(value) as T
   }
@@ -141,21 +171,24 @@ export class StateFile {
     this.#failNext.add(section)
   }
 
-  /** Replace one section and mirror it to the legacy file for compatibility. */
+  /** Replace one canonical section. */
   write(section: StateSection, value: unknown): boolean {
+    return this.writeMany({ [section]: value })
+  }
+
+  /** Commit related ledger changes with one atomic replacement. */
+  writeMany(sections: Partial<Record<StateSection, unknown>>): boolean {
     this.#load()
     if (this.#error !== undefined) return false
-    if (this.#failNext.delete(section)) return false
-    this.#document.sections[section] = structuredClone(value)
-    if (!this.#persist()) return false
-    const mirror = this.#legacyPath(section)
-    if (mirror !== undefined) {
-      if (!atomicWriteJson(mirror, value, { warn: this.#warn })) {
-        this.#warn(`legacy ${LEGACY_KEY[section]} mirror could not be updated; state.json remains authoritative`)
-      }
-      const mtime = this.#legacyMtime(section)
-      if (mtime !== undefined) this.#mirrorAt.set(section, mtime)
+    const entries = Object.entries(sections) as Array<[StateSection, unknown]>
+    for (const [section] of entries) if (this.#failNext.delete(section)) return false
+    const previous = this.#document
+    this.#document = { version: 2, savedAt: previous.savedAt, sections: { ...previous.sections, ...structuredClone(sections) } }
+    if (!this.#persist()) {
+      this.#document = previous
+      return false
     }
+
     return true
   }
 
@@ -163,4 +196,21 @@ export class StateFile {
     this.#document.savedAt = Date.now()
     return atomicWriteJson(this.#file, this.#document, { warn: this.#warn })
   }
+}
+
+function processAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === 'EPERM'
+  }
+}
+
+/** Read-only validation used by doctor as well as startup migration. */
+export function stateDocumentValid(value: unknown): boolean {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return false
+  const document = value as Partial<StateDocument>
+  return (document.version === 1 || document.version === 2) && typeof document.savedAt === 'number'
+    && Number.isFinite(document.savedAt) && stateSectionsValid(document.sections)
 }

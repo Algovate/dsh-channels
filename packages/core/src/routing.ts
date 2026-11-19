@@ -100,7 +100,7 @@ export class ChannelRoutes {
       return `${name === 'new' ? '已开新会话' : '已切换'}：${state.project}（第 ${line} 条）。下一条任务使用此选择；已排队任务保持原项目和会话。`
     } catch (error) {
       this.#options.logger.warn(`routing command failed: ${String(error)}`)
-      return '切换失败：项目目录或会话状态不可用，未更改选择。请在 DSH 检查配置和 lines.json；可用 /project default 返回默认项目。'
+      return '切换失败：项目目录或会话状态不可用，未更改选择。请在 DSH 检查配置和 state.json 的 lines 段；可用 /project default 返回默认项目。'
     }
   }
 

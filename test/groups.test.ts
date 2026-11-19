@@ -68,3 +68,35 @@ test('an active interaction can be answered without repeating the group prefix',
     assert.ok(adapter.sent.some((entry) => entry.outgoing.kind === 'question'))
   } finally { await runtime.dispose() }
 })
+
+test('mention mode accepts the configured bot handle and still accepts the prefix', async () => {
+  const h = createHarness({ reply: 'ok' })
+  const runtime = createChannelsRuntime({
+    ctx: h.ctx,
+    config: { allowedSenders: ['sender'], groupTrigger: 'mention', groupMention: '@helper', senderPerMinute: 0, senderPerDay: 0, autoSendFiles: false },
+  })
+  const adapter = createFakeAdapter()
+  runtime.register(adapter)
+  try {
+    assert.equal(runtime.dispatch(inbound({ text: 'plain chatter', group: true })).allow, false)
+    runtime.dispatch(inbound({ text: '@helper 查一下', group: true }))
+    assert.equal(runtime.dispatch(inbound({ text: '/ask 再看一下', group: true })).allow, true)
+    await tick(50)
+    assert.equal(h.followedUp.length, 2)
+  } finally { await runtime.dispose() }
+})
+
+test('a prefixed control command still bypasses an exhausted quota', async () => {
+  const h = createHarness({ reply: 'late' })
+  const runtime = createChannelsRuntime({
+    ctx: h.ctx,
+    config: { allowedSenders: ['sender'], groupTrigger: 'prefix', groupPrefix: '/ask', senderPerMinute: 0, senderPerDay: 1, autoSendFiles: false },
+  })
+  const adapter = createFakeAdapter()
+  runtime.register(adapter)
+  try {
+    runtime.dispatch(inbound({ text: '/ask 做点事', group: true }))
+    await tick(20)
+    assert.equal(runtime.canReceive(inbound({ text: '/ask /cancel', group: true }), false), true)
+  } finally { await runtime.dispose() }
+})

@@ -1,3 +1,4 @@
+import { readSectionJson, writeSectionJson } from './state-helper.js'
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import os from 'node:os'
@@ -60,7 +61,7 @@ test('queued routes survive switching and restart; removing their project blocks
     runtime.dispatch(inbound({ text: 'running' })); await tick()
     runtime.dispatch(inbound({ text: 'queued' }))
     runtime.dispatch(inbound({ text: '/project default' })); await tick()
-    const saved = JSON.parse(fs.readFileSync(path.join(root, 'inbox.json'), 'utf8'))
+    const saved = JSON.parse(readSectionJson(root, 'inbox'))
     assert.equal(saved[0].workingDirectory, fs.realpathSync(project))
     const originalId = saved[0].sessionId
     await runtime.dispose()
@@ -83,7 +84,7 @@ test('queued routes survive switching and restart; removing their project blocks
 test('corrupt routing fails closed and project selection is scoped to this chat', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'routing-corrupt-'))
   const h = createHarness()
-  fs.writeFileSync(path.join(root, 'lines.json'), '{')
+  writeSectionJson(root, 'lines', '{')
   const runtime = createChannelsRuntime({ ctx: h.ctx, stateRoot: root, workingDirectory: root })
   const adapter = createFakeAdapter(); runtime.register(adapter)
   try {
@@ -91,7 +92,7 @@ test('corrupt routing fails closed and project selection is scoped to this chat'
     runtime.dispatch(inbound({ text: '/new' })); await tick()
     assert.match(adapter.sent.at(-1)?.outgoing.text ?? '', /失败/)
     assert.equal(h.followedUp.length, 0)
-    assert.equal(fs.readFileSync(path.join(root, 'lines.json'), 'utf8'), '{')
+    assert.equal(JSON.parse(readSectionJson(root, 'lines')), '{')
   } finally { await runtime.dispose(); fs.rmSync(root, { recursive: true, force: true }) }
 })
 
@@ -100,7 +101,7 @@ test('switching projects does not leak to other chats or redirect historical art
   const project = fs.mkdtempSync(path.join(root, 'app-'))
   const output = fs.mkdtempSync(path.join(project, '.channel-output-'))
   fs.writeFileSync(path.join(output, 'report.txt'), 'report')
-  fs.writeFileSync(path.join(root, 'tasks.json'), JSON.stringify([{ id: 'aaaaaaaa-1111-2222-3333-444444444444', target: { channel: 'fake', accountId: 'acct', conversationId: 'conv' }, senderId: 'sender', summary: 'report', startedAt: 1, execution: 'completed', delivery: 'sent', workingDirectory: fs.realpathSync(project), outputDirectory: fs.realpathSync(output), artifacts: ['report.txt'] }]))
+  writeSectionJson(root, 'tasks', JSON.stringify([{ id: 'aaaaaaaa-1111-2222-3333-444444444444', target: { channel: 'fake', accountId: 'acct', conversationId: 'conv' }, senderId: 'sender', summary: 'report', startedAt: 1, execution: 'completed', delivery: 'sent', workingDirectory: fs.realpathSync(project), outputDirectory: fs.realpathSync(output), artifacts: ['report.txt'] }]))
   const h = createHarness()
   const runtime = createChannelsRuntime({ ctx: h.ctx, stateRoot: root, workingDirectory: root, config: { projects: { app: project }, senderPerMinute: 0 } })
   const adapter = createFakeAdapter(); runtime.register(adapter)

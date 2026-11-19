@@ -1,3 +1,4 @@
+import { readSectionJson, writeSectionJson } from './state-helper.js'
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import os from 'node:os'
@@ -67,8 +68,8 @@ test('skipped output files prevent an all-sent task state and notify the chat', 
   const adapter = createFakeAdapter(); runtime.register(adapter)
   try {
     runtime.dispatch(inbound())
-    await until(() => fs.existsSync(path.join(root, 'tasks.json')) && JSON.parse(fs.readFileSync(path.join(root, 'tasks.json'), 'utf8')).some((t: { delivery: string }) => t.delivery !== 'none' && t.delivery !== 'sending'))
-    const task = JSON.parse(fs.readFileSync(path.join(root, 'tasks.json'), 'utf8'))[0]
+    await until(() => fs.existsSync(path.join(root, 'state.json')) && JSON.parse(readSectionJson(root, 'tasks'))?.some((t: { delivery: string }) => t.delivery !== 'none' && t.delivery !== 'sending') === true)
+    const task = JSON.parse(readSectionJson(root, 'tasks'))[0]
     assert.equal(task.filesUnsent, true)
     assert.notEqual(task.delivery, 'sent')
     assert.ok(adapter.sent.some((e) => e.outgoing.kind === 'notice' && /附件.*未发送/.test(e.outgoing.text ?? '')))
@@ -121,7 +122,7 @@ test('retry metadata reaches the runtime outbox on initial send and retry', asyn
     const before = Date.now()
     await runtime.send(inbound(), { kind: 'reply', text: 'retry later' })
     assert.ok(runtime.outbox.list()[0]!.nextAt >= before + 3600000)
-    const file = path.join(root, 'outbox.json'); const saved = JSON.parse(fs.readFileSync(file, 'utf8')); saved.items[0].nextAt = 0; fs.writeFileSync(file, JSON.stringify(saved))
+    const file = path.join(root, 'outbox.json'); const saved = JSON.parse(readSectionJson(root, 'outbox')); saved.items[0].nextAt = 0; writeSectionJson(root, 'outbox', JSON.stringify(saved))
     runtime.startOutboxRetry(5)
     await until(() => runtime.outbox.list()[0]!.attempts === 1)
     assert.ok(runtime.outbox.list()[0]!.nextAt >= before + 3600000)

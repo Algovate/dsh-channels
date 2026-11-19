@@ -152,6 +152,12 @@ export class TelegramTransport {
     this.#offset = Math.min(this.#offset, typeof updateId === 'number' && Number.isSafeInteger(updateId) ? updateId : 0)
   }
 
+  /** Inline keyboard markup, or nothing when the message carries no actions. */
+  #keyboard(actions?: readonly OutgoingAction[]): Record<string, unknown> {
+    if (actions === undefined || actions.length === 0) return {}
+    return { reply_markup: { inline_keyboard: actions.map((action) => [{ text: action.label.slice(0, 64), callback_data: action.value.slice(0, 64) }]) } }
+  }
+
   /** Send one text message, optionally with one inline action per row. */
   async sendText(chatId: string, text: string, actions?: readonly OutgoingAction[]): Promise<SendResult> {
     try {
@@ -159,9 +165,7 @@ export class TelegramTransport {
         chat_id: chatId,
         text,
         disable_web_page_preview: true,
-        ...(actions === undefined || actions.length === 0
-          ? {}
-          : { reply_markup: { inline_keyboard: actions.map((action) => [{ text: action.label.slice(0, 64), callback_data: action.value.slice(0, 64) }]) } }),
+        ...this.#keyboard(actions),
       })
       if (answer.ok !== true) {
         const retry = answer.parameters?.retry_after
@@ -189,9 +193,7 @@ export class TelegramTransport {
         message_id: id,
         text,
         disable_web_page_preview: true,
-        ...(actions === undefined || actions.length === 0
-          ? {}
-          : { reply_markup: { inline_keyboard: actions.map((action) => [{ text: action.label.slice(0, 64), callback_data: action.value.slice(0, 64) }]) } }),
+        ...this.#keyboard(actions),
       })
       if (answer.ok !== true) return { ok: false, code: 'edit-failed', detail: answer.description ?? 'no description' }
       const message = answer.result?.message_id

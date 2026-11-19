@@ -2,6 +2,7 @@
 import { randomUUID } from 'node:crypto'
 import type { InboundMessage } from '../types.js'
 import { stateFile, type StateFile } from './state.js'
+import { conforms, pairingsSchema } from './schema.js'
 
 const MAX_PAIRINGS = 20
 const PAIRING_TTL_MS = 24 * 60 * 60_000
@@ -31,8 +32,8 @@ export class Pairings {
     try {
       const saved: unknown = this.#store.read<unknown>('pairings')
       if (saved === undefined) return
-      if (!Array.isArray(saved) || !saved.every(validPairing)) throw new Error('invalid pairing records')
-      this.#items = saved
+      if (!conforms(pairingsSchema, saved)) throw new Error('invalid pairing records')
+      this.#items = saved as PairingRequest[]
     } catch (error) {
       this.#unreadable = true
       warn(`pending pairing requests could not be loaded: ${String(error)}`)
@@ -102,13 +103,4 @@ export class Pairings {
 
 function preview(text: string): string {
   return String(text ?? '').replace(/\s+/g, ' ').trim().slice(0, 120)
-}
-
-function validPairing(value: unknown): value is PairingRequest {
-  if (value === null || typeof value !== 'object') return false
-  const item = value as Partial<PairingRequest>
-  return typeof item.id === 'string' && typeof item.channel === 'string' && typeof item.accountId === 'string'
-    && typeof item.conversationId === 'string' && typeof item.senderId === 'string' && typeof item.text === 'string'
-    && Number.isFinite(item.at) && Number.isFinite(item.lastNoticeAt)
-    && Number.isSafeInteger(item.attempts) && (item.attempts ?? 0) > 0
 }

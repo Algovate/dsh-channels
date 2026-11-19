@@ -23,6 +23,18 @@ function queue(timeoutMs = 10_000) {
   return { instance, sent }
 }
 
+test('approval lifetime withdraws the original entry even when prompt expiry is delayed', async () => {
+  const { instance } = queue()
+  const ask = instance.ask.bind(instance)
+  // Keep the real queue, but delay its own expiry beyond the seam's deadline.
+  instance.ask = (entry, options) => ask(entry, { signal: options?.signal })
+  try {
+    const result = await answerApproval({ queue: instance, target, request: { deadlineAt: Date.now() + 20 }, next: () => new Promise(() => {}) })
+    assert.equal(result, 'unavailable')
+    assert.equal(instance.pendingCount(), 0)
+  } finally { instance.dispose() }
+})
+
 test('a single question renders header, text, options and descriptions', () => {
   const prompt = formatQuestionPrompt([{ header: '口味', question: '喝什么', detail: '只能选一个', options: [{ label: '咖啡', description: '热的' }, { label: '茶' }] }], { waitMs: 120_000 })
   assert.match(prompt, /^【提问】/)
