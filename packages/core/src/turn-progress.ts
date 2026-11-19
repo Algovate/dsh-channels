@@ -34,8 +34,8 @@ export class TurnProgress {
   readonly messageId: string
   constructor(before: number, messageId: string) { this.#lastSeq = before; this.messageId = messageId }
 
-  snapshot(): TurnProgressSnapshot {
-    return { messageId: this.messageId, lastSeq: this.#lastSeq, activeTurn: this.#activeTurn, matchingTurn: this.#matchingTurn, inboxIndex: this.#inboxIndex, text: this.#text.slice(0, 16000), cancelled: this.cancelled }
+  snapshot(textLimit = 16000): TurnProgressSnapshot {
+    return { messageId: this.messageId, lastSeq: this.#lastSeq, activeTurn: this.#activeTurn, matchingTurn: this.#matchingTurn, inboxIndex: this.#inboxIndex, text: this.#text.slice(0, textLimit), cancelled: this.cancelled }
   }
 
   static restore(state: TurnProgressSnapshot): TurnProgress {

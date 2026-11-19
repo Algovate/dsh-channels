@@ -11,7 +11,7 @@
 import fs from 'node:fs'
 import path from 'node:path'
 
-import { answerArtifactCommand, captureArtifacts, copyDeliverable, snapshotArtifact } from './artifacts.js'
+import { answerArtifactCommand, snapshotDelivery, type ArtifactDelivery } from './artifacts.js'
 import { InteractionQueue } from './interaction/queue.js'
 import { isApprovalReply } from './interaction/approval.js'
 import { ConversationQueue } from './inbound/queue.js'
@@ -23,14 +23,14 @@ import { helpText, parseCommand, TASK_CONTROLS, type CommandName } from './comma
 import { ChannelSchedules } from './schedules.js'
 import { ChannelRoutes } from './routing.js'
 import { Inbox, type InboxEntry } from './store/inbox.js'
-import { Outbox } from './store/outbox.js'
+import { Outbox, type OutboxEntry } from './store/outbox.js'
 import { Tasks, type TaskRecord } from './store/tasks.js'
 import { Pairings, type PairingRequest } from './store/pairings.js'
 import { Journal } from './store/journal.js'
 import { TurnDriver, type TurnReply } from './turns.js'
 import type { HostContext } from './host.js'
 import { chatParagraphs, plainText, splitIntoBubbles } from './outbound.js'
-import { scanProducedFiles } from './produced.js'
+import { prepareTaskArtifacts } from './task-artifacts.js'
 import { taskHistoryText, taskStatusText } from './task-messages.js'
 import type { ChannelAdapter, InboundMessage, IngressSink, Outgoing, SendResult, Target } from './types.js'
 import { setTimeout as delay } from 'node:timers/promises'
@@ -90,7 +90,9 @@ export class ChannelsRuntime {
     this.#inbox = new Inbox(options.stateRoot, options.logger.warn)
     this.#tasks = new Tasks(options.stateRoot, options.logger.warn)
     this.#pairings = new Pairings(options.stateRoot, options.logger.warn)
-    this.#outbox = new Outbox({ stateRoot: options.stateRoot, warn: options.logger.warn })
+    this.#outbox = new Outbox({ stateRoot: options.stateRoot, warn: options.logger.warn,
+      commitProgress: (file, entry, result, finished) => this.#tasks.recordDelivery(file, entry, result, finished),
+    })
     this.#journal = new Journal({ stateRoot: options.stateRoot, warn: options.logger.warn })
     const counters = options.counters
     const config = options.config
@@ -144,7 +146,9 @@ export class ChannelsRuntime {
           if (!this.#routes.acceptsQueued({ id: binding.id, message: binding.message, sessionId: binding.sessionId, project: binding.project, workingDirectory: binding.workingDirectory })) return false
           try { return fs.statSync(binding.workingDirectory).isDirectory() } catch { return false }
         }
-        return projectAvailable() && await this.#scheduleAccess(binding.message) && projectAvailable()
+        // Check once after the async permission read: project removal during the
+        // await must still revoke delivery.
+        return await this.#scheduleAccess(binding.message) && projectAvailable()
       },
       send: async (message, text, deliveryId) => {
         if (deliveryId) this.#adapters.get(message.channel)?.restoreInbound?.(message)
@@ -403,23 +407,37 @@ export class ChannelsRuntime {
 
   /**
    * Group addressing: `all` keeps the old behavior; `prefix` requires the
-   * configured prefix and strips it before command parsing or the turn. An
-   * active interaction may be answered without the prefix.
+   * configured prefix; `mention` accepts the prefix or the configured bot
+   * handle. Either is stripped before command parsing or the turn. An active
+   * interaction may be answered without addressing the bot.
    */
   #groupText(message: InboundMessage): { addressed: boolean; text: string } {
     const config = this.#options.config
-    if (!message.group || config.groupTrigger !== 'prefix') return { addressed: true, text: message.text }
+    if (!message.group || config.groupTrigger === 'all') return { addressed: true, text: message.text }
     const raw = message.text.trimStart()
     const prefix = config.groupPrefix
-    const hasPrefix = raw === prefix || raw.startsWith(`${prefix} `) || raw.startsWith(`${prefix}\n`) || raw.startsWith(`${prefix}\t`)
-    if (!hasPrefix) return { addressed: this.#interactions.busy(message), text: message.text }
-    return { addressed: true, text: raw.slice(prefix.length).trimStart() }
+    if (raw === prefix || raw.startsWith(`${prefix} `) || raw.startsWith(`${prefix}\n`) || raw.startsWith(`${prefix}\t`)) {
+      return { addressed: true, text: raw.slice(prefix.length).trimStart() }
+    }
+    if (config.groupTrigger === 'mention' && config.groupMention !== '') {
+      const mention = config.groupMention
+      if (raw.toLowerCase().startsWith(mention.toLowerCase())) {
+        const rest = raw.slice(mention.length)
+        if (rest === '' || /^[\s,，:：]/.test(rest)) return { addressed: true, text: rest.trimStart() }
+      }
+    }
+    return { addressed: this.#interactions.busy(message), text: message.text }
   }
 
-  /** Reserve quota before downloads. The adapter must dispatch the same object after enrichment. */
+  /**
+   * Reserve quota before downloads. The adapter must dispatch the same object
+   * after enrichment. Also records an unknown sender's pairing request and
+   * messages them, so a refused preflight still explains itself.
+   */
   canReceive(message: InboundMessage, hasAttachments = false, legacyAccountId?: string): boolean {
     if (this.#disposed) return false
-    if (!this.#groupText(message).addressed) return false
+    const group = this.#groupText(message)
+    if (!group.addressed) return this.#refuse(message, { allow: false, reason: 'not-addressed' }).allow
     const context = this.gateContext()
     const scoped = this.#options.config.allowlistPerAccount
     if (legacyAccountId !== undefined && Object.hasOwn(scoped, legacyAccountId) && !Object.hasOwn(scoped, message.accountId)) {
@@ -431,8 +449,10 @@ export class ChannelsRuntime {
       if (check.reason === 'not-allowed') this.#requestPairing(message)
       return false
     }
-    const command = parseCommand(message.text)
-    if (!hasAttachments && (isApprovalReply(message.text) || (command !== null && TASK_CONTROLS.has(command.name)))) return true
+    // `dispatch` strips the group prefix later; preflight must parse the same
+    // text or `/ask /cancel` misses the control-command bypass.
+    const command = parseCommand(group.text)
+    if (!hasAttachments && (isApprovalReply(group.text) || (command !== null && TASK_CONTROLS.has(command.name)))) return true
     // Plain replies can settle an in-flight turn even if it consumed the last slot.
     if (!hasAttachments && this.#interactions.busy(message)) return true
     if (this.#preflightReservations.has(message)) return true
@@ -467,7 +487,7 @@ export class ChannelsRuntime {
   dispatch(message: InboundMessage): GateDecision {
     if (this.#disposed) return { allow: false, reason: 'not-logged-in' }
     const group = this.#groupText(message)
-    if (!group.addressed) return { allow: false, reason: 'not-addressed' }
+    if (!group.addressed) return this.#refuse(message, { allow: false, reason: 'not-addressed' })
     if (group.text !== message.text) message.text = group.text
     const context = this.gateContext()
     const access = this.#checkInbound(message, context)
@@ -536,6 +556,7 @@ export class ChannelsRuntime {
     if (this.#disposed || this.#resuming) return
     this.#resuming = true
     try {
+      await this.#recoverTasks()
       for (const entry of this.#inbox.list()) {
         if (this.#queuedInputs.get(entry.id)?.scheduled === true) continue
         const adapter = this.#adapters.get(entry.message.channel)
@@ -555,6 +576,31 @@ export class ChannelsRuntime {
       }
     } finally { this.#resuming = false }
     await this.#schedules.sync().catch((error) => this.logger.warn(`schedule recovery failed: ${String(error)}`))
+  }
+
+  async #recoverTasks(): Promise<void> {
+    for (const record of this.#tasks.recoverable()) {
+      if (this.#disposed) return
+      const recovery = record.recovery!
+      if (this.#queuedInputs.get(record.id)?.scheduled || this.#activeTasks.get(lineKey(record.target))?.record.id === record.id) continue
+      const message = recovery.message
+      const allowed = async () => sameTarget(record.target, message) && record.senderId === message.senderId
+        && this.#routes.acceptsQueued({ id: record.id, message, sessionId: recovery.sessionId, project: recovery.project, workingDirectory: record.workingDirectory })
+        && await this.#scheduleAccess(message)
+        && this.#routes.acceptsQueued({ id: record.id, message, sessionId: recovery.sessionId, project: recovery.project, workingDirectory: record.workingDirectory })
+      try {
+        if (!await allowed()) continue
+        const result = await this.#driver.recover(recovery, record.workingDirectory ?? this.#options.workingDirectory,
+          AbortSignal.any([this.#ingressStop.signal, AbortSignal.timeout(10000)]), recovery.cursor)
+        if (!await allowed()) continue
+        if (!result.reply) {
+          this.#tasks.update(message, record.id, { execution: 'unknown', recovery: { ...recovery, cursor: result.cursor } })
+          continue
+        }
+        this.#adapters.get(message.channel)?.restoreInbound?.(message)
+        await this.#finishTurn(message, record, result.reply)
+      } catch (error) { this.logger.warn(`task result recovery failed for ${record.id}: ${String(error)}`) }
+    }
   }
 
   #enqueueTurn(message: InboundMessage, reservation: Reservation, saved?: InboxEntry): void {
@@ -604,7 +650,7 @@ export class ChannelsRuntime {
           throw new Error('queued project is unavailable or no longer configured; input retained for /clear')
         }
         const record: TaskRecord = {
-          workingDirectory,
+          workingDirectory, project: entry.project, replyMessage: message,
           id: entry.id, target: { channel: message.channel, accountId: message.accountId, conversationId: message.conversationId },
           senderId: message.senderId, summary: message.text.trim().replace(/\s+/g, ' ').slice(0, 80) || `附件任务（${message.media.length} 个）`,
           startedAt: Date.now(), execution: 'running', delivery: 'none',
@@ -622,7 +668,7 @@ export class ChannelsRuntime {
         this.#acceptInbound(message, reservation)
         charged = true
         queued.finish = undefined
-        await this.#runTurn(message, entry.sessionId, signal, record)
+        await this.#runTurn(message, entry.sessionId, signal, record, entry.project)
       })
       .catch((error: unknown) => {
         this.#options.logger.warn(`turn failed for ${lineKey(message)}: ${String((error as Error)?.message ?? error)}`)
@@ -657,7 +703,11 @@ export class ChannelsRuntime {
       if (!this.canManage(message)) { await this.send(message, { text: '只有管理员可以管理计划。', kind: 'notice' }); return }
       await this.#schedules.command(message, name, args); return
     }
-    if (name === 'projects' || name === 'project' || name === 'sessions' || name === 'session' || name === 'new') {
+    if (name === 'sessions' || name === 'session') {
+      await this.send(message, { kind: 'notice', text: '已移除手机历史会话切换。请在 DSH 查看历史会话；/new 可开始新会话。' })
+      return
+    }
+    if (name === 'projects' || name === 'project' || name === 'new') {
       if (name !== 'projects' && !this.canManage(message)) { await this.send(message, { text: '只有管理员可以切换项目或会话。', kind: 'notice' }); return }
       await this.send(message, { kind: 'notice', text: this.#routes.command(message, name, args) })
       return
@@ -742,7 +792,6 @@ export class ChannelsRuntime {
           queued: this.pendingInputs(message),
           pending: outbox.length,
           promptSending: context.interaction === undefined && this.#interactions.busy(message),
-          recent: this.#journal.outbound(undefined, message, 'reply'),
           context,
         })
       const blocked = this.#inbox.list().some((entry) => sameTarget(entry.message, message) && this.#queuedInputs.get(entry.id)?.blocked)
@@ -753,7 +802,7 @@ export class ChannelsRuntime {
     throw new Error(`unknown command: ${String(unknown)}`)
   }
 
-  async #runTurn(message: InboundMessage, sessionId: string, queueSignal: AbortSignal, record: TaskRecord): Promise<void> {
+  async #runTurn(message: InboundMessage, sessionId: string, queueSignal: AbortSignal, record: TaskRecord, project = 'default'): Promise<void> {
     if (queueSignal.aborted || this.#disposed) return
     const adapter = this.#adapters.get(message.channel)
     if (adapter === undefined) return
@@ -774,11 +823,6 @@ export class ChannelsRuntime {
     if (initialCard !== undefined) await this.#editCard(message, initialCard, '执行中…')
     if (typeof adapter.typing === 'function') void adapter.typing(message).catch(() => {})
     const workingDirectory = record.workingDirectory ?? this.#options.workingDirectory
-    // The legacy fallback is opt-in: it is the only path that tells the model
-    // about an output directory. The normal path relays host `present` events.
-    let outputDir = this.#options.config.autoSendFiles === true && this.#options.config.legacyOutputScan === true
-      ? this.#turnOutputDirectory(workingDirectory)
-      : undefined
     try {
       let reply
       let late: ((result: TurnReply) => void) | undefined
@@ -794,11 +838,17 @@ export class ChannelsRuntime {
       try {
         reply = await this.#driver.run({
           message, signal, sessionId, workingDirectory,
-          ...(outputDir === undefined ? {} : { outputDirectory: outputDir }),
+          deliverFiles: this.#options.config.autoSendFiles,
           onSettled: (result) => late?.(result),
+          beforeSubmit: (binding) => {
+            if (this.#disposed || !authorizeMessage(message, this.gateContext()).allow
+              || !this.#routes.acceptsQueued({ id: record.id, message, sessionId: binding.sessionId, project, workingDirectory })) throw new Error('input authorization or project changed before submission')
+            const recovery = { ...binding, message, project }
+            if (!this.#tasks.update(message, taskId, { recovery })) throw new Error('host input identity could not be persisted; submission refused')
+          },
         })
       }
-      catch (error) { reply = { text: String(error), failed: true, cancelled: false, interrupted: false, settled: false } }
+      catch (error) { reply = { sessionId, text: String(error), failed: true, cancelled: false, interrupted: false, settled: false } }
       finally { clearTimeout(progressNotice) }
       if (reply.pending === true) {
         await this.send(message, { text: '任务仍在后台处理；结果确认后会继续发送到此聊天。发 /status 查看。', kind: 'notice' })
@@ -808,56 +858,67 @@ export class ChannelsRuntime {
       if (this.#disposed || queueSignal.aborted) return
       if (controller.signal.aborted && (reply.cancelled === true || reply.settled !== true)) {
         const confirmed = reply.cancelled === true
-        this.#tasks.update(message, taskId, { execution: confirmed ? 'cancelled' : 'unknown', endedAt: Date.now() })
+        this.#tasks.update(message, taskId, { execution: confirmed ? 'cancelled' : 'unknown', endedAt: Date.now(), ...(confirmed ? { recovery: undefined } : {}) })
         const notice = confirmed ? '当前任务已取消。已完成的操作不会自动撤销。' : '停止尚未得到宿主确认。请在 DSH 核对任务状态和已完成的操作。'
         const card = cardNow()
-        if (card !== undefined) await this.#editCard(message, card, notice)
+        if (card !== undefined && await this.#editCard(message, card, notice)) return
         await this.send(message, { text: notice, kind: 'notice' })
         return
       }
       this.#activeTasks.delete(key)
-      const presented = (reply.deliverables?.length ?? 0) > 0
-      const artifacts = !reply.failed && this.#options.config.autoSendFiles === true
-        ? await this.#captureTurnArtifacts(message, workingDirectory, outputDir, reply.deliverables)
-        : {}
-      if (artifacts.outputDirectory !== undefined) outputDir = artifacts.outputDirectory
-      const captureIncomplete = artifacts.artifactsIncomplete === true
-      const saved = this.#tasks.update(message, taskId, { ...artifacts, execution: reply.interrupted === true ? 'unknown' : reply.failed === true ? 'failed' : 'completed', endedAt: Date.now(), delivery: reply.failed === true ? 'none' : 'sending' })
-      if (!saved && !reply.failed && outputDir !== undefined) await this.send(message, { kind: 'notice', text: '产物索引未能保存，本轮结果仍会发送。请在 DSH 保留文件，历史取回暂不可用。' })
-      this.logger.info(`turn for ${key} settled in ${Date.now() - record.startedAt}ms (${reply.text.length} chars)`)
-      if (reply.failed === true) {
-        this.logger.warn(`turn failed for ${key}: ${reply.text}`)
-        const text = reply.interrupted === true ? '任务等待超时，执行结果未确认。请在 DSH 核对后再决定是否重试。' : '任务执行失败。请在 DSH 核对已经完成的操作，可发 /status 查看状态。'
-        const card = cardNow()
-        if (card !== undefined) await this.#editCard(message, card, text)
-        await this.send(message, { text, kind: 'notice' })
-        return
-      }
-      const card = cardNow()
-      if (card !== undefined) await this.#editCard(message, card, '任务已完成。')
-      const results: SendResult[] = []
-      if (reply.text.trim() !== '') results.push(...await this.send(message, { text: reply.text, kind: 'reply' }, taskId))
-      // Preserve files even when the text is waiting for retry; do not claim they were sent.
-      if (!results.some((result) => !result.ok) && outputDir !== undefined && !this.#disposed) results.push(...await this.#sendProducedFiles(message, outputDir, taskId, presented))
-      if (results.length === 0) results.push(...await this.send(message, { text: '任务已完成。没有可发送的文字或文件。', kind: 'reply' }, taskId))
-      const pending = this.#outbox.list().some((entry) => entry.taskId === taskId)
-      const unconfirmed = results.some((result) => result.ok && result.unconfirmed)
-      let filesUnsent = false
-      if (results.some((result) => !result.ok) && outputDir !== undefined) {
-        try { filesUnsent = fs.readdirSync(outputDir).length > 0 } catch { filesUnsent = true }
-      }
-      const delivery = pending ? 'pending' : results.some((result) => !result.ok) || captureIncomplete ? 'failed' : results.some((result) => result.ok && result.unconfirmed) ? 'unknown' : 'sent'
-      this.#tasks.update(message, taskId, { delivery, unconfirmed, filesUnsent: filesUnsent || captureIncomplete })
-      if (results.some((result) => !result.ok && result.code === 'outbox-persist')) await this.send(message, { kind: 'notice', text: '结果发送失败，待重发记录也未能保存。请在 DSH 取回结果并检查状态目录。' })
+      await this.#finishTurn(message, record, reply, cardNow())
     } finally {
       if (this.#activeTasks.get(key) === active) this.#activeTasks.delete(key)
-      if (outputDir !== undefined) { try { fs.rmdirSync(outputDir) } catch { /* Keep artifacts. */ } }
     }
   }
 
-  /** Send one outgoing message, split to the channel's capability, with outbox fallback. */
+  /** Live execution and restart reconciliation share one result/attachment path. */
+  async #finishTurn(message: InboundMessage, record: TaskRecord, reply: TurnReply, taskCard?: { messageId: string }): Promise<void> {
+    const taskId = record.id
+    const key = lineKey(message)
+    const workingDirectory = record.workingDirectory ?? this.#options.workingDirectory
+    const planned = !reply.failed && this.config.autoSendFiles
+      ? await prepareTaskArtifacts({
+        record: { outputDirectory: record.outputDirectory, artifacts: record.artifacts, artifactsIncomplete: record.artifactsIncomplete },
+        reply, workingDirectory,
+        maxFiles: this.config.maxProducedFiles, maxBytes: this.config.maxProducedBytes,
+      })
+      : { index: {}, attachments: [] as ArtifactDelivery[], notices: [] }
+    for (const text of planned.notices) {
+      await this.send(message, { kind: 'notice', text }).catch((error: unknown) => this.logger.warn(`deliverable notice failed: ${String(error)}`))
+    }
+    const artifacts = planned.index
+    const captureIncomplete = artifacts.artifactsIncomplete === true
+    const completion: Partial<TaskRecord> = { ...artifacts, filesUnsent: (artifacts.artifacts?.length ?? 0) > 0 || captureIncomplete, execution: reply.cancelled === true ? 'cancelled' : reply.interrupted === true ? 'unknown' : reply.failed === true ? 'failed' : 'completed', endedAt: Date.now(), delivery: reply.failed === true ? 'none' : 'sending' }
+    const saved = this.#tasks.update(message, taskId, completion)
+    if (!saved && !reply.failed && artifacts.outputDirectory !== undefined) await this.send(message, { kind: 'notice', text: '产物索引未能保存，本轮结果仍会发送。请在 DSH 保留文件，历史取回暂不可用。' })
+    this.logger.info(`turn for ${key} settled in ${Date.now() - record.startedAt}ms (${reply.text.length} chars)`)
+    if (reply.failed === true) {
+      if (reply.settled) this.#tasks.update(message, taskId, { recovery: undefined })
+      this.logger.warn(`turn failed for ${key}: ${reply.text}`)
+      const text = reply.cancelled === true ? '当前任务已取消。已完成的操作不会自动撤销。' : reply.interrupted === true ? '任务等待超时，执行结果未确认。请在 DSH 核对后再决定是否重试。' : '任务执行失败。请在 DSH 核对已经完成的操作，可发 /status 查看状态。'
+      const card = taskCard
+      if (card !== undefined && await this.#editCard(message, card, text)) return
+      await this.send(message, { text, kind: 'notice' })
+      return
+    }
+    const card = taskCard
+    if (card !== undefined) await this.#editCard(message, card, '任务已完成。')
+    const body = reply.text.trim() !== '' ? reply.text : planned.attachments.length ? '' : '任务已完成。没有可发送的文字或文件。'
+    const results = await this.#enqueueReply(message, body, taskId, planned.attachments, completion)
+    // The outbox commits every text/file receipt and its task state together.
+    // Before handoff succeeds, keep host recovery as the source of the result.
+    if (this.#tasks.get(message, taskId)?.recovery !== undefined) {
+      this.#tasks.update(message, taskId, { delivery: 'failed', filesUnsent: captureIncomplete || planned.attachments.length > 0 })
+    }
+
+    if (results.some((result) => !result.ok && result.code === 'outbox-persist')) await this.send(message, { kind: 'notice', text: '结果发送失败，待重发记录也未能保存。请在 DSH 取回结果并检查状态目录。' })
+  }
+
+  /** Persist replies before sending; ephemeral notices and prompts send directly. */
   async send(target: Target, outgoing: Outgoing, taskId?: string): Promise<SendResult[]> {
     if (this.#disposed) return [{ ok: false, code: 'stopped' }]
+    if (!this.#taskDeliveryAllowed(target, taskId)) return [{ ok: false, code: 'task-delivery-blocked' }]
     const adapter = this.#adapters.get(target.channel)
     if (adapter === undefined) return [{ ok: false, code: 'unknown-channel', detail: target.channel }]
     const scheduledId = taskId?.startsWith('schedule:') ? taskId : undefined
@@ -867,17 +928,17 @@ export class ChannelsRuntime {
     const limit = Number.isFinite(adapter.capabilities.maxTextChars) && adapter.capabilities.maxTextChars > 0 ? adapter.capabilities.maxTextChars : this.#options.config.maxTextChars
     const bubbles = splitIntoBubbles(text, limit)
     const actions = outgoing.actions !== undefined && adapter.capabilities.actions === true ? outgoing.actions : undefined
-    if (outgoing.kind === 'reply' && bubbles.length > 0 && this.#outbox.list().some((entry) => sameTarget(entry.target, target))) {
-      const saved = this.#outbox.add(target, { kind: 'reply', text: bubbles[0]! }, { code: 'queued', remaining: bubbles.slice(1), taskId })
-      return [{ ok: false, code: saved === undefined ? 'outbox-persist' : 'queued' }]
-    }
     const results: SendResult[] = []
+    if (outgoing.kind === 'reply' && bubbles.length > 0) {
+      results.push(...await this.#enqueueReply(target, outgoing.text ?? '', taskId))
+      if (results.some((result) => !result.ok)) return results
+    }
     const base = { kind: outgoing.kind }
-    for (const [index, bubble] of bubbles.entries()) {
+    for (const [index, bubble] of (outgoing.kind === 'reply' ? [] : bubbles).entries()) {
       if (index > 0 && this.#options.config.bubbleGapMs > 0) await new Promise((resolve) => setTimeout(resolve, this.#options.config.bubbleGapMs))
       if (this.#disposed) return [...results, { ok: false, code: 'stopped' }]
-      if (scheduledId !== undefined && !await this.#schedules.canDeliver(scheduledId, target)) return [...results, { ok: false, code: 'schedule-delivery-cancelled' }]
-      if (this.#disposed) return [...results, { ok: false, code: 'stopped' }]
+      // Delivery authorization is checked once per batch (above); re-reading the
+      // native catalog for every bubble made a long reply O(bubbles) round trips.
       const id = `out-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
       const result = await this.#deliver(adapter, target, {
         ...base,
@@ -885,103 +946,47 @@ export class ChannelsRuntime {
         ...(index === 0 && actions !== undefined ? { actions } : {}),
       }, bubble, id)
       results.push(result)
-      if (!result.ok) {
-        if (outgoing.kind === 'reply' && this.#outbox.add(target, { kind: 'reply', text: bubble }, { id, code: result.code, retryAfterMs: result.retryAfterMs, remaining: bubbles.slice(index + 1), taskId }) === undefined) results[results.length - 1] = { ok: false, code: 'outbox-persist' }
-        return results
-      }
+      if (!result.ok) return results
     }
     for (const item of outgoing.media ?? []) {
       if (this.#disposed) return [...results, { ok: false, code: 'stopped' }]
-      // Media cannot be re-sent from the outbox (it holds text), so a failure
-      // is reported and journalled, not queued.
+      // Manual sends carry temporary paths; automatic task files use durable artifact references.
       const result = await this.#deliver(adapter, target, { kind: outgoing.kind, text: '', media: [item] }, '')
       results.push(result)
     }
     return results
   }
 
-  /** Edit the task card when the adapter supports it; never fail the turn. */
-  async #editCard(message: InboundMessage, card: { messageId: string }, text: string): Promise<void> {
+  async #enqueueReply(target: Target, text: string, taskId?: string, attachments: ArtifactDelivery[] = [], completion: Partial<TaskRecord> = {}): Promise<SendResult[]> {
+    if (this.#disposed) return [{ ok: false, code: 'stopped' }]
+    if (!this.#taskDeliveryAllowed(target, taskId)) return [{ ok: false, code: 'task-delivery-blocked' }]
+    const adapter = this.#adapters.get(target.channel)
+    if (!adapter) return [{ ok: false, code: 'unknown-channel' }]
+    const limit = adapter.capabilities.maxTextChars > 0 ? adapter.capabilities.maxTextChars : this.config.maxTextChars
+    const parts = splitIntoBubbles(plainText(text), limit).filter((part) => part.trim() !== '')
+    if (!parts.length && !attachments.length) return []
+    const entry = this.#outbox.enqueue(target, parts, taskId,
+      taskId !== undefined && this.#tasks.get(target, taskId)?.recovery !== undefined
+        ? (file) => this.#tasks.handoffDelivery(target, taskId, file, completion) : undefined, attachments)
+    if (!entry) return [{ ok: false, code: 'outbox-persist' }]
+    return this.#outbox.sendPending(entry, (pending) => this.#sendPending(pending))
+  }
+
+  /** Update the task card in place; `false` means the channel cannot edit, so send a notice instead. */
+  async #editCard(message: InboundMessage, card: { messageId: string }, text: string): Promise<boolean> {
     const adapter = this.#adapters.get(message.channel)
-    if (adapter === undefined || adapter.capabilities.edit !== true || typeof adapter.edit !== 'function') return
+    if (adapter === undefined || adapter.capabilities.edit !== true || typeof adapter.edit !== 'function') return false
     try {
       const result = await adapter.edit(message, card.messageId, { kind: 'notice', text })
-      if (!result.ok) this.logger.info(`task card edit was not accepted: ${result.code}`)
+      if (!result.ok) {
+        this.logger.info(`task card edit was not accepted: ${result.code}`)
+        return false
+      }
+      return true
     } catch (error) {
       this.logger.warn(`task card edit failed: ${String(error)}`)
+      return false
     }
-  }
-
-  /**
-   * Put this turn's presented files into a task-owned directory so /files and
-   * /resend have durable, contained paths. A failure is reported, never fatal
-   * to the reply that is already waiting to go out.
-   */
-  async #captureTurnArtifacts(
-    message: InboundMessage,
-    workingDirectory: string,
-    existing: string | undefined,
-    deliverables: readonly { path: string }[] | undefined,
-  ): Promise<Pick<TaskRecord, 'outputDirectory' | 'artifacts' | 'artifactsIncomplete'>> {
-    const files = Array.isArray(deliverables) ? deliverables : []
-    if (files.length === 0) return existing === undefined ? {} : await captureArtifacts(existing)
-    const directory = existing ?? this.#turnOutputDirectory(workingDirectory)
-    if (directory === undefined) return {}
-    const limit = Math.max(0, Math.floor(this.#options.config.maxProducedFiles))
-    let failed = Math.max(0, files.length - limit)
-    for (const file of files.slice(0, limit)) {
-      const source = path.isAbsolute(file.path) ? file.path : path.resolve(workingDirectory, file.path)
-      if (await copyDeliverable(source, directory, this.#options.config.maxProducedBytes, workingDirectory) === undefined) failed += 1
-    }
-    if (failed > 0) {
-      await this.send(message, {
-        kind: 'notice',
-        text: `${failed} 个附件未发送（超过数量或大小限制、已改变或无法安全读取），请在 DSH 核对。`,
-      }).catch((error: unknown) => this.logger.warn(`deliverable notice failed: ${String(error)}`))
-    }
-    const captured = await captureArtifacts(directory, { includeAll: files.length > 0 })
-    return { ...captured, ...(failed > 0 ? { artifactsIncomplete: true } : {}) }
-  }
-
-  #turnOutputDirectory(workingDirectory: string): string | undefined {
-    if (!this.#options.config.autoSendFiles) return undefined
-    try {
-      const workspace = path.resolve(workingDirectory)
-      fs.mkdirSync(workspace, { recursive: true })
-      return fs.mkdtempSync(path.join(workspace, '.channel-output-'))
-    } catch (error) {
-      this.#options.logger.warn(`could not create a turn output directory: ${String(error)}`)
-      return undefined
-    }
-  }
-
-  /**
-   * Send what the turn wrote. The scan is bounded, and a file that cannot go
-   * out costs a log line, never the reply that already went out.
-   */
-  async #sendProducedFiles(message: InboundMessage, outputDir: string, taskId: string, includeAll = false): Promise<SendResult[]> {
-    if (this.#options.config.autoSendFiles !== true) return []
-    const scan = await scanProducedFiles({
-      dir: outputDir, sinceMs: 0,
-      maxFiles: this.#options.config.maxProducedFiles,
-      maxBytes: this.#options.config.maxProducedBytes,
-      ...(includeAll ? { includeAll: true } : {}),
-    })
-    const results: SendResult[] = []
-    let unavailable = 0
-    for (const file of scan.files) {
-      if (this.#disposed) break
-      const copy = await snapshotArtifact(path.dirname(outputDir), outputDir, path.relative(outputDir, file.path), this.config.maxProducedBytes)
-      if (copy === undefined) { unavailable++; results.push({ ok: false, code: 'artifact-unavailable' }); continue }
-      try { results.push(...await this.send(message, { kind: 'reply', media: [{ kind: 'file', path: copy.path, name: file.name }] }, taskId)) }
-      finally { await copy.dispose() }
-    }
-    if (unavailable > 0) await this.send(message, { kind: 'notice', text: `${unavailable} 个附件在发送前已改变或无法安全读取，请在 DSH 核对。` })
-    if (scan.skipped > 0 || scan.incomplete) {
-      results.push({ ok: false, code: 'files-skipped' })
-      await this.send(message, { kind: 'notice', text: `部分附件未发送：${scan.skipped > 0 ? `${scan.skipped} 个文件超过数量或大小限制、为空或是符号链接。` : ''}${scan.incomplete ? '输出目录未能完整扫描。' : ''}请在 DSH 取回文件。` })
-    }
-    return results
   }
 
   /** One send, journalled in two phases. */
@@ -1015,44 +1020,60 @@ export class ChannelsRuntime {
     return result
   }
 
-  /** Start a periodic outbox retry; returns the stop function. */
+  #taskDeliveryAllowed(target: Target, taskId?: string): boolean {
+    if (taskId === undefined || taskId.startsWith('schedule:')) return true
+    const task = this.#tasks.get(target, taskId)
+    if (task === undefined) return false
+    const message: InboundMessage = { ...target, senderId: task.senderId, text: '', media: [], group: false, at: 0 }
+    return authorizeMessage(message, this.gateContext()).allow
+      && (task.project === undefined ? this.#routes.artifactWorkspace(task) !== undefined
+        : this.#routes.acceptsQueued({ id: task.id, message, sessionId: '', project: task.project, workingDirectory: task.workingDirectory }))
+  }
+
+  async #sendPending(entry: OutboxEntry): Promise<SendResult> {
+    const adapter = this.#adapters.get(entry.target.channel)
+    if (adapter === undefined) return { ok: false, code: 'unknown-channel' }
+    if (this.#disposed) return { ok: false, code: 'stopped' }
+    let accounts
+    try { accounts = await adapter.accounts.list() }
+    catch { return { ok: false, code: 'account-unavailable' } }
+    if (!accounts.some((account) => account.accountId === entry.target.accountId && !account.expired)) return { ok: false, code: 'account-unavailable' }
+    if ((entry.part ?? 0) > 0 && this.config.bubbleGapMs > 0) await delay(this.config.bubbleGapMs)
+    if (this.#disposed || this.#adapters.get(entry.target.channel) !== adapter) return { ok: false, code: 'stopped' }
+    if (entry.taskId?.startsWith('schedule:') && !await this.#schedules.canDeliver(entry.taskId, entry.target)) {
+      return { ok: false, code: this.#outbox.drop(entry.id) ? 'schedule-delivery-cancelled' : 'outbox-persist' }
+    }
+    if (this.#disposed) return { ok: false, code: 'stopped' }
+    if (!this.#taskDeliveryAllowed(entry.target, entry.taskId)) return { ok: false, code: 'task-delivery-blocked' }
+    let outgoing: Outgoing = { kind: entry.outgoing.kind, text: entry.outgoing.text }
+    let copy: Awaited<ReturnType<typeof snapshotDelivery>>
+    const artifact = entry.outgoing.artifact
+    if (artifact !== undefined) {
+      if (!this.config.autoSendFiles) return { ok: false, code: 'files-disabled' }
+      const task = entry.taskId === undefined ? undefined : this.#tasks.get(entry.target, entry.taskId)
+      const workspace = task === undefined ? undefined : this.#routes.artifactWorkspace(task)
+      if (!task?.outputDirectory || !workspace || !task.artifacts?.includes(artifact.relative)) return { ok: false, code: 'artifact-unavailable' }
+      copy = await snapshotDelivery(workspace, task.outputDirectory, artifact, this.config.maxProducedBytes)
+      if (!copy) return { ok: false, code: 'artifact-unavailable' }
+      outgoing = { kind: 'reply', media: [{ kind: artifact.kind, path: copy.path, name: artifact.name }] }
+    }
+    let result: SendResult
+    try {
+      if (this.#disposed) return { ok: false, code: 'stopped' }
+      if (artifact && !this.config.autoSendFiles) return { ok: false, code: 'files-disabled' }
+      if (!this.#taskDeliveryAllowed(entry.target, entry.taskId)) return { ok: false, code: 'task-delivery-blocked' }
+      const task = entry.taskId === undefined ? undefined : this.#tasks.get(entry.target, entry.taskId)
+      if (task?.replyMessage !== undefined) adapter.restoreInbound?.({ ...task.replyMessage, ...entry.target, senderId: task.senderId })
+      result = await this.#deliver(adapter, entry.target, outgoing, entry.outgoing.text ?? '', entry.part === undefined ? entry.id : `${entry.id}:${entry.part}`)
+    } finally { await copy?.dispose() }
+    return result.ok && entry.unconfirmed ? { ...result, unconfirmed: true } : result
+  }
+
   startOutboxRetry(intervalMs = 30_000): () => void {
     const timer = setInterval(() => {
       void this.resumePending()
-      const retryTasks = new Map<string, { id: string; target: Target; unconfirmed: boolean }>()
       void this.#outbox
-        .drain(async (entry) => {
-          const adapter = this.#adapters.get(entry.target.channel)
-          if (adapter === undefined) return { ok: false as const, code: 'unknown-channel' }
-          if (this.#disposed) return { ok: false as const, code: 'stopped' }
-          const accounts = await adapter.accounts.list()
-          if (!accounts.some((account) => account.accountId === entry.target.accountId && !account.expired)) {
-            return { ok: false as const, code: 'account-unavailable' }
-          }
-          if (this.#disposed || this.#adapters.get(entry.target.channel) !== adapter) return { ok: false as const, code: 'stopped' }
-          if ((entry.part ?? 0) > 0 && this.config.bubbleGapMs > 0) await new Promise((resolve) => setTimeout(resolve, this.config.bubbleGapMs))
-          if (this.#disposed) return { ok: false as const, code: 'stopped' }
-          if (entry.taskId?.startsWith('schedule:') && !await this.#schedules.canDeliver(entry.taskId, entry.target)) {
-            return { ok: false as const, code: this.#outbox.drop(entry.id) ? 'schedule-delivery-cancelled' : 'outbox-persist' }
-          }
-          if (this.#disposed) return { ok: false as const, code: 'stopped' }
-          const result = await this.#deliver(adapter, entry.target, entry.outgoing, entry.outgoing.text ?? '', entry.part === undefined ? entry.id : `${entry.id}:${entry.part}`)
-          if (entry.taskId !== undefined && result.ok) {
-            const previous = retryTasks.get(entry.taskId)
-            retryTasks.set(entry.taskId, { id: entry.taskId, target: entry.target, unconfirmed: previous?.unconfirmed === true || result.unconfirmed === true })
-            if (result.unconfirmed) this.#tasks.update(entry.target, entry.taskId, { unconfirmed: true })
-          }
-          return result.ok === true ? { ok: true as const } : { ok: false as const, code: result.code, retryAfterMs: result.retryAfterMs }
-        })
-        .then(() => {
-          for (const task of retryTasks.values()) {
-            if (this.#outbox.list().some((entry) => entry.taskId === task.id && sameTarget(entry.target, task.target))) continue
-            const saved = this.#tasks.get(task.target, task.id)
-            const delivery = saved?.filesUnsent ? 'failed' : task.unconfirmed || saved?.unconfirmed || saved?.delivery === 'unknown' ? 'unknown' : 'sent'
-            this.#tasks.update(task.target, task.id, { delivery })
-          }
-          retryTasks.clear()
-        })
+        .drain((entry) => this.#sendPending(entry))
         .catch((error: unknown) => this.#options.logger.warn(`outbox retry failed: ${String(error)}`))
     }, intervalMs)
     timer.unref?.()

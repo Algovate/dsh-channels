@@ -1,22 +1,13 @@
-/** Task-scoped artifact discovery and direct chat retrieval; never accept a user-supplied path. */
+/** Task-scoped artifact capture and retrieval; never accept a user-supplied retrieval path. */
 import fs from 'node:fs/promises'
-import { constants } from 'node:fs'
+import { constants, createReadStream } from 'node:fs'
+import { createHash } from 'node:crypto'
 import os from 'node:os'
 import path from 'node:path'
-import { scanProducedFiles } from './produced.js'
 import { chatParagraphs } from './outbound.js'
 import { formatBytes } from './media.js'
 import type { TaskRecord, Tasks } from './store/tasks.js'
 import type { InboundMessage, Outgoing, OutgoingMedia, SendResult } from './types.js'
-
-export async function captureArtifacts(directory: string, options: { includeAll?: boolean } = {}): Promise<Pick<TaskRecord, 'outputDirectory' | 'artifacts' | 'artifactsIncomplete'>> {
-  const scan = await scanProducedFiles({ dir: directory, sinceMs: 0, maxFiles: 100, maxBytes: Number.MAX_SAFE_INTEGER, ...(options.includeAll === true ? { includeAll: true } : {}) })
-  return {
-    outputDirectory: directory,
-    artifacts: scan.files.map((file) => path.relative(directory, file.path)).sort(),
-    artifactsIncomplete: scan.incomplete || scan.skipped > 0,
-  }
-}
 
 interface ArtifactFile { path: string; name: string; bytes: number; dev: number; ino: number }
 
@@ -77,6 +68,11 @@ async function snapshotFile(file: ArtifactFile, maxBytes: number): Promise<{ pat
 
 /** Copy one host-declared deliverable into the task's artifact directory. */
 export async function copyDeliverable(source: string, directory: string, maxBytes: number, root?: string): Promise<string | undefined> {
+  let expected
+  try {
+    expected = await fs.lstat(source)
+    if (!expected.isFile()) return undefined
+  } catch { return undefined }
   let actual = source
   if (root !== undefined) {
     try {
@@ -99,7 +95,8 @@ export async function copyDeliverable(source: string, directory: string, maxByte
   let complete = false
   try {
     const stat = await sourceFile.stat()
-    if (!stat.isFile() || stat.size <= 0 || stat.size > maxBytes) return undefined
+    // O_NOFOLLOW guards only the leaf; inode identity also detects a swapped parent.
+    if (!stat.isFile() || stat.dev !== expected.dev || stat.ino !== expected.ino || stat.size <= 0 || stat.size > maxBytes) return undefined
     const base = (path.basename(source).replace(/[^A-Za-z0-9._-]/g, '_').replace(/^\.+/, '') || 'deliverable').slice(0, 120)
     const safe = base === '' || base === '.' || base === '..' ? 'deliverable' : base
     const extension = path.extname(safe)
@@ -143,11 +140,46 @@ export async function snapshotArtifact(workspace: string, outputDirectory: strin
   try { return await snapshotFile(file, maxBytes) } catch { return undefined }
 }
 
-function mediaKind(name: string): OutgoingMedia['kind'] {
+export function mediaKind(name: string): OutgoingMedia['kind'] {
   const ext = path.extname(name).toLowerCase()
   if (['.png', '.jpg', '.jpeg', '.gif', '.webp'].includes(ext)) return 'image'
   if (['.mp4', '.mov', '.webm'].includes(ext)) return 'video'
   return 'file'
+}
+
+export interface ArtifactDelivery {
+  relative: string
+  name: string
+  kind: OutgoingMedia['kind']
+  bytes: number
+  sha256: string
+}
+
+async function fingerprint(file: string): Promise<{ bytes: number; sha256: string }> {
+  const hash = createHash('sha256')
+  let bytes = 0
+  for await (const chunk of createReadStream(file)) { bytes += chunk.length; hash.update(chunk) }
+  return { bytes, sha256: hash.digest('hex') }
+}
+
+/** Retain the identity of exactly the bytes approved for automatic delivery. */
+export async function describeArtifact(workspace: string, directory: string, relative: string, maxBytes: number): Promise<ArtifactDelivery | undefined> {
+  const copy = await snapshotArtifact(workspace, directory, relative, maxBytes)
+  if (!copy) return undefined
+  try { return { relative, name: path.basename(relative), kind: mediaKind(relative), ...await fingerprint(copy.path) } }
+  finally { await copy.dispose() }
+}
+
+/** A later retry may upload only the original planned bytes, from a private copy. */
+export async function snapshotDelivery(workspace: string, directory: string, artifact: ArtifactDelivery, maxBytes: number): Promise<{ path: string; dispose: () => Promise<void> } | undefined> {
+  const copy = await snapshotArtifact(workspace, directory, artifact.relative, maxBytes)
+  if (!copy) return undefined
+  try {
+    const current = await fingerprint(copy.path)
+    if (current.bytes === artifact.bytes && current.sha256 === artifact.sha256) return copy
+  } catch { /* An unreadable snapshot is not safe to upload. */ }
+  await copy.dispose()
+  return undefined
 }
 
 export async function answerArtifactCommand({ message, name, args, tasks, workspace, workspaceFor, maxBytes, authorized, send }: {

@@ -14,6 +14,9 @@
  */
 import type { InboundMedia, InboundMessage } from './types.js'
 
+/** Shared bound for captured indexes, durable deliveries and recovery cursors. */
+export const MAX_PRODUCED_FILES = 100
+
 const KIND_LABEL: Record<InboundMedia['kind'], string> = {
   image: '图片',
   file: '文件',

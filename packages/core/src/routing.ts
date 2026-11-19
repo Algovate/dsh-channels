@@ -10,7 +10,7 @@ import type { CounterStore } from './store/counters.js'
 import type { ChannelsConfig } from './config.js'
 import type { InboundMessage } from './types.js'
 
-export type RoutingCommand = 'projects' | 'project' | 'sessions' | 'session' | 'new'
+export type RoutingCommand = 'projects' | 'project' | 'new'
 interface RoutingOptions {
   stateRoot: string
   workingDirectory: string
@@ -79,18 +79,8 @@ export class ChannelRoutes {
       } else {
         const routeKey = this.#routeKey(state.project, this.#workspaceFor(state.project))
         const selection = state.sessions[routeKey] ?? { current: 0, max: 0 }
-        if (name === 'sessions') {
-          const rows = Array.from({ length: Math.min(selection.max + 1, 20) }, (_, index) => selection.max - index)
-          if (!rows.includes(selection.current)) rows.push(selection.current)
-          return chatParagraphs(`【${state.project} 的会话】`, ...rows.map((line) => `${line}${line === selection.current ? '（当前）' : ''}`), '切换：/session <编号>；新建：/new。显示最近 20 个编号及当前编号。')
-        }
-        if (name === 'session') {
-          if (!/^(0|[1-9]\d{0,15})$/.test(args) || !Number.isSafeInteger(Number(args)) || Number(args) > selection.max) { return '会话编号不存在或无效，请用 /sessions 查看。' }
-          selection.current = Number(args)
-        } else {
-          if (!Number.isSafeInteger(selection.max + 1)) throw new Error('会话编号已达上限')
-          selection.current = ++selection.max
-        }
+        if (!Number.isSafeInteger(selection.max + 1)) throw new Error('会话编号已达上限')
+        selection.current = ++selection.max
         state.sessions[routeKey] = selection
       }
       if (!this.#lines.saveRouting(lineKey(message), state)) {
@@ -100,7 +90,7 @@ export class ChannelRoutes {
       return `${name === 'new' ? '已开新会话' : '已切换'}：${state.project}（第 ${line} 条）。下一条任务使用此选择；已排队任务保持原项目和会话。`
     } catch (error) {
       this.#options.logger.warn(`routing command failed: ${String(error)}`)
-      return '切换失败：项目目录或会话状态不可用，未更改选择。请在 DSH 检查配置和 lines.json；可用 /project default 返回默认项目。'
+      return '切换失败：项目目录或会话状态不可用，未更改选择。请在 DSH 检查配置和 state.json 的 lines 段；可用 /project default 返回默认项目。'
     }
   }
 

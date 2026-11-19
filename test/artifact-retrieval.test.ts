@@ -1,3 +1,4 @@
+import { readSectionJson, writeSectionJson } from './state-helper.js'
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import os from 'node:os'
@@ -5,7 +6,7 @@ import path from 'node:path'
 import test from 'node:test'
 import { setTimeout as delay } from 'node:timers/promises'
 import { parseCommand, TASK_CONTROLS } from '../packages/core/src/commands.js'
-import { createChannelsRuntime, createFakeAdapter, createFakeUserMessage } from './runtime-helper.js'
+import { createChannelsRuntime, createFakeAdapter } from './runtime-helper.js'
 import { createHarness, inbound } from './harness.js'
 import { stateFile } from '../packages/core/src/store/state.js'
 
@@ -21,7 +22,7 @@ function fixture(extra: Record<string, unknown> = {}) {
   fs.writeFileSync(path.join(dir, 'chart.png'), 'png')
   fs.writeFileSync(path.join(dir, 'sub/report.md'), 'report')
   const task = { id: 'aaaaaaaa-1111-2222-3333-444444444444', target: { channel: 'fake', accountId: 'acct', conversationId: 'conv' }, senderId: 'sender', summary: 'make report', startedAt: Date.now() - 1000, endedAt: Date.now(), execution: 'completed', delivery: 'sent', outputDirectory: dir, artifacts: ['chart.png', 'sub/report.md'], ...extra }
-  fs.writeFileSync(path.join(root, 'tasks.json'), JSON.stringify([task]))
+  writeSectionJson(root, 'tasks', JSON.stringify([task]))
   const h = createHarness()
   const runtime = createChannelsRuntime({ stateRoot: root, workingDirectory: root, ctx: h.ctx, config: { allowedSenders: ['sender', 'other'], maxProducedBytes: 16 } })
   const adapter = createFakeAdapter(); runtime.register(adapter)
@@ -51,7 +52,7 @@ test('listing and selecting an indexed artifact sends the original file without 
     assert.equal(path.basename(f.media()[0]!.path), 'report.md')
     assert.equal(f.h.followedUp.length, 0)
     assert.equal(f.runtime.pendingInputs(), 0)
-    const saved = JSON.parse(fs.readFileSync(path.join(f.root, 'tasks.json'), 'utf8'))
+    const saved = JSON.parse(readSectionJson(f.root, 'tasks'))
     assert.equal(saved[0].delivery, 'sent', 'a partial manual resend must not rewrite original task status')
   } finally { await f.close() }
 })
@@ -149,8 +150,8 @@ test('new task artifacts are persisted before delivery and can be recovered afte
   const first = open(); first.register(createFakeAdapter())
   try {
     first.dispatch(inbound({ text: 'create image' }))
-    await until(() => fs.existsSync(path.join(root, 'tasks.json')) && JSON.parse(fs.readFileSync(path.join(root, 'tasks.json'), 'utf8'))[0]?.delivery === 'sent')
-    const task = JSON.parse(fs.readFileSync(path.join(root, 'tasks.json'), 'utf8'))[0]
+    await until(() => fs.existsSync(path.join(root, 'state.json')) && JSON.parse(readSectionJson(root, 'tasks'))?.[0]?.delivery === 'sent')
+    const task = JSON.parse(readSectionJson(root, 'tasks'))[0]
     assert.deepEqual(task.artifacts, ['new.png'])
     assert.ok(task.outputDirectory)
     await first.dispose()
@@ -188,7 +189,7 @@ test('ambiguous task prefixes and invalid file numbers do not upload or invoke a
   const f = fixture()
   try {
     await f.runtime.dispose()
-    fs.writeFileSync(path.join(f.root, 'tasks.json'), JSON.stringify([f.task, { ...f.task, id: 'aaaaaaaa-9999-2222-3333-444444444444' }]))
+    writeSectionJson(f.root, 'tasks', JSON.stringify([f.task, { ...f.task, id: 'aaaaaaaa-9999-2222-3333-444444444444' }]))
     const runtime = createChannelsRuntime({ stateRoot: f.root, workingDirectory: f.root, ctx: f.h.ctx })
     const adapter = createFakeAdapter(); runtime.register(adapter)
     try {
@@ -240,15 +241,12 @@ test('bounded multi-chunk copies retain file bytes and clean up after a failed u
 
 test('an artifact-index write failure is disclosed while the completed result is still delivered', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'channel-artifact-failure-'))
-  const h = createHarness({ onFollowup() {
+  const source = path.join(root, 'image.png')
+  fs.writeFileSync(source, 'png')
+  const h = createHarness({ deliverables: () => [{ path: source }], onFollowup() {
     stateFile(root).failNextWrite('tasks')
   } })
-  const runtime = createChannelsRuntime({ stateRoot: root, workingDirectory: root, ctx: h.ctx, config: { legacyOutputScan: true }, createUserMessage(fields) {
-    const blocks = fields['content'] as Array<{ text: string }>
-    const directory = /directory: (.+)\.$/m.exec(blocks[0]?.text ?? '')?.[1]
-    if (directory) fs.writeFileSync(path.join(directory, 'image.png'), 'png')
-    return createFakeUserMessage(fields)
-  } })
+  const runtime = createChannelsRuntime({ stateRoot: root, workingDirectory: root, ctx: h.ctx })
   const adapter = createFakeAdapter(); runtime.register(adapter)
   try {
     runtime.dispatch(inbound({ text: 'make image' }))

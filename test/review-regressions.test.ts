@@ -1,3 +1,4 @@
+import { readSectionJson, writeSectionJson } from './state-helper.js'
 import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
 import fs from 'node:fs'
@@ -204,7 +205,7 @@ test('shutdown preserves queued work and rejects duplicate provider replay', asy
   runtime.dispose() // no microtask has started the queued turn
   const restarted = await open()
   assert.equal(restarted.canReceive({ ...message }), false)
-  assert.equal(JSON.parse(fs.readFileSync(path.join(stateRoot, 'inbox.json'), 'utf8')).length, 1)
+  assert.equal(JSON.parse(readSectionJson(stateRoot, 'inbox')).length, 1)
   restarted.dispose()
 })
 
@@ -241,9 +242,9 @@ test('outbox does not retry via a replacement account', async () => {
   const target = inbound()
   await runtime.send(target, { kind: 'reply', text: 'old account private reply' })
   const file = path.join(path.dirname(path.dirname(runtime.journal.file())), 'outbox.json')
-  const persisted = JSON.parse(fs.readFileSync(file, 'utf8'))
+  const persisted = JSON.parse(readSectionJson(path.dirname(file), 'outbox'))
   persisted.items[0].nextAt = 0
-  fs.writeFileSync(file, JSON.stringify(persisted))
+  writeSectionJson(path.dirname(file), 'outbox', JSON.stringify(persisted))
   const replacement = createFakeAdapter()
   replacement.accounts.list = async () => [{ accountId: 'replacement', expired: false }]
   // Use the same runtime and remove the prior adapter as if the loader restarted it.
@@ -255,25 +256,27 @@ test('outbox does not retry via a replacement account', async () => {
   runtime.dispose()
 })
 
-test('the per-turn output directory cannot be replaced by a link to another directory', async () => {
+test('a declared deliverable cannot be a symlink to another directory’s private file', async () => {
   const workspace = temp()
   const shared = temp()
+  const source = path.join(workspace, 'report.txt')
   fs.writeFileSync(path.join(shared, 'private.txt'), 'private file')
-  const harness = createHarness({
-    onFollowup() {
-      const output = fs.readdirSync(workspace).find((entry) => entry.startsWith('.channel-output-'))!
-      fs.rmdirSync(path.join(workspace, output))
-      fs.symlinkSync(shared, path.join(workspace, output), 'junction')
-    },
-  })
-  const runtime = createChannelsRuntime({ ctx: harness.ctx, workingDirectory: workspace, config: { legacyOutputScan: true } })
+  fs.symlinkSync(path.join(shared, 'private.txt'), source)
+  const harness = createHarness({ deliverables: () => [{ path: source }] })
+  const runtime = createChannelsRuntime({ ctx: harness.ctx, workingDirectory: workspace })
   const adapter = createFakeAdapter()
   runtime.register(adapter)
-  runtime.dispatch(inbound())
-  await delay(50)
-  assert.equal(adapter.sent.filter((entry) => entry.outgoing.kind === 'reply').length, 1)
-  assert.ok(adapter.sent.every((entry) => entry.outgoing.media === undefined))
-  runtime.dispose()
+  try {
+    runtime.dispatch(inbound())
+    await delay(50)
+    assert.equal(adapter.sent.filter((entry) => entry.outgoing.kind === 'reply').length, 1)
+    assert.ok(adapter.sent.every((entry) => entry.outgoing.media === undefined))
+    assert.equal(fs.readFileSync(path.join(shared, 'private.txt'), 'utf8'), 'private file')
+  } finally {
+    await runtime.dispose()
+    fs.rmSync(workspace, { recursive: true, force: true })
+    fs.rmSync(shared, { recursive: true, force: true })
+  }
 })
 
 test('/status does not disclose another conversation’s queued sends or pending approvals', async () => {

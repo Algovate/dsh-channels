@@ -31,6 +31,7 @@ export { assistantTextOf } from './turn-progress.js'
 import { sessionIdFor } from './ids.js'
 import { inboundTextWithMedia } from './media.js'
 import { extractDocumentText } from './documents.js'
+import { recoverTurn, type TurnBinding, type RecoveryCursor } from './turn-recovery.js'
 import type { InboundMedia } from './types.js'
 
 /** What `agents.create` / `agents.get` hand back, as far as this module cares. */
@@ -71,6 +72,8 @@ export interface TurnReply {
   pending?: boolean
   /** Files the host declared through `present` during this turn. */
   deliverables?: PresentedFile[]
+  /** Recovery saw more declared files than its durable cursor can retain. */
+  deliverablesIncomplete?: boolean
 }
 
 export interface TurnContextBlock {
@@ -86,11 +89,13 @@ export interface TurnRequest {
   context?: TurnContextBlock[]
   /** Snapshot of the configured project chosen when this input was accepted. */
   workingDirectory?: string
-  /** The private attachment directory for this particular user message. */
-  outputDirectory?: string
+  /** Add delivery instructions only to this channel input, never a desktop turn. */
+  deliverFiles?: boolean
   signal?: AbortSignal
   /** Called once if the wait timed out and the host turn later settles. */
   onSettled?: (reply: TurnReply) => void
+  /** Must durably save this identity before followup is allowed to execute. */
+  beforeSubmit?: (binding: TurnBinding) => void
 }
 
 export interface TurnDriverOptions {
@@ -134,6 +139,10 @@ interface RunningTurn {
 }
 
 export class TurnDriver {
+  recover(binding: TurnBinding, workingDirectory: string, signal: AbortSignal, cursor?: RecoveryCursor): ReturnType<typeof recoverTurn> {
+    return recoverTurn(this.#host, binding, workingDirectory, signal, cursor)
+  }
+
   readonly #options: TurnDriverOptions
   readonly #host: HostPort
   readonly #attached = new Map<string, Attached>()
@@ -512,14 +521,10 @@ export class TurnDriver {
       // Attachments become text the model can act on ("saved here, open it
       // with read_image"); the person's own words stay last.
       content: [
-        ...(request.outputDirectory === undefined ? [] : [{
+        ...(request.deliverFiles === true ? [{
           type: 'text',
-          text: [
-            `Deliver any final image or other file requested below as a chat attachment. Before replying, save it in this turn's output directory: ${request.outputDirectory}.`,
-            'If a tool or skill saves the result somewhere else (for example, output/), keep the original and copy the finished file into the turn output directory before replying. Only put files intended for this chat in that directory.',
-            'A local Markdown image or file link in the reply does not send the file. The chat channel uploads files from the turn output directory, so omit local links and use the reply for a short description.',
-          ].join('\n'),
-        }]),
+          text: 'This request arrived through a chat channel. To deliver final images or other files, call present with the completed files before your final reply. Only present files intended for this chat and inside the current project. A bare filesystem path or ordinary Markdown file link is not accessible on the phone. Inline local Markdown image embeds are also sent as image attachments. Keep the final reply concise and let the channel upload the files.',
+        }] : []),
         { type: 'text', text: inboundTextWithMedia({ ...message, media: enriched }) },
       ],
       source: {
@@ -527,7 +532,7 @@ export class TurnDriver {
         form: 'message',
         conversationId: message.conversationId,
         group: message.group,
-        ...(request.outputDirectory === undefined ? {} : { hasOutputInstruction: true }),
+        ...(request.deliverFiles !== true ? {} : { hasOutputInstruction: true }),
         ...(message.group ? { senderId: message.senderId } : {}),
       },
     })
@@ -535,6 +540,7 @@ export class TurnDriver {
     if (typeof messageId !== 'string' || messageId === '') throw new Error('the user message has no identity')
     const before = this.#lastSeq(agent)
     if (signal?.aborted) return { text: '', failed: true, sessionId }
+    request.beforeSubmit?.({ sessionId, messageId, beforeSeq: before })
     const progress = new TurnProgress(before, messageId)
     let resolve!: (reply: { text: string; failed?: boolean }) => void
     const done = new Promise<{ text: string; failed?: boolean }>((settle) => { resolve = settle })

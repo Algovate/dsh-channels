@@ -120,31 +120,25 @@ export async function startChannels({ ctx, config }: { ctx: PluginContext; confi
         config: config.adapterConfig[spec] ?? {},
       })
       if (runtime.adapters().some((existing) => existing.id === adapter.id)) throw new Error(`duplicate channel id: ${adapter.id}`)
+      if (typeof adapter.startWithSink !== 'function') throw new Error('adapter must implement startWithSink(sink); legacy start/onInbound is no longer supported')
       const disposer = runtime.register(adapter)
-      // A driver with startWithSink owns only its platform loop. Older adapters
-      // keep the explicit onInbound registration until they migrate.
-      let off: (() => void) | undefined
-      try {
-        off = typeof adapter.startWithSink === 'function' ? undefined : adapter.onInbound((message) => runtime.dispatch(message))
-      } catch (error) {
-        disposer()
-        throw error
-      }
-      loaded.push({ adapter, disposer: () => {
-        off?.()
-        disposer()
-      } })
+      loaded.push({ adapter, disposer })
       adapters.push(adapter)
     } catch (error) {
       logger.warn(`adapter '${spec}' could not be loaded: ${String((error as Error)?.message ?? error)}`)
     }
   }
 
-  const offSeams = registerInteractionSeams({ ctx, config, runtime, logger })
+  let offSeams: () => void
+  try { offSeams = registerInteractionSeams({ ctx, config, runtime, logger }) }
+  catch (error) {
+    for (const { disposer } of loaded) { try { disposer() } catch (cleanup) { logger.warn(`adapter registration cleanup failed: ${String(cleanup)}`) } }
+    await runtime.dispose()
+    throw error
+  }
   for (const { adapter, disposer } of loaded) {
     try {
-      if (typeof adapter.startWithSink === 'function') await adapter.startWithSink(sink)
-      else await adapter.start()
+      await adapter.startWithSink(sink)
     } catch (error) {
       disposer()
       try { await adapter.stop() } catch (error) { logger.warn(`failed adapter cleanup: ${String(error)}`) }
@@ -219,47 +213,52 @@ function registerInteractionSeams({
   const host = createHostPort(ctx)
   if (!host.hasEventBus()) return () => {}
   const offs: Array<() => void> = []
-  offs.push(
-    host.on(
-      'user-questions/request',
-      ((request: { agent?: unknown; questions?: unknown[]; signal?: AbortSignal }, next: () => Promise<unknown>) => {
-        const interaction = runtime.interactionForAgent(request?.agent)
-        const target = interaction?.target
-        // One line per seam call: "the listener never ran" and "it ran for a
-        // session this channel does not own" look identical from the phone.
-        logger.info(`user-questions/request: target=${target === undefined ? 'none' : `${target.channel}|${target.conversationId}`}`)
-        return answerUserQuestion({
-          queue: runtime.interactions,
-          target,
-          questions: (Array.isArray(request?.questions) ? request.questions : []) as AskUserQuestionItem[],
-          request: { ...request, ...(interaction === undefined ? {} : { deadlineAt: interaction.deadlineAt, signal: request?.signal === undefined ? interaction.signal : AbortSignal.any([request.signal, interaction.signal]) }) },
-          next,
-          enabled: config.questionsEnabled,
-          logger,
-        })
-      }) as never,
-      { prepend: true, global: true },
-    ),
-  )
-  offs.push(
-    host.on(
-      'approval/request',
-      ((request: { agent?: unknown; toolName?: string; reason?: string; displayReason?: unknown; signal?: AbortSignal }, next: () => Promise<unknown>) => {
-        const interaction = runtime.interactionForAgent(request?.agent)
-        const target = interaction?.target
-        logger.info(`approval/request: tool=${String(request?.toolName ?? '?')} target=${target === undefined ? 'none' : `${target.channel}|${target.conversationId}`}`)
-        return answerApproval({
-          queue: runtime.interactions,
-          target,
-          request: { ...request, ...(interaction === undefined ? {} : { deadlineAt: interaction.deadlineAt, signal: request?.signal === undefined ? interaction.signal : AbortSignal.any([request.signal, interaction.signal]) }) },
-          next,
-          enabled: config.approvalsEnabled,
-          logger,
-        })
-      }) as never,
-      { prepend: true, global: true },
-    ),
-  )
+  try {
+    offs.push(
+      host.on(
+        'user-questions/request',
+        ((request: { agent?: unknown; questions?: unknown[]; signal?: AbortSignal }, next: () => Promise<unknown>) => {
+          const interaction = runtime.interactionForAgent(request?.agent)
+          const target = interaction?.target
+          // One line per seam call: "the listener never ran" and "it ran for a
+          // session this channel does not own" look identical from the phone.
+          logger.info(`user-questions/request: target=${target === undefined ? 'none' : `${target.channel}|${target.conversationId}`}`)
+          return answerUserQuestion({
+            queue: runtime.interactions,
+            target,
+            questions: (Array.isArray(request?.questions) ? request.questions : []) as AskUserQuestionItem[],
+            request: { ...request, ...(interaction === undefined ? {} : { deadlineAt: interaction.deadlineAt, signal: request?.signal === undefined ? interaction.signal : AbortSignal.any([request.signal, interaction.signal]) }) },
+            next,
+            enabled: config.questionsEnabled,
+            logger,
+          })
+        }) as never,
+        { prepend: true, global: true },
+      ),
+    )
+    offs.push(
+      host.on(
+        'approval/request',
+        ((request: { agent?: unknown; toolName?: string; reason?: string; displayReason?: unknown; signal?: AbortSignal }, next: () => Promise<unknown>) => {
+          const interaction = runtime.interactionForAgent(request?.agent)
+          const target = interaction?.target
+          logger.info(`approval/request: tool=${String(request?.toolName ?? '?')} target=${target === undefined ? 'none' : `${target.channel}|${target.conversationId}`}`)
+          return answerApproval({
+            queue: runtime.interactions,
+            target,
+            request: { ...request, ...(interaction === undefined ? {} : { deadlineAt: interaction.deadlineAt, signal: request?.signal === undefined ? interaction.signal : AbortSignal.any([request.signal, interaction.signal]) }) },
+            next,
+            enabled: config.approvalsEnabled,
+            logger,
+          })
+        }) as never,
+        { prepend: true, global: true },
+      ),
+    )
+  } catch (error) {
+    for (const off of offs) { try { off() } catch (cleanup) { logger.warn(`interaction hook cleanup failed: ${String(cleanup)}`) } }
+    throw error
+  }
   logger.info(`interaction seams registered (questions=${config.questionsEnabled}, approvals=${config.approvalsEnabled})`)
   return () => {
     for (const off of offs) {

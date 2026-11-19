@@ -1,12 +1,16 @@
+import { readSectionJson, writeSectionJson } from './state-helper.js'
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import path from 'node:path'
 import os from 'node:os'
 import test from 'node:test'
+import { keepHostAlive } from './host-lifetime.js'
 import { ChannelsRuntime } from '../packages/core/src/runtime.js'
 import { createChannelsRuntime, createFakeAdapter, createFakeUserMessage } from './runtime-helper.js'
 import { stateFile } from '../packages/core/src/store/state.js'
 import { createHarness, inbound } from './harness.js'
+
+keepHostAlive()
 
 const tick = (ms = 0) => new Promise((resolve) => setTimeout(resolve, ms))
 async function until(check: () => boolean): Promise<void> {
@@ -16,7 +20,7 @@ async function until(check: () => boolean): Promise<void> {
 function setup() {
   const h = createHarness({ silent: true })
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'mobile-tasks-'))
-  const runtime = createChannelsRuntime({ stateRoot: root, ctx: h.ctx, config: { senderPerMinute: 0, senderPerDay: 0, allowedSenders: ['sender', 'other'] } })
+  const runtime = createChannelsRuntime({ stateRoot: root, ctx: h.ctx, config: { groupTrigger: 'all', senderPerMinute: 0, senderPerDay: 0, allowedSenders: ['sender', 'other'] } })
   const adapter = createFakeAdapter()
   runtime.register(adapter)
   const text = () => adapter.sent.map((entry) => entry.outgoing.text ?? '').join('\n')
@@ -74,7 +78,7 @@ test('clear removes only the sender queue in a group and persists removal across
     runtime.dispatch(inbound({ text: '/clear', group: true }))
     await until(() => /已清除 1/.test(text()))
     assert.equal(runtime.pendingInputs(), 1)
-    const saved = JSON.parse(fs.readFileSync(path.join(root, 'inbox.json'), 'utf8')).filter((entry: { clearedAt?: number }) => entry.clearedAt === undefined)
+    const saved = JSON.parse(readSectionJson(root, 'inbox')).filter((entry: { clearedAt?: number }) => entry.clearedAt === undefined)
     assert.equal(saved.length, 1)
     assert.equal(saved[0].message.text, 'theirs')
     await runtime.dispose()
@@ -227,14 +231,14 @@ test('retry updates each task without changing history order or losing delivery 
     runtime.dispatch(inbound({ text: 'second task' }))
     await until(() => runtime.outbox.list().length === 2)
     const file = path.join(root, 'outbox.json')
-    const outbox = JSON.parse(fs.readFileSync(file, 'utf8'))
+    const outbox = JSON.parse(readSectionJson(root, 'outbox'))
     for (const item of outbox.items) item.nextAt = 0
-    fs.writeFileSync(file, JSON.stringify(outbox))
+    writeSectionJson(root, 'outbox', JSON.stringify(outbox))
     retry = true
     runtime.startOutboxRetry(5)
     await until(() => runtime.outbox.list().length === 0)
     await tick(10)
-    const tasks: Array<{ summary: string; execution: string; delivery: string }> = JSON.parse(fs.readFileSync(path.join(root, 'tasks.json'), 'utf8'))
+    const tasks: Array<{ summary: string; execution: string; delivery: string }> = JSON.parse(readSectionJson(root, 'tasks'))
     assert.deepEqual(tasks.map(({ summary, execution, delivery }) => [summary, execution, delivery]), [
       ['first task', 'completed', 'unknown'],
       ['second task', 'completed', 'sent'],
@@ -408,7 +412,7 @@ test('a long-running task sends one progress reminder to its original chat', asy
 test('/tasks keeps five recent tasks across restart and scopes group history to the requester', async () => {
   const h = createHarness({ reply: 'done' })
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'mobile-history-'))
-  const config = { senderPerMinute: 0, senderPerDay: 0, allowedSenders: ['sender', 'other'] }
+  const config = { groupTrigger: 'all' as const, senderPerMinute: 0, senderPerDay: 0, allowedSenders: ['sender', 'other'] }
   const runtime = createChannelsRuntime({ ctx: h.ctx, stateRoot: root, config })
   const adapter = createFakeAdapter()
   runtime.register(adapter)
@@ -477,8 +481,8 @@ test('recovering work left in the inbox reuses its task history entry', async ()
   const message = inbound({ text: '恢复这个任务' })
   const target = { channel: message.channel, accountId: message.accountId, conversationId: message.conversationId }
   const id = '12345678-aaaa-4444-abcd-123456789abc'
-  fs.writeFileSync(path.join(root, 'inbox.json'), JSON.stringify([{ id, message, sessionId: 'recovery-session' }]))
-  fs.writeFileSync(path.join(root, 'tasks.json'), JSON.stringify([
+  writeSectionJson(root, 'inbox', JSON.stringify([{ id, message, sessionId: 'recovery-session' }]))
+  writeSectionJson(root, 'tasks', JSON.stringify([
     { id, target, senderId: message.senderId, summary: message.text, startedAt: Date.now(), execution: 'running', delivery: 'none' },
   ]))
   const runtime = createChannelsRuntime({ ctx: h.ctx, stateRoot: root })
@@ -487,8 +491,8 @@ test('recovering work left in the inbox reuses its task history entry', async ()
   try {
     await runtime.resumePending()
     await until(() => adapter.sent.some((item) => item.outgoing.kind === 'reply'))
-    await until(() => JSON.parse(fs.readFileSync(path.join(root, 'tasks.json'), 'utf8')).some((task: { delivery: string }) => task.delivery === 'sent'))
-    const tasks: Array<{ id: string; execution: string; delivery: string }> = JSON.parse(fs.readFileSync(path.join(root, 'tasks.json'), 'utf8'))
+    await until(() => JSON.parse(readSectionJson(root, 'tasks')).some((task: { delivery: string }) => task.delivery === 'sent'))
+    const tasks: Array<{ id: string; execution: string; delivery: string }> = JSON.parse(readSectionJson(root, 'tasks'))
     assert.deepEqual(tasks.map((task) => [task.id, task.execution, task.delivery]), [[id, 'completed', 'sent']])
     assert.equal(h.followedUp.length, 1)
   } finally { await runtime.dispose(); fs.rmSync(root, { recursive: true, force: true }) }
@@ -498,7 +502,7 @@ test('/tasks omits legacy query records before taking the five visible tasks', a
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'mobile-history-legacy-'))
   const target = { channel: 'fake', accountId: 'acct', conversationId: 'conv' }
   const summaries = ['任务 1', '任务 2', '任务 3', '任务 4', '任务 5', '/tasks']
-  fs.writeFileSync(path.join(root, 'tasks.json'), JSON.stringify(summaries.map((summary, index) => ({
+  writeSectionJson(root, 'tasks', JSON.stringify(summaries.map((summary, index) => ({
     id: `task-${index}`, target, senderId: 'sender', summary, startedAt: index, execution: 'completed', delivery: 'sent',
   }))))
   const h = createHarness()

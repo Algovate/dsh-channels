@@ -107,51 +107,47 @@ export async function answerApproval({
     .then((value) => ({ side: 'local' as const, ok: true as const, value: value as ApprovalOutcome }), (error: unknown) => ({ side: 'local' as const, ok: false as const, error }))
 
   // A decision is anything except "unavailable" — that one only means "nobody
-  // answered here", and the chat may still answer. So this waits for the first
-  // real decision, or for both surfaces to finish without one.
-  const decision = await withinLifetime(new Promise<{ side: 'remote' | 'local'; value: ApprovalOutcome } | undefined>((resolve) => {
-    let settled = false
-    let finished = 0
-    const settle = (value: { side: 'remote' | 'local'; value: ApprovalOutcome } | undefined): void => {
-      if (settled) return
-      settled = true
-      resolve(value)
-    }
-    const finishOne = (): void => {
-      finished += 1
-      if (finished === 2) settle(undefined)
-    }
-    for (const [side, pending] of [['remote', remote], ['local', local]] as const) {
-      void pending.then((result) => {
-        if (result.ok === true && result.value !== 'unavailable') settle({ side, value: result.value })
-        // An expired or withdrawn chat prompt is a terminal "nobody answered
-        // here" even if the desktop surface is still hanging.
-        else if (side === 'remote' && result.ok === false) settle(undefined)
-      }).finally(finishOne)
-    }
-  }), request.signal).catch((error: unknown) => {
-    if (request.signal?.aborted) return undefined
-    throw error
-  })
-  if (request.signal?.aborted) return 'unavailable'
+  // answered here", and the other surface may still answer. This waits for the
+  // first real decision, or until both surfaces finish without one; the chat
+  // surface ending early must not cancel the desktop answerer.
+  let decision: { side: 'remote' | 'local'; value: ApprovalOutcome } | undefined
+  try {
+    decision = await withinLifetime(new Promise<{ side: 'remote' | 'local'; value: ApprovalOutcome } | undefined>((resolve) => {
+      let settled = false
+      let finished = 0
+      const settle = (value: { side: 'remote' | 'local'; value: ApprovalOutcome } | undefined): void => {
+        if (settled) return
+        settled = true
+        resolve(value)
+      }
+      const finishOne = (): void => {
+        finished += 1
+        if (finished === 2) settle(undefined)
+      }
+      for (const [side, pending] of [['remote', remote], ['local', local]] as const) {
+        void pending.then((result) => {
+          if (result.ok === true && result.value !== 'unavailable') settle({ side, value: result.value })
+          // Once the turn's wait window is over the chat surface shutting down is
+          // final: there is no desktop answer left to wait for. Before the
+          // deadline, a withdrawn chat prompt leaves the desktop answerer racing.
+          else if (side === 'remote' && request.deadlineAt !== undefined && Date.now() >= request.deadlineAt) settle(undefined)
+        }).finally(finishOne)
+      }
+    }), request.signal, request.deadlineAt)
+  } catch {
+    decision = undefined
+  }
   if (decision !== undefined) {
     if (decision.side === 'local') queue.retire(entry)
     return decision.value
   }
 
-  // Nobody decided. An approval fails CLOSED, and the seam already has the word
-  // for it: `unavailable`. Throwing here would make the host read a timeout as a
-  // crashed answerer instead of "nobody said yes".
-  const remoteResult = await remote
-  if (remoteResult.ok === false) {
-    // The chat prompt expired or was withdrawn. A hung desktop answerer must
-    // not keep this seam open; the action fails closed.
-    logger.info?.(`approval chat surface ended without a decision: ${String((remoteResult.error as Error)?.message ?? remoteResult.error)}`)
-    return 'unavailable'
-  }
-  const localResult = await local
-  if (localResult.ok === false) {
-    logger.info?.(`approval desktop surface ended without a decision: ${String((localResult.error as Error)?.message ?? localResult.error)}`)
-  }
+  // Nobody decided before the turn's window closed. An approval fails CLOSED,
+  // and the seam already has the word for it: `unavailable`. Throwing here
+  // would make the host read a timeout as a crashed answerer instead of
+  // "nobody said yes". Withdraw any prompt still waiting on this seam (silently:
+  // the queue's own timer owns the expiry notice).
+  queue.retire(entry, '')
+  logger.info?.('approval ended without a decision')
   return 'unavailable'
 }

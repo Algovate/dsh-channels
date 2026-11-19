@@ -1,7 +1,6 @@
 /** Chat views for task state. The runtime supplies a snapshot scoped to the current chat. */
 import type { InteractionKind } from './interaction/queue.js'
 import { chatParagraphs } from './outbound.js'
-import type { Journal } from './store/journal.js'
 import type { TaskRecord } from './store/tasks.js'
 
 interface TaskMessageContext {
@@ -42,14 +41,13 @@ export function taskHistoryText(tasks: TaskRecord[], context: TaskMessageContext
 }
 
 export function taskStatusText({
-  channel, latest, queued, pending, promptSending, recent, context,
+  channel, latest, queued, pending, promptSending, context,
 }: {
   channel: string
   latest: TaskRecord | undefined
   queued: number
   pending: number
   promptSending: boolean
-  recent: ReturnType<Journal['outbound']>
   context: TaskMessageContext
 }): string {
   const paragraphs = [`【任务状态 · ${channel}】`]
@@ -66,18 +64,6 @@ export function taskStatusText({
 
   paragraphs.push(`【队列】排队：${queued} 条　｜　待重发：${pending} 条`)
   if (promptSending) paragraphs.push('提示发送中')
-  if (recent.length > 0) {
-    paragraphs.push('【最近结果】')
-    const labels = { accepted: '已发送', unconfirmed: '未确认', failed: '发送失败', pending: '投递未知' }
-    const previews = new Map<string, number>()
-    for (const entry of recent.slice(-2).reverse()) {
-      const line = `${labels[entry.state]}｜${preview(entry.text, 28) || '附件'}`
-      previews.set(line, (previews.get(line) ?? 0) + 1)
-    }
-    for (const [line, count] of previews) {
-      paragraphs.push(count > 1 ? `· ${line}（${count} 条）` : `· ${line}`)
-    }
-  }
   return chatParagraphs(...paragraphs)
 }
 

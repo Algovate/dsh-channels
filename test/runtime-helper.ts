@@ -25,18 +25,13 @@ export interface FakeAdapterOptions {
   maxTextChars?: number
 }
 
-export function createFakeAdapter(options: FakeAdapterOptions = {}): ChannelAdapter & { sent: Array<{ target: Target; outgoing: Outgoing }>; inbound: Array<(message: InboundMessage) => void> } {
+export function createFakeAdapter(options: FakeAdapterOptions = {}): ChannelAdapter & { sent: Array<{ target: Target; outgoing: Outgoing }> } {
   const sent: Array<{ target: Target; outgoing: Outgoing }> = []
-  const inbound: Array<(message: InboundMessage) => void> = []
   const adapter = {
     id: options.id ?? 'fake',
     label: { zh: '测试', en: 'Fake' },
     capabilities: {
-      text: true,
       media: { image: false, file: false, voice: false, video: false },
-      stickers: false,
-      typing: false,
-      buttons: false,
       edit: false,
       maxTextChars: options.maxTextChars ?? 0,
     },
@@ -45,18 +40,13 @@ export function createFakeAdapter(options: FakeAdapterOptions = {}): ChannelAdap
         return [{ accountId: 'acct', expired: false }]
       },
     },
-    async start() {},
+    async startWithSink() {},
     async stop() {},
-    onInbound(handler: (message: InboundMessage) => void) {
-      inbound.push(handler)
-      return () => {}
-    },
     async send(target: Target, outgoing: Outgoing): Promise<SendResult> {
       sent.push({ target, outgoing })
       return options.failWith === undefined ? { ok: true, messageId: `m-${sent.length}` } : { ok: false, code: options.failWith }
     },
     sent,
-    inbound,
   }
   return adapter
 }

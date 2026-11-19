@@ -200,23 +200,19 @@ export async function answerUserQuestion({
     .then(() => next())
     .then((value) => ({ side: 'local' as const, ok: true as const, value }), (error: unknown) => ({ side: 'local' as const, ok: false as const, error }))
 
-  const first = await withinLifetime(Promise.race([remote, local]), request.signal)
-  if (first.ok === true) {
-    if (first.side === 'local') queue.retire(entry)
-    return first.value
-  }
-  if (first.side === 'remote') {
-    // The chat prompt expired; do not wait for a desktop answerer that may hang.
-    const error = first.error
+  try {
+    const first = await withinLifetime(Promise.race([remote, local]), request.signal, request.deadlineAt)
+    if (first.ok === true) {
+      if (first.side === 'local') queue.retire(entry)
+      return first.value
+    }
+    // One surface failed; the other may still decide within the same lifetime.
+    const other = await withinLifetime<Awaited<typeof local> | Awaited<typeof remote>>(
+      first.side === 'remote' ? local : remote, request.signal, request.deadlineAt,
+    )
+    if (other.ok === true) return other.value
+    const error = first.side === 'local' ? first.error : other.error
     logger.warn(`no answer to the agent's question: ${String((error as Error)?.message ?? error)}`)
     throw error instanceof Error ? error : new Error(String(error))
-  }
-  const other = await withinLifetime<Awaited<typeof local> | Awaited<typeof remote>>(remote, request.signal)
-  if (other.ok === true) {
-    if (other.side === 'local') queue.retire(entry)
-    return other.value
-  }
-  const error = first.side === 'local' ? first.error : other.error
-  logger.warn(`no answer to the agent's question: ${String((error as Error)?.message ?? error)}`)
-  throw error instanceof Error ? error : new Error(String(error))
+  } finally { queue.retire(entry, '') }
 }

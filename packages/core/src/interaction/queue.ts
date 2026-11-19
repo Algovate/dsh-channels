@@ -257,9 +257,9 @@ export class InteractionQueue {
   }
 
   /** Another surface answered first: tell the person and resolve. */
-  retire(entry: InteractionEntry): void {
+  retire(entry: InteractionEntry, notice = entry.retiredNotice): void {
     const pending = this.#queues.get(keyOf(entry.target))?.find((item) => item.entry === entry)
-    if (pending !== undefined) this.#settle(pending, entry.retireValue, undefined, entry.retiredNotice)
+    if (pending !== undefined) this.#settle(pending, entry.retireValue, undefined, notice)
   }
 
   #settle(pending: Pending, value?: string, error?: Error, notice?: string): void {

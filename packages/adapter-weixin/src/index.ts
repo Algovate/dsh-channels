@@ -68,8 +68,7 @@ export async function createAdapter({ runtime, config = {}, stateRoot }: WeixinA
   if (account === undefined) throw new Error(`account '${accountId}' has no token; log in again`)
 
   const expired = new Set<string>()
-  const handlers = new Set<(message: InboundMessage) => void>()
-  let sink: IngressSink | undefined
+  let sink: IngressSink
   const inbox = new Map<string, Promise<void>>()
   const contextOrder = new Map<string, number>()
   let receivedOrder = 0
@@ -109,8 +108,7 @@ export async function createAdapter({ runtime, config = {}, stateRoot }: WeixinA
           }
           await attachMedia(message, items, signal)
           if (signal.aborted) return
-          if (sink !== undefined) await sink.offer(message, { priority: items.length === 0 && runtime?.canBypassInbound?.(message) === true })
-          else for (const handler of handlers) await handler(message)
+          await sink.offer(message, { priority: items.length === 0 && runtime?.canBypassInbound?.(message) === true })
         } finally {
           runtime?.cancelReceive?.(message)
         }
@@ -201,11 +199,8 @@ export async function createAdapter({ runtime, config = {}, stateRoot }: WeixinA
     },
 
     async startWithSink(next: IngressSink): Promise<void> {
-      sink = next
-      try { await adapter.start() } catch (error) { sink = undefined; throw error }
-    },
-    async start(): Promise<void> {
       if (inbound !== undefined) return
+      sink = next
       inbound = new AbortController()
       asr = createAsr()
       if (asr !== undefined && !asr.available()) logger.warn('asr bridge not found: voice notes will be sent as files')
@@ -219,16 +214,9 @@ export async function createAdapter({ runtime, config = {}, stateRoot }: WeixinA
       stopping = Promise.all([transport.stop(), asr?.dispose()]).then(() => {
         inbound = undefined
         asr = undefined
-        sink = undefined
         stopping = undefined
       })
       return stopping
-    },
-    onInbound(handler: (message: InboundMessage) => void): () => void {
-      handlers.add(handler)
-      return () => {
-        handlers.delete(handler)
-      }
     },
     restoreInbound(message: InboundMessage): void {
       const context = message.raw as { contextToken?: unknown } | undefined

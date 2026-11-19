@@ -3,7 +3,7 @@
   "private": true,
   "type": "module",
   "version": "0.0.0",
-  "description": "dsh-channels \u2014 chat channels for DSH agents (workspace root; not published)",
+  "description": "dsh-channels — chat channels for DSH agents (workspace root; not published)",
   "workspaces": [
     "packages/*"
   ],
@@ -16,7 +16,8 @@
     "test:build": "tsc -p tsconfig.test.json",
     "test": "npm run build && npm run test:build && node --test --test-concurrency=4 \"dist-test/test/**/*.test.js\"",
     "check": "npm test",
-    "doctor": "node packages/core/bin/doctor.mjs"
+    "doctor": "node packages/core/bin/doctor.mjs",
+    "pack:check": "npm pack --dry-run -w @derekluo/dsh-channels -w @derekluo/dsh-channels-weixin -w @derekluo/dsh-channels-telegram"
   },
   "devDependencies": {
     "@types/node": "^26.6.6",

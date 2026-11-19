@@ -22,7 +22,7 @@ export interface HostContext {
 export interface HostPort {
   /** Resolve one host service; the caller supplies the structural type. */
   get<T>(name: string): T | undefined
-  /** Subscribe to one host event; a host without a bus returns a no-op. */
+  /** Subscribe or throw: a failed registration must never look like a live guard/feed. */
   on(event: string, listener: (...args: never[]) => unknown, options?: Record<string, unknown>): () => void
   /** True when the host actually provides an event bus. */
   hasEventBus(): boolean
@@ -40,13 +40,10 @@ export function createHostPort(ctx: HostContext | undefined): HostPort {
       }
     },
     on(event, listener, options): () => void {
-      if (typeof ctx?.on !== 'function') return () => {}
-      try {
-        const off = ctx.on(event, listener, options)
-        return typeof off === 'function' ? off : () => {}
-      } catch {
-        return () => {}
-      }
+      if (typeof ctx?.on !== 'function') throw new Error(`host event bus unavailable: ${event}`)
+      const off = ctx.on(event, listener, options)
+      if (typeof off !== 'function') throw new Error(`host event subscription was not registered: ${event}`)
+      return off
     },
     hasEventBus(): boolean {
       return typeof ctx?.on === 'function'

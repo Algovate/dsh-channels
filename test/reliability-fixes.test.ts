@@ -1,3 +1,4 @@
+import { readSectionJson, writeSectionJson } from './state-helper.js'
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import os from 'node:os'
@@ -6,7 +7,6 @@ import test from 'node:test'
 import { setTimeout as delay } from 'node:timers/promises'
 import { createRateLimiter } from '../packages/core/src/inbound/gates.js'
 import { Outbox } from '../packages/core/src/store/outbox.js'
-import { scanProducedFiles } from '../packages/core/src/produced.js'
 import { createHarness, inbound } from './harness.js'
 import { createFakeAdapter, createChannelsRuntime, createFakeUserMessage } from './runtime-helper.js'
 import { resolveConfig } from '../packages/core/src/config.js'
@@ -48,13 +48,6 @@ test('platform retry delay survives enqueue and subsequent failed retry', async 
   fs.rmSync(root, { recursive: true })
 })
 
-test('produced-file selection considers the newest candidate beyond the old prefix cap', async () => {
-  const root = temp()
-  for (const [i, name] of ['a', 'b', 'c', 'd', 'z'].entries()) { const file = path.join(root, name); fs.writeFileSync(file, 'x'); fs.utimesSync(file, 1000 + i, 1000 + i) }
-  assert.equal((await scanProducedFiles({ dir: root, sinceMs: 0, maxFiles: 1 })).files[0]?.name, 'z')
-  fs.rmSync(root, { recursive: true })
-})
-
 test('skipped output files prevent an all-sent task state and notify the chat', async () => {
   const root = temp()
   const small = path.join(root, 'small')
@@ -67,8 +60,8 @@ test('skipped output files prevent an all-sent task state and notify the chat', 
   const adapter = createFakeAdapter(); runtime.register(adapter)
   try {
     runtime.dispatch(inbound())
-    await until(() => fs.existsSync(path.join(root, 'tasks.json')) && JSON.parse(fs.readFileSync(path.join(root, 'tasks.json'), 'utf8')).some((t: { delivery: string }) => t.delivery !== 'none' && t.delivery !== 'sending'))
-    const task = JSON.parse(fs.readFileSync(path.join(root, 'tasks.json'), 'utf8'))[0]
+    await until(() => fs.existsSync(path.join(root, 'state.json')) && JSON.parse(readSectionJson(root, 'tasks'))?.some((t: { delivery: string }) => t.delivery !== 'none' && t.delivery !== 'sending') === true)
+    const task = JSON.parse(readSectionJson(root, 'tasks'))[0]
     assert.equal(task.filesUnsent, true)
     assert.notEqual(task.delivery, 'sent')
     assert.ok(adapter.sent.some((e) => e.outgoing.kind === 'notice' && /附件.*未发送/.test(e.outgoing.text ?? '')))
@@ -121,7 +114,7 @@ test('retry metadata reaches the runtime outbox on initial send and retry', asyn
     const before = Date.now()
     await runtime.send(inbound(), { kind: 'reply', text: 'retry later' })
     assert.ok(runtime.outbox.list()[0]!.nextAt >= before + 3600000)
-    const file = path.join(root, 'outbox.json'); const saved = JSON.parse(fs.readFileSync(file, 'utf8')); saved.items[0].nextAt = 0; fs.writeFileSync(file, JSON.stringify(saved))
+    const file = path.join(root, 'outbox.json'); const saved = JSON.parse(readSectionJson(root, 'outbox')); saved.items[0].nextAt = 0; writeSectionJson(root, 'outbox', JSON.stringify(saved))
     runtime.startOutboxRetry(5)
     await until(() => runtime.outbox.list()[0]!.attempts === 1)
     assert.ok(runtime.outbox.list()[0]!.nextAt >= before + 3600000)
@@ -143,14 +136,9 @@ test('priority classification does not bypass authorization or normal message or
   } finally { await runtime.dispose() }
 })
 
-test('a bounded output scan reports incomplete traversal independently of the send limit', async () => {
-  const { scanProducedFiles } = await import('../packages/core/src/produced.js')
-  const root = temp()
-  try {
-    for (let i = 0; i < 8; i++) fs.writeFileSync(path.join(root, `${i}.txt`), 'x')
-    const limited = await scanProducedFiles({ dir: root, sinceMs: 0, maxEntries: 2, maxFiles: 1 })
-    assert.equal(limited.incomplete, true); assert.equal(limited.files.length, 1); assert.equal(limited.skipped, 1)
-    const complete = await scanProducedFiles({ dir: root, sinceMs: 0, maxFiles: 1 })
-    assert.equal(complete.incomplete, false); assert.equal(complete.skipped, 7)
-  } finally { fs.rmSync(root, { recursive: true }) }
+test('artifact configuration cannot exceed the durable one-hundred-file contract', () => {
+  assert.equal(resolveConfig({ maxProducedFiles: 100 }).maxProducedFiles, 100)
+  assert.equal(resolveConfig({ maxProducedFiles: 0 }).maxProducedFiles, 0)
+  assert.equal(resolveConfig({ maxProducedFiles: 101 }).maxProducedFiles, 3)
+  assert.equal(resolveConfig({ maxProducedFiles: 10000 }).maxProducedFiles, 3)
 })

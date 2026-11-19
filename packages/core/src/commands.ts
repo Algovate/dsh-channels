@@ -19,13 +19,11 @@ export type CommandName = 'help' | 'status' | 'tasks' | 'whoami' | 'new' | 'canc
 
 export const TASK_CONTROLS: ReadonlySet<CommandName> = new Set(['schedule', 'schedules', 'projects', 'project', 'sessions', 'session', 'status', 'tasks', 'cancel', 'clear', 'files', 'resend'])
 
-export const COMMANDS: Record<CommandName, { usage: string; summary: { en: string; zh: string } }> = {
+export const COMMANDS: Record<Exclude<CommandName, 'sessions' | 'session'>, { usage: string; summary: { en: string; zh: string } }> = {
   schedules: { usage: '/schedules', summary: { en: 'list your channel schedules', zh: '查看你在此聊天创建的计划' } },
   schedule: { usage: '/schedule after|every <分钟> <任务>', summary: { en: 'create a native schedule; pause/resume/delete by id', zh: '创建计划；也可 pause/resume/delete <计划ID>' } },
   projects: { usage: '/projects', summary: { en: 'list configured projects', zh: '查看可用项目' } },
   project: { usage: '/project <别名>', summary: { en: 'switch project', zh: '切换后续消息的项目' } },
-  sessions: { usage: '/sessions', summary: { en: 'list session lines', zh: '查看当前项目的会话编号' } },
-  session: { usage: '/session <编号>', summary: { en: 'switch session line', zh: '切回当前聊天的历史会话' } },
   status: { usage: '/status', summary: { en: 'current task, execution, delivery and queues', zh: '查看任务、排队和发送状态' } },
   tasks: { usage: '/tasks', summary: { en: 'list recent tasks', zh: '查看最近 5 项任务' } },
   files: { usage: '/files [任务ID]', summary: { en: 'list recorded task artifacts', zh: '查看已完成任务的产物' } },
@@ -45,7 +43,8 @@ export function parseCommand(text: string): { name: CommandName; args: string } 
   const name = (rawName ?? '').toLowerCase()
   // Telegram appends `@botname` to commands in groups.
   const bare = name.includes('@') ? name.slice(0, name.indexOf('@')) : name
-  if (!Object.hasOwn(COMMANDS, bare)) return null
+  // Retired controls stay out of help and must never become model input.
+  if (bare !== 'sessions' && bare !== 'session' && !Object.hasOwn(COMMANDS, bare)) return null
   return { name: bare as CommandName, args: rest.join(' ').trim() }
 }
 

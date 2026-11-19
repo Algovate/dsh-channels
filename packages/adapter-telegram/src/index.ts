@@ -13,7 +13,7 @@ import { createHash } from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
 
-import type { AccountInfo, AdapterRuntime, ChannelAdapter, InboundMedia, InboundMessage, IngressSink, Outgoing, SendResult, Target } from '@derekluo/dsh-channels'
+import type { AccountInfo, AdapterRuntime, ChannelAdapter, InboundMedia, IngressSink, Outgoing, SendResult, Target } from '@derekluo/dsh-channels'
 import { DEFAULT_API_BASE, MAX_TEXT_CHARS, TelegramTransport, type FetchLike } from './transport.js'
 import { runTelegramPolling } from './polling.js'
 import { CHANNEL_ID, mediaOf, type NormalizedInbound } from './normalize.js'
@@ -73,8 +73,7 @@ export async function createAdapter({ runtime, config = {}, stateRoot = '' }: Te
     ...(config.fetchImpl === undefined ? {} : { fetchImpl: config.fetchImpl }),
     logger,
   })
-  const handlers = new Set<(message: InboundMessage) => void>()
-  let sink: IngressSink | undefined
+  let sink: IngressSink
   let loop: Promise<void> | undefined
 
   /** One attachment: fetch it, write it, and report where it went. */
@@ -131,8 +130,7 @@ export async function createAdapter({ runtime, config = {}, stateRoot = '' }: Te
           else message.attachmentErrors.push(`${item.kind} 附件未能下载或超过大小上限，请重新发送。`)
         }
       }
-      if (sink !== undefined) await sink.offer(message, { priority: runtime?.canBypassInbound?.(message) === true })
-      else for (const handler of handlers) await handler(message)
+      await sink.offer(message, { priority: items.length === 0 && runtime?.canBypassInbound?.(message) === true })
     } finally {
       runtime?.cancelReceive?.(message)
       if (callbackId !== undefined) await transport.answerCallbackQuery(callbackId)
@@ -155,11 +153,8 @@ export async function createAdapter({ runtime, config = {}, stateRoot = '' }: Te
     },
 
     async startWithSink(next: IngressSink): Promise<void> {
-      sink = next
-      try { await adapter.start() } catch (error) { sink = undefined; throw error }
-    },
-    async start(): Promise<void> {
       if (loop !== undefined) return
+      sink = next
       transport.start()
       logger.info(`telegram adapter polling bot ${accountId}`)
       loop = runTelegramPolling({
@@ -172,11 +167,6 @@ export async function createAdapter({ runtime, config = {}, stateRoot = '' }: Te
       transport.stop()
       await loop?.catch(() => {})
       loop = undefined
-      sink = undefined
-    },
-    onInbound(handler: (message: InboundMessage) => void): () => void {
-      handlers.add(handler)
-      return () => handlers.delete(handler)
     },
     async send(target: Target, outgoing: Outgoing): Promise<SendResult> {
       if (target.channel !== CHANNEL_ID || target.accountId !== accountId) return { ok: false, code: 'account-mismatch' }
