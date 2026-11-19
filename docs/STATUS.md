@@ -1,5 +1,21 @@
 # 验证状态
 
+## 2026-11-19 模块重构部署到 mini
+
+已将分支 `codex/refactor-channel-modules` 的 `a35305be6d8005b91182dd396bf3bf94c46bfcba` 部署到 mini Web profile；未合并 main。发布目录为 `~/dsh-plugin-pkgs/dsh-channels/a35305b/`，包含归档、SHA-256 清单、安装与隔离测试日志及部署记录。
+
+本地完整测试 **468 项通过**。停服前后均无活动任务、待执行输入、待恢复结果或 outbox；完整状态和 profile 备份位于 `backup-20261119T090036Z/`，附文件摘要清单。通道配置升级前后字节摘要一致，状态仍为 v2。
+
+| 包 | 归档 SHA-256 | 安装验证 |
+|---|---|---|
+| core | `e6b961f9c744fcd856ef2ca63210d5c6cdd5aae0790b51c45620473681249fc8` | 148 个文件逐一匹配 |
+| 微信 | `d65ec9c2829467ab4d85890da05e680ca57f6874ab6d3ae837134bc9b2845280` | 124 个文件逐一匹配 |
+| Telegram | `4adf57dbbc077ffe29937acb6f8f00bcc3c2b9efe3a9267cb8f1c317ade805f8` | 上传并隔离验证，未启用 |
+
+通过已安装包运行 **182 项隔离测试**，以及合成 PNG 捕获、私有快照、重启附件重试、无重复文字/执行、旧命令提示和手机状态的 smoke。新增共享设置、复制和会话读取模块均使用已安装的构建文件验证。
+
+北京时间约 17:00 重启 `com.dsh.web`，进程 `71162` 持有状态锁并监听 `58534`，无 `state.claim`；HTTP 状态入口保持预期的 401 鉴权响应。未向真实微信/Telegram 账号主动发送测试消息；本轮未验证真实账号端到端消息。
+
 ## 2026-11-19 合并 main 并部署精简版到 mini
 
 [PR #1](https://github.com/Algovate/dsh-channels/pull/1) 已合并，部署代码为 main 合并提交 `52bee6bab55936d508cc38d61d6e4951d11a0586`。合并后干净构建，完整 `npm test` **464 项通过**。发布目录为 mini 的 `~/dsh-plugin-pkgs/dsh-channels/52bee6b/`，归档及部署清单保存在该目录。
