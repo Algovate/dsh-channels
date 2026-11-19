@@ -1,9 +1,8 @@
 /** Capture declared outputs and build a safe delivery plan without sending messages. */
 import fs from 'node:fs'
 import path from 'node:path'
-import { captureArtifacts, copyDeliverable, describeArtifact, type ArtifactDelivery } from './artifacts.js'
+import { copyDeliverable, describeArtifact, type ArtifactDelivery } from './artifacts.js'
 import { localImageReferences } from './outbound.js'
-import { scanProducedFiles } from './produced.js'
 import type { TaskRecord } from './store/tasks.js'
 import type { TurnReply } from './turns.js'
 
@@ -23,7 +22,7 @@ function createTaskOutputDirectory(workingDirectory: string): string {
 /** Existing indexes win during recovery: never recopy a later changed source. */
 export async function prepareTaskArtifacts({ record, reply, workingDirectory, maxFiles, maxBytes }: {
   record: TaskArtifactIndex
-  reply: Pick<TurnReply, 'text' | 'deliverables'>
+  reply: Pick<TurnReply, 'text' | 'deliverables' | 'deliverablesIncomplete'>
   workingDirectory: string
   maxFiles: number
   maxBytes: number
@@ -37,32 +36,36 @@ export async function prepareTaskArtifacts({ record, reply, workingDirectory, ma
     let outputDirectory: string
     try { outputDirectory = createTaskOutputDirectory(workingDirectory) }
     catch { return { index: { artifactsIncomplete: true }, attachments: [], notices: ['附件未发送：无法创建产物目录，请在 DSH 核对。'] } }
+    const artifacts: string[] = []
     let failed = Math.max(0, declared.length - maxFiles)
     for (const file of declared.slice(0, maxFiles)) {
-      if (await copyDeliverable(path.resolve(workingDirectory, file.path), outputDirectory, maxBytes, workingDirectory) === undefined) failed++
+      const captured = await copyDeliverable(path.resolve(workingDirectory, file.path), outputDirectory, maxBytes, workingDirectory)
+      if (captured === undefined) failed++
+      else artifacts.push(captured)
     }
-    index = await captureArtifacts(outputDirectory, { includeAll: true })
+    index = { outputDirectory, artifacts: artifacts.sort(), artifactsIncomplete: failed > 0 }
     if (failed > 0) {
-      index.artifactsIncomplete = true
       notices.push(`${failed} 个附件未发送（超过数量或大小限制、已改变或无法安全读取），请在 DSH 核对。`)
     }
   }
 
+  if (reply.deliverablesIncomplete) {
+    index.artifactsIncomplete = true
+    notices.push('部分附件未发送：声明文件超过恢复数量上限，请在 DSH 核对。')
+  }
   if (index.outputDirectory === undefined) return { index, attachments: [], notices }
   const directory = index.outputDirectory
-  const scan = await scanProducedFiles({ dir: directory, sinceMs: 0, maxFiles, maxBytes, ...(declared.length ? { includeAll: true } : {}) })
+  const files = [...new Set(index.artifacts ?? [])]
   const attachments: ArtifactDelivery[] = []
-  const found = new Set(scan.files.map((file) => path.relative(directory, file.path)))
-  let unavailable = (index.artifacts ?? []).filter((relative) => !found.has(relative)).length
-  for (const file of scan.files) {
-    const relative = path.relative(directory, file.path)
-    const artifact = index.artifacts?.includes(relative) ? await describeArtifact(path.dirname(directory), directory, relative, maxBytes) : undefined
+  let unavailable = Math.max(0, files.length - maxFiles)
+  for (const relative of files.slice(0, maxFiles)) {
+    const artifact = await describeArtifact(workingDirectory, directory, relative, maxBytes)
     if (artifact) attachments.push(artifact)
     else unavailable++
   }
-  if (unavailable > 0 || scan.skipped > 0 || scan.incomplete) {
+  if (unavailable > 0) {
     index.artifactsIncomplete = true
-    notices.push('部分附件未发送：文件超过数量或大小限制、已改变，或输出目录无法完整读取。请在 DSH 核对。')
+    notices.push('部分附件未发送：文件超过数量或大小限制、已改变，或无法安全读取。请在 DSH 核对。')
   }
   return { index, attachments, notices }
 }

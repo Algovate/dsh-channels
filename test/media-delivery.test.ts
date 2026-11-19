@@ -9,8 +9,8 @@ import { createChannelsRuntime, createFakeAdapter } from './runtime-helper.js'
 import { stateFile, resetStateFile } from '../packages/core/src/store/state.js'
 import type { OutboxFile } from '../packages/core/src/store/outbox.js'
 
-async function until(check: () => boolean) {
-  for (let i = 0; i < 200 && !check(); i++) await delay(5)
+async function until(check: () => boolean, attempts = 200) {
+  for (let i = 0; i < attempts && !check(); i++) await delay(5)
   assert.ok(check())
 }
 
@@ -342,4 +342,43 @@ test('old scan configuration cannot turn unrelated workspace files into attachme
     assert.equal(precreated, false)
     assert.equal(adapter.sent.flatMap((entry) => entry.outgoing.media ?? []).length, 0)
   } finally { await runtime.dispose(); fs.rmSync(root, { recursive: true, force: true }) }
+})
+
+test('one hundred declared artifacts persist, resume after restart and allow resending file 100', { timeout: 15000 }, async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'channel-artifact-limit-'))
+  const files = Array.from({ length: 100 }, (_, i) => path.join(root, `${String(i).padStart(3, '0')}.txt`))
+  files.forEach((file, i) => fs.writeFileSync(file, `file:${i}`))
+  const h = createHarness({ reply: 'ready', deliverables: () => files.map((file) => ({ path: file })) })
+  const config = { maxProducedFiles: 100 }
+  const runtime = createChannelsRuntime({ ctx: h.ctx, stateRoot: root, workingDirectory: root, config })
+  const first = createFakeAdapter()
+  const send = first.send
+  first.send = async (target, outgoing) => outgoing.media?.length ? { ok: false, code: 'offline' } : send(target, outgoing)
+  runtime.register(first)
+  let restarted: ReturnType<typeof createChannelsRuntime> | undefined
+  try {
+    runtime.dispatch(inbound())
+    await until(() => runtime.outbox.list()[0]?.lastCode === 'offline', 2000)
+    const task = stateFile(root).read<Array<{ id: string; artifacts: string[] }>>('tasks')![0]!
+    assert.equal(task.artifacts.length, 100)
+    assert.equal(first.sent.filter((item) => item.outgoing.text === 'ready').length, 1)
+    await runtime.dispose()
+    resetStateFile(root)
+    restarted = createChannelsRuntime({ ctx: h.ctx, stateRoot: root, workingDirectory: root, config })
+    const uploaded: string[] = []
+    const adapter = createFakeAdapter()
+    adapter.send = async (_target, outgoing) => {
+      for (const file of outgoing.media ?? []) uploaded.push(fs.readFileSync(file.path, 'utf8'))
+      return { ok: true, messageId: 'accepted' }
+    }
+    restarted.register(adapter)
+    ready(root)
+    restarted.startOutboxRetry(5)
+    await until(() => uploaded.length === 100 && restarted!.outbox.list().length === 0, 2000)
+    assert.deepEqual(uploaded, Array.from({ length: 100 }, (_, i) => `file:${i}`))
+    restarted.dispatch(inbound({ text: `/resend ${task.id.slice(0, 8)} 100` }))
+    await until(() => uploaded.length === 101)
+    assert.equal(uploaded[100], 'file:99')
+    assert.equal(h.followedUp.length, 1)
+  } finally { await restarted?.dispose(); await runtime.dispose(); fs.rmSync(root, { recursive: true, force: true }) }
 })

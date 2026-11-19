@@ -8,6 +8,7 @@
  * @module @derekluo/dsh-channels/config
  */
 import z from '@deepseek-ai/schemastery'
+import { MAX_PRODUCED_FILES } from './media.js'
 
 const DEFAULTS: ChannelsConfig = {
   enabled: true,
@@ -59,7 +60,7 @@ export const Config = z.object({
   approvalsEnabled: z.boolean().default(DEFAULTS.approvalsEnabled).description('Let the chat approve or reject tool calls (allowed once only).'),
   interactionTimeoutMs: z.number().default(DEFAULTS.interactionTimeoutMs).description('How long one question or approval waits for a chat reply before falling back to the desktop.'),
   autoSendFiles: z.boolean().default(DEFAULTS.autoSendFiles).description('Send files declared with present or standalone local Markdown images as durable chat attachments.'),
-  maxProducedFiles: z.number().default(DEFAULTS.maxProducedFiles).description('How many produced files one turn may send.'),
+  maxProducedFiles: z.number().min(0).max(MAX_PRODUCED_FILES).default(DEFAULTS.maxProducedFiles).description('How many produced files one turn may send (0–100).'),
   maxProducedBytes: z.number().default(DEFAULTS.maxProducedBytes).description('Largest produced file that is sent (bytes).'),
   workingDirectory: z.string().default(DEFAULTS.workingDirectory).description('Where channel sessions run and their output directories are created. Empty means the plugin state root workspace.'),
 })
@@ -116,7 +117,7 @@ export function resolveConfig(raw: Partial<ChannelsConfig> | undefined): Channel
     approvalsEnabled: typeof input.approvalsEnabled === 'boolean' ? input.approvalsEnabled : DEFAULTS.approvalsEnabled,
     interactionTimeoutMs: bounded(input.interactionTimeoutMs, DEFAULTS.interactionTimeoutMs, 1, 2147483647),
     autoSendFiles: typeof input.autoSendFiles === 'boolean' ? input.autoSendFiles : DEFAULTS.autoSendFiles,
-    maxProducedFiles: bounded(input.maxProducedFiles, DEFAULTS.maxProducedFiles, 0, 10000),
+    maxProducedFiles: bounded(input.maxProducedFiles, DEFAULTS.maxProducedFiles, 0, MAX_PRODUCED_FILES),
     maxProducedBytes: bounded(input.maxProducedBytes, DEFAULTS.maxProducedBytes, 0, 9007199254740991),
     workingDirectory: typeof input.workingDirectory === 'string' ? input.workingDirectory.trim() : DEFAULTS.workingDirectory,
   }

@@ -703,7 +703,11 @@ export class ChannelsRuntime {
       if (!this.canManage(message)) { await this.send(message, { text: '只有管理员可以管理计划。', kind: 'notice' }); return }
       await this.#schedules.command(message, name, args); return
     }
-    if (name === 'projects' || name === 'project' || name === 'sessions' || name === 'session' || name === 'new') {
+    if (name === 'sessions' || name === 'session') {
+      await this.send(message, { kind: 'notice', text: '已移除手机历史会话切换。请在 DSH 查看历史会话；/new 可开始新会话。' })
+      return
+    }
+    if (name === 'projects' || name === 'project' || name === 'new') {
       if (name !== 'projects' && !this.canManage(message)) { await this.send(message, { text: '只有管理员可以切换项目或会话。', kind: 'notice' }); return }
       await this.send(message, { kind: 'notice', text: this.#routes.command(message, name, args) })
       return

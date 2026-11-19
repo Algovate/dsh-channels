@@ -100,3 +100,24 @@ test('a refused sender cannot run commands', async () => {
   assert.equal(adapter.sent.some((entry) => entry.outgoing.text?.includes('【可用命令】')), false)
   runtime.dispose()
 })
+
+test('retired session controls give migration guidance without starting a turn or spending quota', async () => {
+  const h = createHarness()
+  const runtime = createChannelsRuntime({ ctx: h.ctx, config: { senderPerMinute: 1, senderPerDay: 1, autoSendFiles: false } })
+  const adapter = createFakeAdapter()
+  runtime.register(adapter)
+  try {
+    assert.doesNotMatch(helpText(), /\/sessions?\b/)
+    for (const message of [inbound({ text: '/sessions' }), inbound({ text: '/session 0' }), inbound({ text: '/session@my_bot 99' }), inbound({ text: '/ask /session@my_bot 0', group: true })]) {
+      const count = adapter.sent.length
+      assert.equal(runtime.dispatch(message).allow, true)
+      for (let i = 0; i < 100 && adapter.sent.length === count; i++) await tick(5)
+      assert.match(adapter.sent.at(-1)?.outgoing.text ?? '', /已移除.*DSH.*历史会话/)
+    }
+    assert.equal(h.followedUp.length, 0)
+    assert.equal(runtime.dispatch(inbound({ text: '/session 0', senderId: 'stranger' })).allow, false)
+    assert.equal(runtime.dispatch(inbound({ text: 'still have a turn' })).allow, true)
+    for (let i = 0; i < 100 && h.followedUp.length === 0; i++) await tick(5)
+    assert.equal(h.followedUp.length, 1)
+  } finally { await runtime.dispose() }
+})

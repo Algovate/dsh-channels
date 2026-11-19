@@ -9,7 +9,7 @@ import { createChannelsRuntime, createFakeAdapter } from './runtime-helper.js'
 import { sessionIdFor } from '../packages/core/src/ids.js'
 const tick = () => new Promise((resolve) => setTimeout(resolve, 100))
 
-test('project commands select configured workspaces and session selection preserves high-water allocation after restart', async () => {
+test('project commands preserve old session selections and high-water allocation after restart', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'routing-'))
   const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'routing-ws-'))
   const project = fs.mkdtempSync(path.join(os.tmpdir(), 'routing-project-'))
@@ -30,8 +30,11 @@ test('project commands select configured workspaces and session selection preser
     await send('/new')
     await send('app line1')
     assert.notEqual(h.created.at(-1)?.sessionId, appSession)
-    await send('/session 0')
     await runtime.dispose()
+    // An older release had selected line 0 after allocating line 1.
+    const saved = JSON.parse(readSectionJson(root, 'lines'))
+    saved['fake|acct|conv'].sessions[JSON.stringify(['app', fs.realpathSync(project)])].current = 0
+    writeSectionJson(root, 'lines', JSON.stringify(saved))
     runtime = createChannelsRuntime({ ctx: h.ctx, stateRoot: root, workingDirectory: workspace, config })
     runtime.register(adapter)
     await send('/whoami')
@@ -44,8 +47,6 @@ test('project commands select configured workspaces and session selection preser
     assert.equal((h.created.at(-1)?.meta as { cwd: string }).cwd, workspace)
     await send('/project /tmp')
     assert.match(adapter.sent.at(-1)?.outgoing.text ?? '', /未配置|无效/)
-    await send('/session 99')
-    assert.match(adapter.sent.at(-1)?.outgoing.text ?? '', /不存在|无效/)
   } finally { await runtime.dispose(); fs.rmSync(root, { recursive: true, force: true }); fs.rmSync(workspace, { recursive: true, force: true }); fs.rmSync(project, { recursive: true, force: true }) }
 })
 
@@ -60,10 +61,12 @@ test('queued routes survive switching and restart; removing their project blocks
     runtime.dispatch(inbound({ text: '/project app' })); await tick()
     runtime.dispatch(inbound({ text: 'running' })); await tick()
     runtime.dispatch(inbound({ text: 'queued' }))
+    runtime.dispatch(inbound({ text: '/new' })); await tick()
     runtime.dispatch(inbound({ text: '/project default' })); await tick()
     const saved = JSON.parse(readSectionJson(root, 'inbox'))
     assert.equal(saved[0].workingDirectory, fs.realpathSync(project))
     const originalId = saved[0].sessionId
+    assert.equal(originalId, h.created[0]?.sessionId)
     await runtime.dispose()
     const second = createHarness()
     runtime = createChannelsRuntime({ ctx: second.ctx, stateRoot: root, workingDirectory: root, config: { ...config, projects: { backup: project } } })

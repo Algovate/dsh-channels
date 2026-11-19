@@ -83,3 +83,62 @@ test('capture pins the source identity before asynchronous containment resolutio
     fs.rmSync(outside, { recursive: true, force: true })
   }
 })
+
+test('recovery sends indexed log and nested dotfiles without discovering unindexed outputs', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'task-index-only-'))
+  const output = fs.mkdtempSync(path.join(root, '.channel-output-'))
+  fs.mkdirSync(path.join(output, '.reports'))
+  fs.writeFileSync(path.join(output, 'result.log'), 'declared log')
+  fs.writeFileSync(path.join(output, '.reports', 'report.txt'), 'declared report')
+  fs.writeFileSync(path.join(output, 'unindexed.txt'), 'unrelated')
+  try {
+    const plan = await prepareTaskArtifacts({
+      record: { outputDirectory: output, artifacts: ['result.log', '.reports/report.txt'] },
+      reply: { text: 'ready' }, workingDirectory: root, maxFiles: 3, maxBytes: 1024,
+    })
+    assert.deepEqual(plan.attachments.map((file) => file.relative), ['result.log', '.reports/report.txt'])
+    assert.notEqual(plan.index.artifactsIncomplete, true)
+    assert.deepEqual(plan.notices, [])
+  } finally { fs.rmSync(root, { recursive: true, force: true }) }
+})
+
+test('declared artifact capture reports excess files beyond the durable limit', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'task-declared-many-'))
+  const files = Array.from({ length: 101 }, (_, i) => path.join(root, `${String(i).padStart(3, '0')}.txt`))
+  for (const file of files) fs.writeFileSync(file, 'declared')
+  try {
+    const plan = await prepareTaskArtifacts({ record: {}, reply: { text: 'ready', deliverables: files.map((file) => ({ path: file })) }, workingDirectory: root, maxFiles: 100, maxBytes: 1024 })
+    assert.equal(plan.index.artifacts?.length, 100)
+    assert.equal(plan.attachments.length, 100)
+    assert.equal(plan.index.artifactsIncomplete, true)
+    assert.ok(plan.notices.some((notice) => /1 个附件未发送/.test(notice)))
+  } finally { fs.rmSync(root, { recursive: true, force: true }) }
+})
+
+test('a recovered artifact index cannot redirect delivery outside the authorized workspace', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'task-authorized-root-'))
+  const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'task-outside-root-'))
+  const output = fs.mkdtempSync(path.join(outside, '.channel-output-'))
+  fs.writeFileSync(path.join(output, 'private.txt'), 'private')
+  try {
+    const plan = await prepareTaskArtifacts({ record: { outputDirectory: output, artifacts: ['private.txt'] }, reply: { text: 'ready' }, workingDirectory: root, maxFiles: 3, maxBytes: 1024 })
+    assert.deepEqual(plan.attachments, [])
+    assert.equal(plan.index.artifactsIncomplete, true)
+    assert.ok(plan.notices.some((notice) => notice.includes('未发送')))
+  } finally { fs.rmSync(root, { recursive: true, force: true }); fs.rmSync(outside, { recursive: true, force: true }) }
+})
+
+test('recovered indexes preserve their order and report files beyond the current count or byte limit', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'task-recovered-limit-'))
+  const output = fs.mkdtempSync(path.join(root, '.channel-output-'))
+  fs.writeFileSync(path.join(output, 'z.txt'), 'ok')
+  fs.writeFileSync(path.join(output, 'a.txt'), 'too large')
+  fs.writeFileSync(path.join(output, 'b.txt'), 'ok')
+  try {
+    const plan = await prepareTaskArtifacts({ record: { outputDirectory: output, artifacts: ['z.txt', 'a.txt', 'b.txt'] }, reply: { text: 'ready' }, workingDirectory: root, maxFiles: 2, maxBytes: 2 })
+    assert.deepEqual(plan.index.artifacts, ['z.txt', 'a.txt', 'b.txt'])
+    assert.deepEqual(plan.attachments.map((file) => file.relative), ['z.txt'])
+    assert.equal(plan.index.artifactsIncomplete, true)
+    assert.ok(plan.notices.some((notice) => notice.includes('未发送')))
+  } finally { fs.rmSync(root, { recursive: true, force: true }) }
+})

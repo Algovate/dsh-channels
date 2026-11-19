@@ -8,7 +8,7 @@ import { createHarness, inbound } from './harness.js'
 import { resetStateFile, stateFile } from '../packages/core/src/store/state.js'
 import { Tasks } from '../packages/core/src/store/tasks.js'
 
-function fixture(project = 'default') {
+function fixture(project = 'default', maxProducedFiles = 3) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'channels-recover-'))
   const events: Array<Record<string, unknown>> = []
   const reads: number[] = []
@@ -19,13 +19,14 @@ function fixture(project = 'default') {
   const recovery = { message, sessionId: 'session', messageId: 'input', beforeSeq: -1, project }
   stateFile(root).write('tasks', [{ id: 'task', target: message, senderId: 'sender', summary: 'recover me', workingDirectory: root, startedAt: 1, execution: 'running', delivery: 'none', recovery }])
   resetStateFile(root)
-  const runtime = createChannelsRuntime({ stateRoot: root, workingDirectory: root, config: { projects: { app: root } }, ctx: { get(name) {
+  const ctx = { get(name: string) {
     if (name !== 'sessionPersistence') return undefined
     return { async open(id: string, access: string) {
       assert.equal(id, 'session'); assert.equal(access, 'read')
       return { header, async read(offset: number, length: number) { reads.push(offset); await afterRead?.(); return { events: events.slice(offset, offset + length) } }, async close() { closes++ } }
     } }
-  } } })
+  } }
+  const runtime = createChannelsRuntime({ stateRoot: root, workingDirectory: root, config: { projects: { app: root }, maxProducedFiles }, ctx })
   const adapter = createFakeAdapter()
   let restored = 0
   adapter.restoreInbound = (input) => { assert.deepEqual(input.raw, { contextToken: 'original' }); restored++ }
@@ -39,7 +40,7 @@ function fixture(project = 'default') {
       ...(complete ? [{ type: 'turn/end', data: { turn: number, reason: { kind: 'completed' } } }] : []),
     ]) events.push({ seq: events.length, ...event })
   }
-  return { root, events, reads, runtime, adapter, turn, header, afterRead(fn: () => void | Promise<void>) { afterRead = fn }, restored: () => restored, closes: () => closes,
+  return { root, events, reads, runtime, ctx, adapter, turn, header, afterRead(fn: () => void | Promise<void>) { afterRead = fn }, restored: () => restored, closes: () => closes,
     tasks: () => stateFile(root).read<Array<{ execution: string; recovery?: unknown }>>('tasks')!,
     async close() { await runtime.dispose(); fs.rmSync(root, { recursive: true, force: true }) } }
 }
@@ -292,4 +293,33 @@ test('a result blocked before durable handoff keeps recovery for later reauthori
     await f.runtime.resumePending()
     assert.equal(f.adapter.sent.find((item) => item.outgoing.kind === 'reply')?.outgoing.text, 'recover after reauthorization')
   } finally { await f.close() }
+})
+
+test('recovery preserves file overflow across restart and never reports complete delivery', async () => {
+  const f = fixture('default', 100)
+  let restarted: ReturnType<typeof createChannelsRuntime> | undefined
+  try {
+    const files = Array.from({ length: 101 }, (_, i) => path.join(f.root, `${String(i).padStart(3, '0')}.txt`))
+    files.forEach((file) => fs.writeFileSync(file, 'declared'))
+    f.turn('input', 'bulk recovery', false)
+    f.events.push({ seq: 3, type: 'deliverables/presented', data: { turn: 1, files: files.map((file) => ({ path: file })) } })
+    await f.runtime.resumePending()
+    const saved = JSON.parse(fs.readFileSync(path.join(f.root, 'state.json'), 'utf8')).sections.tasks[0].recovery.cursor
+    assert.equal(saved.deliverables.length, 100)
+    assert.equal(saved.deliverablesIncomplete, true)
+    await f.runtime.dispose()
+    resetStateFile(f.root)
+    f.events.push({ seq: 4, type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } })
+    restarted = createChannelsRuntime({ stateRoot: f.root, workingDirectory: f.root, config: { maxProducedFiles: 100 }, ctx: f.ctx })
+    const adapter = createFakeAdapter()
+    restarted.register(adapter)
+    await restarted.resumePending()
+    const task = JSON.parse(fs.readFileSync(path.join(f.root, 'state.json'), 'utf8')).sections.tasks[0]
+    assert.equal(adapter.sent.flatMap((item) => item.outgoing.media ?? []).length, 100)
+    assert.equal(task.artifacts.length, 100)
+    assert.equal(task.artifactsIncomplete, true)
+    assert.equal(task.filesUnsent, true)
+    assert.equal(task.delivery, 'failed')
+    assert.ok(adapter.sent.some((item) => /附件.*未.*发送/.test(item.outgoing.text ?? '')))
+  } finally { await restarted?.dispose(); await f.close() }
 })

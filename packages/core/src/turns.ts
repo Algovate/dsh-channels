@@ -72,6 +72,8 @@ export interface TurnReply {
   pending?: boolean
   /** Files the host declared through `present` during this turn. */
   deliverables?: PresentedFile[]
+  /** Recovery saw more declared files than its durable cursor can retain. */
+  deliverablesIncomplete?: boolean
 }
 
 export interface TurnContextBlock {

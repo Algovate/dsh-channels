@@ -12,6 +12,7 @@
  * @module @derekluo/dsh-channels/store/schema
  */
 import z from '@deepseek-ai/schemastery'
+import { MAX_PRODUCED_FILES } from '../media.js'
 import type { OutboxEntry } from './outbox.js'
 
 /** A nested object is only optional when it defaults to undefined (schemastery defaults objects to `{}`). */
@@ -80,7 +81,7 @@ export const taskSchema = z.object({
   project: z.string(),
   outputDirectory: z.string(),
   replyMessage: optional(inboundMessageSchema),
-  artifacts: z.array(z.string()).max(100),
+  artifacts: z.array(z.string()).max(MAX_PRODUCED_FILES),
   artifactsIncomplete: z.boolean(),
   recovery: optional(z.object({
     sessionId: z.string().required(),
@@ -90,7 +91,8 @@ export const taskSchema = z.object({
     project: z.string(),
     cursor: optional(z.object({
       progress: recoveryProgressSchema.required(),
-      deliverables: z.array(z.object({ path: z.string().required() })).max(100).required(),
+      deliverables: z.array(z.object({ path: z.string().required() })).max(MAX_PRODUCED_FILES).required(),
+      deliverablesIncomplete: z.boolean(),
     })),
   })),
 })
@@ -112,7 +114,7 @@ export const outboxEntrySchema = z.object({
   remaining: z.array(z.string()),
   lastCode: z.string(),
   unconfirmed: z.boolean(),
-  attachments: z.array(artifactDeliverySchema).max(100),
+  attachments: z.array(artifactDeliverySchema).max(MAX_PRODUCED_FILES),
   includesArtifacts: z.boolean(),
   filesFailed: z.boolean(),
 })

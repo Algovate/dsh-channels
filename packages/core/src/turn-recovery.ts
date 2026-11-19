@@ -1,5 +1,6 @@
 /** Read an exact submitted input's outcome without activating or resubmitting its agent. */
 import fs from 'node:fs'
+import { MAX_PRODUCED_FILES } from './media.js'
 import type { HostPort } from './host.js'
 import { TurnProgress, type TurnProgressSnapshot } from './turn-progress.js'
 import type { PresentedFile, TurnReply } from './turns.js'
@@ -13,6 +14,7 @@ export interface TurnBinding {
 export interface RecoveryCursor {
   progress: TurnProgressSnapshot
   deliverables: PresentedFile[]
+  deliverablesIncomplete?: boolean
 }
 
 interface Persistence {
@@ -30,6 +32,7 @@ export async function recoverTurn(host: HostPort, binding: TurnBinding, workingD
   const handle = await persistence.open(binding.sessionId, 'read', { signal })
   const progress = cursor ? TurnProgress.restore(cursor.progress) : new TurnProgress(binding.beforeSeq, binding.messageId)
   const deliverables = cursor?.deliverables.slice() ?? []
+  let deliverablesIncomplete = cursor?.deliverablesIncomplete === true
   try {
     signal.throwIfAborted()
     if (!handle.header.cwd || fs.realpathSync(handle.header.cwd) !== fs.realpathSync(workingDirectory)) throw new Error('recovery session directory no longer matches the original project')
@@ -46,7 +49,9 @@ export async function recoverTurn(host: HostPort, binding: TurnBinding, workingD
         if (typeof data?.turn !== 'number' || !progress.matchesTurn(data.turn)) continue
         for (const file of Array.isArray(data.files) ? data.files : []) {
           if (file === null || typeof file !== 'object' || typeof file.path !== 'string' || file.path === '') continue
-          if (deliverables.length < 100 && !deliverables.some((existing) => existing.path === file.path)) deliverables.push({ path: file.path })
+          if (deliverables.some((existing) => existing.path === file.path)) continue
+          if (deliverables.length < MAX_PRODUCED_FILES) deliverables.push({ path: file.path })
+          else deliverablesIncomplete = true
         }
       }
       if (progress.nextSeq <= before) throw new Error('host recovery log did not advance')
@@ -54,7 +59,7 @@ export async function recoverTurn(host: HostPort, binding: TurnBinding, workingD
   } finally { await handle.close() }
   signal.throwIfAborted()
   return {
-    cursor: { progress: progress.snapshot(Infinity), deliverables },
-    ...(progress.result === undefined ? {} : { reply: { ...progress.result, sessionId: binding.sessionId, settled: true, cancelled: progress.cancelled, deliverables } }),
+    cursor: { progress: progress.snapshot(Infinity), deliverables, deliverablesIncomplete },
+    ...(progress.result === undefined ? {} : { reply: { ...progress.result, sessionId: binding.sessionId, settled: true, cancelled: progress.cancelled, deliverables, deliverablesIncomplete } }),
   }
 }

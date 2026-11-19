@@ -7,7 +7,6 @@ import test from 'node:test'
 import { setTimeout as delay } from 'node:timers/promises'
 import { createRateLimiter } from '../packages/core/src/inbound/gates.js'
 import { Outbox } from '../packages/core/src/store/outbox.js'
-import { scanProducedFiles } from '../packages/core/src/produced.js'
 import { createHarness, inbound } from './harness.js'
 import { createFakeAdapter, createChannelsRuntime, createFakeUserMessage } from './runtime-helper.js'
 import { resolveConfig } from '../packages/core/src/config.js'
@@ -46,13 +45,6 @@ test('platform retry delay survives enqueue and subsequent failed retry', async 
   now = 3600000
   await box.drain(async () => ({ ok: false, code: 'rate-limited', retryAfterMs: 7200000 }))
   assert.equal(box.list()[0]?.nextAt, now + 7200000)
-  fs.rmSync(root, { recursive: true })
-})
-
-test('produced-file selection considers the newest candidate beyond the old prefix cap', async () => {
-  const root = temp()
-  for (const [i, name] of ['a', 'b', 'c', 'd', 'z'].entries()) { const file = path.join(root, name); fs.writeFileSync(file, 'x'); fs.utimesSync(file, 1000 + i, 1000 + i) }
-  assert.equal((await scanProducedFiles({ dir: root, sinceMs: 0, maxFiles: 1 })).files[0]?.name, 'z')
   fs.rmSync(root, { recursive: true })
 })
 
@@ -144,14 +136,9 @@ test('priority classification does not bypass authorization or normal message or
   } finally { await runtime.dispose() }
 })
 
-test('a bounded output scan reports incomplete traversal independently of the send limit', async () => {
-  const { scanProducedFiles } = await import('../packages/core/src/produced.js')
-  const root = temp()
-  try {
-    for (let i = 0; i < 8; i++) fs.writeFileSync(path.join(root, `${i}.txt`), 'x')
-    const limited = await scanProducedFiles({ dir: root, sinceMs: 0, maxEntries: 2, maxFiles: 1 })
-    assert.equal(limited.incomplete, true); assert.equal(limited.files.length, 1); assert.equal(limited.skipped, 1)
-    const complete = await scanProducedFiles({ dir: root, sinceMs: 0, maxFiles: 1 })
-    assert.equal(complete.incomplete, false); assert.equal(complete.skipped, 7)
-  } finally { fs.rmSync(root, { recursive: true }) }
+test('artifact configuration cannot exceed the durable one-hundred-file contract', () => {
+  assert.equal(resolveConfig({ maxProducedFiles: 100 }).maxProducedFiles, 100)
+  assert.equal(resolveConfig({ maxProducedFiles: 0 }).maxProducedFiles, 0)
+  assert.equal(resolveConfig({ maxProducedFiles: 101 }).maxProducedFiles, 3)
+  assert.equal(resolveConfig({ maxProducedFiles: 10000 }).maxProducedFiles, 3)
 })

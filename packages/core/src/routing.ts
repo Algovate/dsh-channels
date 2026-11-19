@@ -10,7 +10,7 @@ import type { CounterStore } from './store/counters.js'
 import type { ChannelsConfig } from './config.js'
 import type { InboundMessage } from './types.js'
 
-export type RoutingCommand = 'projects' | 'project' | 'sessions' | 'session' | 'new'
+export type RoutingCommand = 'projects' | 'project' | 'new'
 interface RoutingOptions {
   stateRoot: string
   workingDirectory: string
@@ -79,18 +79,8 @@ export class ChannelRoutes {
       } else {
         const routeKey = this.#routeKey(state.project, this.#workspaceFor(state.project))
         const selection = state.sessions[routeKey] ?? { current: 0, max: 0 }
-        if (name === 'sessions') {
-          const rows = Array.from({ length: Math.min(selection.max + 1, 20) }, (_, index) => selection.max - index)
-          if (!rows.includes(selection.current)) rows.push(selection.current)
-          return chatParagraphs(`【${state.project} 的会话】`, ...rows.map((line) => `${line}${line === selection.current ? '（当前）' : ''}`), '切换：/session <编号>；新建：/new。显示最近 20 个编号及当前编号。')
-        }
-        if (name === 'session') {
-          if (!/^(0|[1-9]\d{0,15})$/.test(args) || !Number.isSafeInteger(Number(args)) || Number(args) > selection.max) { return '会话编号不存在或无效，请用 /sessions 查看。' }
-          selection.current = Number(args)
-        } else {
-          if (!Number.isSafeInteger(selection.max + 1)) throw new Error('会话编号已达上限')
-          selection.current = ++selection.max
-        }
+        if (!Number.isSafeInteger(selection.max + 1)) throw new Error('会话编号已达上限')
+        selection.current = ++selection.max
         state.sessions[routeKey] = selection
       }
       if (!this.#lines.saveRouting(lineKey(message), state)) {

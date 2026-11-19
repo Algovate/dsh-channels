@@ -1,23 +1,13 @@
-/** Task-scoped artifact discovery and direct chat retrieval; never accept a user-supplied path. */
+/** Task-scoped artifact capture and retrieval; never accept a user-supplied retrieval path. */
 import fs from 'node:fs/promises'
 import { constants, createReadStream } from 'node:fs'
 import { createHash } from 'node:crypto'
 import os from 'node:os'
 import path from 'node:path'
-import { scanProducedFiles } from './produced.js'
 import { chatParagraphs } from './outbound.js'
 import { formatBytes } from './media.js'
 import type { TaskRecord, Tasks } from './store/tasks.js'
 import type { InboundMessage, Outgoing, OutgoingMedia, SendResult } from './types.js'
-
-export async function captureArtifacts(directory: string, options: { includeAll?: boolean } = {}): Promise<Pick<TaskRecord, 'outputDirectory' | 'artifacts' | 'artifactsIncomplete'>> {
-  const scan = await scanProducedFiles({ dir: directory, sinceMs: 0, maxFiles: 100, maxBytes: Number.MAX_SAFE_INTEGER, ...(options.includeAll === true ? { includeAll: true } : {}) })
-  return {
-    outputDirectory: directory,
-    artifacts: scan.files.map((file) => path.relative(directory, file.path)).sort(),
-    artifactsIncomplete: scan.incomplete || scan.skipped > 0,
-  }
-}
 
 interface ArtifactFile { path: string; name: string; bytes: number; dev: number; ino: number }
 
