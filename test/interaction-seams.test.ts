@@ -1,10 +1,13 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
+import { keepHostAlive } from './host-lifetime.js'
 
 import { approvalEntry, answerApproval, formatApprovalPrompt, parseApprovalOutcome } from '../packages/core/src/interaction/approval.js'
 import { answerUserQuestion, formatQuestionPrompt, parseAnswers, parseOneQuestion } from '../packages/core/src/interaction/questions.js'
 import { InteractionQueue, type InteractionEntry } from '../packages/core/src/interaction/queue.js'
 import type { Outgoing, Target } from '../packages/core/src/types.js'
+
+keepHostAlive()
 
 const target: Target = { channel: 'fake', accountId: 'acct', conversationId: 'conv' }
 const tick = (ms = 0) => new Promise((resolve) => setTimeout(resolve, ms))

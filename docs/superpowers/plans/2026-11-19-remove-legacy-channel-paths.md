@@ -61,3 +61,6 @@
 - No commit, publication, deployment or real-account send performed.
 
 - Follow-up: user requested “proceed”; prepare a local commit on the existing branch after fresh full-suite, packaging and diff verification. Publication and deployment remain outside this step.
+
+- PR follow-up: pushed the branch and created draft PR #1 against main, including the pre-existing durable-delivery commits.
+- CI diagnosis: Node 22 cancelled 39 interaction tests because only unref timers remained. Reproduced locally with Node 22.23.5 (7/46 passed, 39 cancelled); a test-only live-host fixture changed the focused run to 46/46 passing and the full Node 22 suite to 463/463. Production timer behavior is unchanged.

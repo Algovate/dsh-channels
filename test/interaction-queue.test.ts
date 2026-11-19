@@ -1,8 +1,11 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
+import { keepHostAlive } from './host-lifetime.js'
 
 import { InteractionQueue, type InteractionEntry } from '../packages/core/src/interaction/queue.js'
 import type { Outgoing, Target } from '../packages/core/src/types.js'
+
+keepHostAlive()
 
 const target: Target = { channel: 'fake', accountId: 'acct', conversationId: 'conv' }
 const other: Target = { ...target, conversationId: 'conv-2' }

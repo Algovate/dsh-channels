@@ -3,6 +3,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
+import { keepHostAlive } from './host-lifetime.js'
 import { TurnDriver } from '../packages/core/src/turns.js'
 import { Outbox } from '../packages/core/src/store/outbox.js'
 import { stateFile } from '../packages/core/src/store/state.js'
@@ -15,6 +16,8 @@ import { spawn, spawnSync } from 'node:child_process'
 import { pathToFileURL } from 'node:url'
 import { startChannels } from '../packages/core/src/index.js'
 import { resolveConfig } from '../packages/core/src/config.js'
+
+keepHostAlive()
 
 const logger = { info() {}, warn() {} }
 
