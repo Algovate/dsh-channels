@@ -218,7 +218,7 @@ test('the card asks the host for status through the channels namespace', async (
 })
 
 test('settings refresh replaces pristine fields and save submits only edited fields', async () => {
-  await withClient('en', (client) => {
+  await withClient('en', async (client) => {
     let hooks: unknown[] = []
     let index = 0
     const React = {
@@ -255,6 +255,33 @@ test('settings refresh replaces pristine fields and save submits only edited fie
       hooks = []; index = 0; tree = editor.type(editor.props)
       index = 0; tree = editor.type(fresh)
       assert.equal(fields(tree)[0].props.value, '1', 'a pristine form follows server refresh')
+      for (const [ok, json, expected] of [
+        [false, async () => ({ detail: 'save failed' }), 'save failed'],
+        [true, async () => ({ ok: false, detail: 'rejected' }), 'rejected'],
+        [false, async () => { throw new Error('invalid JSON') }, '503 Unavailable'],
+      ] as const) {
+        hooks = [{ senderPerMinute: '8' }]; index = 0
+        globalThis.fetch = (async (_url: unknown, init: RequestInit) => {
+          assert.equal(init.credentials, 'same-origin')
+          assert.equal(init.method, 'POST')
+          return Object.assign(new Response(null, { status: ok ? 200 : 503, statusText: 'Unavailable' }), { json })
+        }) as typeof fetch
+        click(editor.type(fresh))
+        await new Promise<void>((resolve) => setImmediate(resolve))
+        assert.equal(hooks[1], false, 'request completion releases the busy state')
+        assert.equal(hooks[3], expected)
+        assert.deepEqual(hooks[0], { senderPerMinute: '8' }, 'failed saves retain edits')
+      }
+      hooks = [{ senderPerMinute: '8' }]; index = 0
+      let reloaded = false
+      globalThis.fetch = async () => Response.json({ ok: true })
+      click(editor.type({ ...fresh, reload: () => { reloaded = true } }))
+      await new Promise<void>((resolve) => setImmediate(resolve))
+      assert.deepEqual(hooks[0], {})
+      assert.equal(hooks[1], false)
+      assert.equal(hooks[2], 'Saved — it applies to the next message.')
+      assert.equal(reloaded, true)
+
     } finally { globalThis.fetch = previous }
   })
 })

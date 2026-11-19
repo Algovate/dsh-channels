@@ -4,6 +4,7 @@ import { constants, createReadStream } from 'node:fs'
 import { createHash } from 'node:crypto'
 import os from 'node:os'
 import path from 'node:path'
+import { copyBounded } from './file-copy.js'
 import { chatParagraphs } from './outbound.js'
 import { formatBytes } from './media.js'
 import type { TaskRecord, Tasks } from './store/tasks.js'
@@ -47,16 +48,7 @@ async function snapshotFile(file: ArtifactFile, maxBytes: number): Promise<{ pat
     const copy = path.join(temporary, path.basename(file.name))
     const destination = await fs.open(copy, 'wx', 0o600)
     try {
-      const buffer = Buffer.alloc(64 * 1024)
-      let total = 0
-      for (;;) {
-        const { bytesRead } = await source.read(buffer, 0, Math.min(buffer.length, maxBytes - total + 1), total)
-        if (bytesRead === 0) break
-        total += bytesRead
-        if (total > maxBytes) throw new Error('artifact exceeds size limit')
-        await destination.writeFile(buffer.subarray(0, bytesRead))
-      }
-      if (total === 0) throw new Error('artifact became empty')
+      await copyBounded(source, destination, maxBytes)
     } finally { await destination.close() }
     const directory = temporary
     return { path: copy, dispose: () => fs.rm(directory, { recursive: true, force: true }) }
@@ -112,16 +104,7 @@ export async function copyDeliverable(source: string, directory: string, maxByte
       }
     }
     if (destination === undefined || name === undefined) return undefined
-    const buffer = Buffer.alloc(64 * 1024)
-    let total = 0
-    for (;;) {
-      const { bytesRead } = await sourceFile.read(buffer, 0, Math.min(buffer.length, maxBytes - total + 1), total)
-      if (bytesRead === 0) break
-      total += bytesRead
-      if (total > maxBytes) throw new Error('deliverable exceeds size limit')
-      await destination.writeFile(buffer.subarray(0, bytesRead))
-    }
-    if (total === 0) throw new Error('deliverable became empty')
+    await copyBounded(sourceFile, destination, maxBytes)
     complete = true
     return name
   } catch {

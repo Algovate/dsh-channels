@@ -24,12 +24,12 @@ test('memory quota reservations are settled once, including clear followed by qu
   assert.equal(limiter.take('sender'), false)
 })
 
-test('outbox reports add/drop persistence failures and preserves the prior entry', () => {
+test('outbox reports enqueue/drop persistence failures and preserves the prior entry', () => {
   const root = temp()
   const box = new Outbox({ stateRoot: root })
-  const first = box.add(inbound(), { kind: 'reply', text: 'first' }, {})!
+  const first = box.enqueue(inbound(), ['first'])!
   stateFile(root).failNextWrite('outbox')
-  assert.equal(box.add(inbound(), { kind: 'reply', text: 'cannot save' }, {}), undefined)
+  assert.equal(box.enqueue(inbound(), ['cannot save']), undefined)
   stateFile(root).failNextWrite('outbox')
   assert.equal(box.drop(first.id), false)
   assert.equal(box.list()[0]?.id, first.id)
@@ -40,8 +40,9 @@ test('platform retry delay survives enqueue and subsequent failed retry', async 
   let now = 0
   const root = temp()
   const box = new Outbox({ stateRoot: root, now: () => now })
-  const add = box.add.bind(box) as (target: ReturnType<typeof inbound>, outgoing: { kind: 'reply'; text: string }, result: { retryAfterMs: number }) => { nextAt: number }
-  assert.equal(add(inbound(), { kind: 'reply', text: 'answer' }, { retryAfterMs: 3600000 }).nextAt, 3600000)
+  const entry = box.enqueue(inbound(), ['answer'])!
+  await box.sendPending(entry, async () => ({ ok: false, code: 'rate-limited', retryAfterMs: 3600000 }))
+  assert.equal(box.list()[0]?.nextAt, 3600000)
   now = 3600000
   await box.drain(async () => ({ ok: false, code: 'rate-limited', retryAfterMs: 7200000 }))
   assert.equal(box.list()[0]?.nextAt, now + 7200000)

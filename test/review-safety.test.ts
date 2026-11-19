@@ -135,8 +135,8 @@ test('a stalled chat does not prevent other chats from retrying again', async ()
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'review-retries-'))
   let now = 0
   const box = new Outbox({ stateRoot: root, now: () => now })
-  box.add(inbound(), { kind: 'reply', text: 'stalled' }, {})
-  box.add(inbound({ conversationId: 'other' }), { kind: 'reply', text: 'retry' }, {})
+  box.enqueue(inbound(), ['stalled'])
+  box.enqueue(inbound({ conversationId: 'other' }), ['retry'])
   let release!: () => void
   const wait = new Promise<void>((resolve) => { release = resolve })
   let attempts = 0

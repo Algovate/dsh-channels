@@ -23,7 +23,7 @@ test('the edge state document is canonical and no legacy mirrors are created', (
     const tasks = new Tasks(root, () => {})
     assert.equal(tasks.save({ id: entry.id, target: inbound(), senderId: 'sender', summary: 'kept', startedAt: 1, execution: 'running', delivery: 'none' }), true)
     assert.equal(new SessionLines(root, () => {}).saveRouting('chat', { project: 'default', sessions: { default: { current: 2, max: 2 } } }), true)
-    assert.equal(new Outbox({ stateRoot: root }).add(inbound(), { kind: 'reply', text: 'later' }, {})?.outgoing.text, 'later')
+    assert.equal(new Outbox({ stateRoot: root }).enqueue(inbound(), ['later'])?.outgoing.text, 'later')
     assert.ok(fs.existsSync(path.join(root, 'state.json')))
     assert.equal(fs.existsSync(path.join(root, 'inbox.json')), false)
 

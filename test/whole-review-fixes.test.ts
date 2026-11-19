@@ -16,7 +16,7 @@ test('invalid outbox refuses mutations and retries without overwriting recoverab
     const root = temp(); const file = path.join(root, 'outbox.json'); fs.writeFileSync(file, original)
     const box = new Outbox({ stateRoot: root })
     try {
-      assert.equal(box.add(inbound(), { kind: 'reply', text: 'new' }, {}), undefined)
+      assert.equal(box.enqueue(inbound(), ['new']), undefined)
       assert.equal(box.drop('invalid'), false)
       let sends = 0; assert.equal(await box.drain(async () => { sends++; return { ok: true } }), 0)
       assert.equal(sends, 0); assert.equal(fs.readFileSync(file, 'utf8'), original)

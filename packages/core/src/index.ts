@@ -1,3 +1,4 @@
+import { parseLiveSettingsPatch } from './live-settings.js'
 /**
  * The core plugin: one Cordis plugin, one bundle row.
  *
@@ -468,26 +469,7 @@ function registerPairingRoute({ ctx, runtime, root, logger }: WriteRouteOptions)
 
 function registerSettingsRoute({ ctx, runtime, root, logger }: WriteRouteOptions): () => void {
   return registerWriteRoute({ ctx, path: '/channels/settings', logger, accept: (parsed, json) => {
-    const patch: { senderPerMinute?: number; senderPerDay?: number; autoSendFiles?: boolean; questionsEnabled?: boolean; approvalsEnabled?: boolean } = {}
-    const number = (key: 'senderPerMinute' | 'senderPerDay'): void => {
-      const value = parsed[key]
-      if (value === undefined) return
-      if (typeof value !== 'number' || !Number.isInteger(value) || value < 0 || value > 100_000) {
-        throw new Error(`${key} must be an integer between 0 and 100000`)
-      }
-      patch[key] = value
-    }
-    const flag = (key: 'autoSendFiles' | 'questionsEnabled' | 'approvalsEnabled'): void => {
-      const value = parsed[key]
-      if (value === undefined) return
-      if (typeof value !== 'boolean') throw new Error(`${key} must be a boolean`)
-      patch[key] = value
-    }
-    number('senderPerMinute')
-    number('senderPerDay')
-    flag('autoSendFiles')
-    flag('questionsEnabled')
-    flag('approvalsEnabled')
+    const patch = parseLiveSettingsPatch(parsed)
     if (Object.keys(patch).length === 0) return json(400, { ok: false, code: 'empty', detail: 'nothing to change' })
     if (!saveConfigOverlay(root, patch, { warn: (line) => logger.warn(line) })) {
       return json(500, { ok: false, code: 'persist', detail: 'could not save settings' })

@@ -185,16 +185,10 @@ test('revoking access before restart removes a pending input without running it'
 test('a backed-off reply blocks only later replies to its own chat', async () => {
   const root = temp()
   const outbox = new Outbox({ stateRoot: root, now: () => 90000 })
-  outbox.add(inbound(), { kind: 'reply', text: 'old' }, {})
-  outbox.add(inbound(), { kind: 'reply', text: 'later' }, {})
-  outbox.add(inbound({ conversationId: 'other' }), { kind: 'reply', text: 'independent' }, {})
-  // Put old behind a backoff, while later messages are already eligible.
-  const file = path.join(root, 'outbox.json')
-  const saved = JSON.parse(readSectionJson(root, 'outbox'))
-  saved.items[0].nextAt = 180000
-  saved.items[1].nextAt = 0
-  saved.items[2].nextAt = 0
-  writeSectionJson(root, 'outbox', JSON.stringify(saved))
+  const first = outbox.enqueue(inbound(), ['old'])!
+  await outbox.sendPending(first, async () => ({ ok: false, code: 'rate-limited', retryAfterMs: 90000 }))
+  outbox.enqueue(inbound(), ['later'])
+  outbox.enqueue(inbound({ conversationId: 'other' }), ['independent'])
   const sent: string[] = []
   await outbox.drain(async (entry) => { sent.push(entry.outgoing.text ?? ''); return { ok: true } })
   assert.deepEqual(sent, ['independent'])

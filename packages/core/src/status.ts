@@ -1,3 +1,5 @@
+import type { LiveSettings } from './live-settings.js'
+
 /** Shared data contract for the authenticated HTTP status route. */
 export interface ChannelStatusView {
   id: string
@@ -26,11 +28,5 @@ export interface StatusPayload {
   outboxPending: number
   journal: Array<{ at: number; kind: string; state: string; text: string }>
   interactions: { pending: boolean }
-  settings: {
-    senderPerMinute: number
-    senderPerDay: number
-    autoSendFiles: boolean
-    questionsEnabled: boolean
-    approvalsEnabled: boolean
-  }
+  settings: LiveSettings
 }

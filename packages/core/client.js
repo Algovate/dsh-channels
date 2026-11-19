@@ -308,6 +308,17 @@ window.__ModuleLoader__.load({
     }
 
 
+    async function postJson(route, body) {
+      const response = await fetch(route, {
+        method: 'POST', credentials: 'same-origin',
+        headers: { 'content-type': 'application/json', accept: 'application/json' },
+        body: JSON.stringify(body),
+      })
+      const result = await response.json().catch(() => ({}))
+      if (!response.ok || result.ok !== true) throw new Error(result.detail || `${response.status} ${response.statusText}`)
+      return result
+    }
+
     /**
      * Pending senders, approved here instead of by copying an id out of a log.
      */
@@ -319,15 +330,8 @@ window.__ModuleLoader__.load({
       const act = (id, action) => {
         setBusy(id)
         setError('')
-        fetch('/channels/pairing', {
-          method: 'POST',
-          credentials: 'same-origin',
-          headers: { 'content-type': 'application/json', accept: 'application/json' },
-          body: JSON.stringify({ id, action }),
-        })
-          .then(async (response) => {
-            const body = await response.json().catch(() => ({}))
-            if (!response.ok || body.ok !== true) throw new Error(body.detail || `${response.status} ${response.statusText}`)
+        postJson('/channels/pairing', { id, action })
+          .then(() => {
             reload()
           })
           .catch((cause) => setError(String((cause && cause.message) || cause)))
@@ -385,15 +389,8 @@ window.__ModuleLoader__.load({
       const send = (patch) => {
         setBusy(true)
         setError('')
-        fetch('/channels/allowlist', {
-          method: 'POST',
-          credentials: 'same-origin',
-          headers: { 'content-type': 'application/json', accept: 'application/json' },
-          body: JSON.stringify(patch),
-        })
-          .then(async (response) => {
-            const body = await response.json().catch(() => ({}))
-            if (!response.ok || body.ok !== true) throw new Error(body.detail || `${response.status} ${response.statusText}`)
+        postJson('/channels/allowlist', patch)
+          .then(() => {
             setValue('')
             reload()
           })
@@ -497,16 +494,9 @@ window.__ModuleLoader__.load({
         setBusy(true)
         setError('')
         setSaved('')
-        fetch('/channels/settings', {
-          method: 'POST',
-          credentials: 'same-origin',
-          headers: { 'content-type': 'application/json', accept: 'application/json' },
-          body: JSON.stringify(Object.fromEntries(Object.entries(edits).map(([key, value]) =>
-            [key, key === 'senderPerMinute' || key === 'senderPerDay' ? Number(value) : value]))),
-        })
-          .then(async (response) => {
-            const body = await response.json().catch(() => ({}))
-            if (!response.ok || body.ok !== true) throw new Error(body.detail || `${response.status} ${response.statusText}`)
+        postJson('/channels/settings', Object.fromEntries(Object.entries(edits).map(([key, value]) =>
+            [key, key === 'senderPerMinute' || key === 'senderPerDay' ? Number(value) : value])))
+          .then(() => {
             setEdits({})
             setSaved(t('Saved — it applies to the next message.', '已保存 —— 下一条消息就生效。'))
             reload()

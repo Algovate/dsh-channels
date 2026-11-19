@@ -45,13 +45,13 @@ test('retry preserves newly queued replies and visits every due entry once', asy
   let now = 0
   const outbox = new Outbox({ stateRoot: temp(), now: () => now })
   const target = inbound()
-  for (const text of ['one', 'two', 'three']) outbox.add(target, { text, kind: 'reply' }, {})
+  for (const text of ['one', 'two', 'three']) outbox.enqueue(target, [text])
   now = 90_000
   const attempted: Array<string | undefined> = []
   const delivered = await outbox.drain(async (entry) => {
     attempted.push(entry.outgoing.text)
     if (entry.outgoing.text === 'one') {
-      outbox.add(target, { text: 'new', kind: 'reply' }, {})
+      outbox.enqueue(target, ['new'])
       assert.equal(await outbox.drain(async () => ({ ok: true })), 0)
     }
     return { ok: true }
@@ -284,7 +284,7 @@ test('/status does not disclose another conversation’s queued sends or pending
   const adapter = createFakeAdapter()
   runtime.register(adapter)
   const target = inbound({ conversationId: 'private' })
-  runtime.outbox.add(target, { kind: 'reply', text: 'private reply' }, {})
+  runtime.outbox.enqueue(target, ['private reply'])
   const prompt = runtime.interactions.ask({
     kind: 'approval',
     target,
@@ -307,8 +307,8 @@ test('a failed retry callback backs off without blocking other replies', async (
   let now = 0
   const outbox = new Outbox({ stateRoot: temp(), now: () => now })
   const target = inbound()
-  outbox.add(target, { text: 'bad adapter', kind: 'reply' }, {})
-  outbox.add({ ...target, conversationId: 'healthy-chat' }, { text: 'healthy adapter', kind: 'reply' }, {})
+  outbox.enqueue(target, ['bad adapter'])
+  outbox.enqueue({ ...target, conversationId: 'healthy-chat' }, ['healthy adapter'])
   now = 90_000
   const sent = await outbox.drain(async (entry) => {
     if (entry.outgoing.text === 'bad adapter') throw new Error('account lookup failed')

@@ -95,7 +95,7 @@ test('real core writers keep every generated path in the declared inventory', as
     new FileCounterStore({ stateRoot: root }).set('line:conversation', 1)
     assert.equal(new SessionLines(root, () => {}).saveRouting('conversation', { project: 'default', sessions: { default: { current: 2, max: 2 } } }), true)
     new Journal({ stateRoot: root }).append({ direction: 'in', phase: 'received', id: 'test', channel: 'fake', accountId: 'a', conversationId: 'c', kind: 'message', text: 'hi' })
-    new Outbox({ stateRoot: root }).add({ channel: 'fake', accountId: 'a', conversationId: 'c' }, { kind: 'reply', text: 'hi' }, {})
+    new Outbox({ stateRoot: root }).enqueue({ channel: 'fake', accountId: 'a', conversationId: 'c' }, ['hi'])
     createLogger({ stateRoot: root }).info('test')
     assert.equal(saveConfigOverlay(root, { allowedSenders: ['sender'] }), true)
     assert.deepEqual(fs.readdirSync(root).sort(), ['config.json', 'journal', 'logs', 'state.json', 'state.lock'])

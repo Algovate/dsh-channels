@@ -11,7 +11,8 @@
 import fs from 'node:fs'
 import path from 'node:path'
 
-import { answerArtifactCommand, snapshotDelivery, type ArtifactDelivery } from './artifacts.js'
+import { answerArtifactCommand, type ArtifactDelivery } from './artifacts.js'
+import { applyLiveSettings, liveSettings, type LiveSettings, type LiveSettingsPatch } from './live-settings.js'
 import { InteractionQueue } from './interaction/queue.js'
 import { isApprovalReply } from './interaction/approval.js'
 import { ConversationQueue } from './inbound/queue.js'
@@ -23,13 +24,14 @@ import { helpText, parseCommand, TASK_CONTROLS, type CommandName } from './comma
 import { ChannelSchedules } from './schedules.js'
 import { ChannelRoutes } from './routing.js'
 import { Inbox, type InboxEntry } from './store/inbox.js'
-import { Outbox, type OutboxEntry } from './store/outbox.js'
+import type { Outbox } from './store/outbox.js'
+import { Delivery } from './delivery.js'
 import { Tasks, type TaskRecord } from './store/tasks.js'
 import { Pairings, type PairingRequest } from './store/pairings.js'
 import { Journal } from './store/journal.js'
 import { TurnDriver, type TurnReply } from './turns.js'
 import type { HostContext } from './host.js'
-import { chatParagraphs, plainText, splitIntoBubbles } from './outbound.js'
+import { chatParagraphs } from './outbound.js'
 import { prepareTaskArtifacts } from './task-artifacts.js'
 import { taskHistoryText, taskStatusText } from './task-messages.js'
 import type { ChannelAdapter, InboundMessage, IngressSink, Outgoing, SendResult, Target } from './types.js'
@@ -64,7 +66,7 @@ export class ChannelsRuntime {
   readonly #tasks: Tasks
   readonly #pairings: Pairings
   #resuming = false
-  readonly #outbox: Outbox
+  readonly #delivery: Delivery
   readonly #journal: Journal
   readonly #driver: TurnDriver
   readonly #interactions: InteractionQueue
@@ -90,10 +92,13 @@ export class ChannelsRuntime {
     this.#inbox = new Inbox(options.stateRoot, options.logger.warn)
     this.#tasks = new Tasks(options.stateRoot, options.logger.warn)
     this.#pairings = new Pairings(options.stateRoot, options.logger.warn)
-    this.#outbox = new Outbox({ stateRoot: options.stateRoot, warn: options.logger.warn,
-      commitProgress: (file, entry, result, finished) => this.#tasks.recordDelivery(file, entry, result, finished),
-    })
     this.#journal = new Journal({ stateRoot: options.stateRoot, warn: options.logger.warn })
+    this.#delivery = new Delivery({
+      config: options.config, logger: options.logger, stateRoot: options.stateRoot,
+      adapters: this.#adapters, tasks: this.#tasks, routes: this.#routes, journal: this.#journal,
+      authorized: (message) => authorizeMessage(message, this.gateContext()).allow,
+      canDeliverSchedule: (id, target) => this.#schedules.canDeliver(id, target),
+    })
     const counters = options.counters
     const config = options.config
     this.#minute =
@@ -154,7 +159,7 @@ export class ChannelsRuntime {
         if (deliveryId) this.#adapters.get(message.channel)?.restoreInbound?.(message)
         return this.send(message, { kind: deliveryId ? 'reply' : 'notice', text }, deliveryId)
       },
-      queued: (id) => this.#outbox.list().some((entry) => entry.taskId === id),
+      queued: (id) => this.#delivery.outbox.list().some((entry) => entry.taskId === id),
     })
   }
 
@@ -178,7 +183,7 @@ export class ChannelsRuntime {
   }
 
   get outbox(): Outbox {
-    return this.#outbox
+    return this.#delivery.outbox
   }
 
   pendingInputs(target?: Target): number {
@@ -227,25 +232,13 @@ export class ChannelsRuntime {
    * that needs the adapter rebuilt (media, token, working directory) is NOT here
    * — the card marks those as restart-required instead of pretending.
    */
-  updateSettings(patch: { senderPerMinute?: number; senderPerDay?: number; autoSendFiles?: boolean; questionsEnabled?: boolean; approvalsEnabled?: boolean }): void {
-    const config = this.#options.config
-    if (patch.senderPerMinute !== undefined) config.senderPerMinute = patch.senderPerMinute
-    if (patch.senderPerDay !== undefined) config.senderPerDay = patch.senderPerDay
-    if (patch.autoSendFiles !== undefined) config.autoSendFiles = patch.autoSendFiles
-    if (patch.questionsEnabled !== undefined) config.questionsEnabled = patch.questionsEnabled
-    if (patch.approvalsEnabled !== undefined) config.approvalsEnabled = patch.approvalsEnabled
+  updateSettings(patch: LiveSettingsPatch): void {
+    applyLiveSettings(this.config, patch)
   }
 
   /** The live values the settings form shows. */
-  liveSettings(): { senderPerMinute: number; senderPerDay: number; autoSendFiles: boolean; questionsEnabled: boolean; approvalsEnabled: boolean } {
-    const config = this.#options.config
-    return {
-      senderPerMinute: config.senderPerMinute,
-      senderPerDay: config.senderPerDay,
-      autoSendFiles: config.autoSendFiles,
-      questionsEnabled: config.questionsEnabled,
-      approvalsEnabled: config.approvalsEnabled,
-    }
+  liveSettings(): LiveSettings {
+    return liveSettings(this.config)
   }
 
   /** The durable ingress sink handed to drivers that support it. */
@@ -778,7 +771,7 @@ export class ChannelsRuntime {
       return
     }
     if (name === 'tasks' || name === 'status') {
-      const outbox = this.#outbox.list().filter((entry) => sameTarget(entry.target, message))
+      const outbox = this.#delivery.outbox.list().filter((entry) => sameTarget(entry.target, message))
       const context = {
         active: this.#activeTasks.get(lineKey(message))?.record,
         interaction: this.#interactions.active(message),
@@ -820,7 +813,7 @@ export class ChannelsRuntime {
       await Promise.race([receipt, new Promise<void>((resolve) => setImmediate(resolve))])
     }
     const initialCard = cardNow()
-    if (initialCard !== undefined) await this.#editCard(message, initialCard, '执行中…')
+    if (initialCard !== undefined) await this.#delivery.editCard(message, initialCard, '执行中…')
     if (typeof adapter.typing === 'function') void adapter.typing(message).catch(() => {})
     const workingDirectory = record.workingDirectory ?? this.#options.workingDirectory
     try {
@@ -830,7 +823,7 @@ export class ChannelsRuntime {
       const progressNotice = setTimeout(() => {
         if (signal.aborted || this.#disposed || this.#interactions.busy(message)) return
         const card = cardNow()
-        if (card !== undefined) void this.#editCard(message, card, chatParagraphs('任务仍在处理。', '/status 查看状态　｜　/cancel 请求停止'))
+        if (card !== undefined) void this.#delivery.editCard(message, card, chatParagraphs('任务仍在处理。', '/status 查看状态　｜　/cancel 请求停止'))
         else void this.send(message, { text: chatParagraphs('任务仍在处理。', '/status 查看状态　｜　/cancel 请求停止'), kind: 'notice' })
           .catch((error: unknown) => this.logger.warn(`progress notice failed for ${key}: ${String(error)}`))
       }, 60_000)
@@ -861,7 +854,7 @@ export class ChannelsRuntime {
         this.#tasks.update(message, taskId, { execution: confirmed ? 'cancelled' : 'unknown', endedAt: Date.now(), ...(confirmed ? { recovery: undefined } : {}) })
         const notice = confirmed ? '当前任务已取消。已完成的操作不会自动撤销。' : '停止尚未得到宿主确认。请在 DSH 核对任务状态和已完成的操作。'
         const card = cardNow()
-        if (card !== undefined && await this.#editCard(message, card, notice)) return
+        if (card !== undefined && await this.#delivery.editCard(message, card, notice)) return
         await this.send(message, { text: notice, kind: 'notice' })
         return
       }
@@ -898,14 +891,14 @@ export class ChannelsRuntime {
       this.logger.warn(`turn failed for ${key}: ${reply.text}`)
       const text = reply.cancelled === true ? '当前任务已取消。已完成的操作不会自动撤销。' : reply.interrupted === true ? '任务等待超时，执行结果未确认。请在 DSH 核对后再决定是否重试。' : '任务执行失败。请在 DSH 核对已经完成的操作，可发 /status 查看状态。'
       const card = taskCard
-      if (card !== undefined && await this.#editCard(message, card, text)) return
+      if (card !== undefined && await this.#delivery.editCard(message, card, text)) return
       await this.send(message, { text, kind: 'notice' })
       return
     }
     const card = taskCard
-    if (card !== undefined) await this.#editCard(message, card, '任务已完成。')
+    if (card !== undefined) await this.#delivery.editCard(message, card, '任务已完成。')
     const body = reply.text.trim() !== '' ? reply.text : planned.attachments.length ? '' : '任务已完成。没有可发送的文字或文件。'
-    const results = await this.#enqueueReply(message, body, taskId, planned.attachments, completion)
+    const results = await this.#delivery.enqueueReply(message, body, taskId, planned.attachments, completion)
     // The outbox commits every text/file receipt and its task state together.
     // Before handoff succeeds, keep host recovery as the source of the result.
     if (this.#tasks.get(message, taskId)?.recovery !== undefined) {
@@ -916,164 +909,14 @@ export class ChannelsRuntime {
   }
 
   /** Persist replies before sending; ephemeral notices and prompts send directly. */
-  async send(target: Target, outgoing: Outgoing, taskId?: string): Promise<SendResult[]> {
-    if (this.#disposed) return [{ ok: false, code: 'stopped' }]
-    if (!this.#taskDeliveryAllowed(target, taskId)) return [{ ok: false, code: 'task-delivery-blocked' }]
-    const adapter = this.#adapters.get(target.channel)
-    if (adapter === undefined) return [{ ok: false, code: 'unknown-channel', detail: target.channel }]
-    const scheduledId = taskId?.startsWith('schedule:') ? taskId : undefined
-    if (scheduledId !== undefined && !await this.#schedules.canDeliver(scheduledId, target)) return [{ ok: false, code: 'schedule-delivery-cancelled' }]
-    if (this.#disposed) return [{ ok: false, code: 'stopped' }]
-    const text = outgoing.text === undefined ? '' : plainText(outgoing.text)
-    const limit = Number.isFinite(adapter.capabilities.maxTextChars) && adapter.capabilities.maxTextChars > 0 ? adapter.capabilities.maxTextChars : this.#options.config.maxTextChars
-    const bubbles = splitIntoBubbles(text, limit)
-    const actions = outgoing.actions !== undefined && adapter.capabilities.actions === true ? outgoing.actions : undefined
-    const results: SendResult[] = []
-    if (outgoing.kind === 'reply' && bubbles.length > 0) {
-      results.push(...await this.#enqueueReply(target, outgoing.text ?? '', taskId))
-      if (results.some((result) => !result.ok)) return results
-    }
-    const base = { kind: outgoing.kind }
-    for (const [index, bubble] of (outgoing.kind === 'reply' ? [] : bubbles).entries()) {
-      if (index > 0 && this.#options.config.bubbleGapMs > 0) await new Promise((resolve) => setTimeout(resolve, this.#options.config.bubbleGapMs))
-      if (this.#disposed) return [...results, { ok: false, code: 'stopped' }]
-      // Delivery authorization is checked once per batch (above); re-reading the
-      // native catalog for every bubble made a long reply O(bubbles) round trips.
-      const id = `out-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
-      const result = await this.#deliver(adapter, target, {
-        ...base,
-        text: bubble,
-        ...(index === 0 && actions !== undefined ? { actions } : {}),
-      }, bubble, id)
-      results.push(result)
-      if (!result.ok) return results
-    }
-    for (const item of outgoing.media ?? []) {
-      if (this.#disposed) return [...results, { ok: false, code: 'stopped' }]
-      // Manual sends carry temporary paths; automatic task files use durable artifact references.
-      const result = await this.#deliver(adapter, target, { kind: outgoing.kind, text: '', media: [item] }, '')
-      results.push(result)
-    }
-    return results
-  }
-
-  async #enqueueReply(target: Target, text: string, taskId?: string, attachments: ArtifactDelivery[] = [], completion: Partial<TaskRecord> = {}): Promise<SendResult[]> {
-    if (this.#disposed) return [{ ok: false, code: 'stopped' }]
-    if (!this.#taskDeliveryAllowed(target, taskId)) return [{ ok: false, code: 'task-delivery-blocked' }]
-    const adapter = this.#adapters.get(target.channel)
-    if (!adapter) return [{ ok: false, code: 'unknown-channel' }]
-    const limit = adapter.capabilities.maxTextChars > 0 ? adapter.capabilities.maxTextChars : this.config.maxTextChars
-    const parts = splitIntoBubbles(plainText(text), limit).filter((part) => part.trim() !== '')
-    if (!parts.length && !attachments.length) return []
-    const entry = this.#outbox.enqueue(target, parts, taskId,
-      taskId !== undefined && this.#tasks.get(target, taskId)?.recovery !== undefined
-        ? (file) => this.#tasks.handoffDelivery(target, taskId, file, completion) : undefined, attachments)
-    if (!entry) return [{ ok: false, code: 'outbox-persist' }]
-    return this.#outbox.sendPending(entry, (pending) => this.#sendPending(pending))
-  }
-
-  /** Update the task card in place; `false` means the channel cannot edit, so send a notice instead. */
-  async #editCard(message: InboundMessage, card: { messageId: string }, text: string): Promise<boolean> {
-    const adapter = this.#adapters.get(message.channel)
-    if (adapter === undefined || adapter.capabilities.edit !== true || typeof adapter.edit !== 'function') return false
-    try {
-      const result = await adapter.edit(message, card.messageId, { kind: 'notice', text })
-      if (!result.ok) {
-        this.logger.info(`task card edit was not accepted: ${result.code}`)
-        return false
-      }
-      return true
-    } catch (error) {
-      this.logger.warn(`task card edit failed: ${String(error)}`)
-      return false
-    }
-  }
-
-  /** One send, journalled in two phases. */
-  async #deliver(adapter: ChannelAdapter, target: Target, outgoing: Outgoing, text: string, retryId?: string): Promise<SendResult> {
-    const id = retryId ?? `out-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
-    const media = (outgoing.media ?? []).map((item) => item.path)
-    const base = {
-      direction: 'out' as const,
-      id,
-      channel: target.channel,
-      accountId: target.accountId,
-      conversationId: target.conversationId,
-      kind: outgoing.kind,
-      text: text.slice(0, 500),
-      ...(media.length === 0 ? {} : { media }),
-    }
-    this.#journal.append({ ...base, phase: 'sending' })
-    let result: SendResult
-    try {
-      result = await adapter.send(target, outgoing)
-    } catch (error) {
-      result = { ok: false, code: 'adapter-threw', detail: String((error as Error)?.message ?? error) }
-    }
-    this.#journal.append({
-      ...base,
-      phase: 'settled',
-      delivery: result.ok === true ? (result.unconfirmed === true ? 'unconfirmed' : 'accepted') : 'failed',
-      ...(result.ok === true && result.messageId !== undefined ? { messageId: result.messageId } : {}),
-      ...(result.ok === true ? {} : { code: result.code, id }),
-    })
-    return result
-  }
-
-  #taskDeliveryAllowed(target: Target, taskId?: string): boolean {
-    if (taskId === undefined || taskId.startsWith('schedule:')) return true
-    const task = this.#tasks.get(target, taskId)
-    if (task === undefined) return false
-    const message: InboundMessage = { ...target, senderId: task.senderId, text: '', media: [], group: false, at: 0 }
-    return authorizeMessage(message, this.gateContext()).allow
-      && (task.project === undefined ? this.#routes.artifactWorkspace(task) !== undefined
-        : this.#routes.acceptsQueued({ id: task.id, message, sessionId: '', project: task.project, workingDirectory: task.workingDirectory }))
-  }
-
-  async #sendPending(entry: OutboxEntry): Promise<SendResult> {
-    const adapter = this.#adapters.get(entry.target.channel)
-    if (adapter === undefined) return { ok: false, code: 'unknown-channel' }
-    if (this.#disposed) return { ok: false, code: 'stopped' }
-    let accounts
-    try { accounts = await adapter.accounts.list() }
-    catch { return { ok: false, code: 'account-unavailable' } }
-    if (!accounts.some((account) => account.accountId === entry.target.accountId && !account.expired)) return { ok: false, code: 'account-unavailable' }
-    if ((entry.part ?? 0) > 0 && this.config.bubbleGapMs > 0) await delay(this.config.bubbleGapMs)
-    if (this.#disposed || this.#adapters.get(entry.target.channel) !== adapter) return { ok: false, code: 'stopped' }
-    if (entry.taskId?.startsWith('schedule:') && !await this.#schedules.canDeliver(entry.taskId, entry.target)) {
-      return { ok: false, code: this.#outbox.drop(entry.id) ? 'schedule-delivery-cancelled' : 'outbox-persist' }
-    }
-    if (this.#disposed) return { ok: false, code: 'stopped' }
-    if (!this.#taskDeliveryAllowed(entry.target, entry.taskId)) return { ok: false, code: 'task-delivery-blocked' }
-    let outgoing: Outgoing = { kind: entry.outgoing.kind, text: entry.outgoing.text }
-    let copy: Awaited<ReturnType<typeof snapshotDelivery>>
-    const artifact = entry.outgoing.artifact
-    if (artifact !== undefined) {
-      if (!this.config.autoSendFiles) return { ok: false, code: 'files-disabled' }
-      const task = entry.taskId === undefined ? undefined : this.#tasks.get(entry.target, entry.taskId)
-      const workspace = task === undefined ? undefined : this.#routes.artifactWorkspace(task)
-      if (!task?.outputDirectory || !workspace || !task.artifacts?.includes(artifact.relative)) return { ok: false, code: 'artifact-unavailable' }
-      copy = await snapshotDelivery(workspace, task.outputDirectory, artifact, this.config.maxProducedBytes)
-      if (!copy) return { ok: false, code: 'artifact-unavailable' }
-      outgoing = { kind: 'reply', media: [{ kind: artifact.kind, path: copy.path, name: artifact.name }] }
-    }
-    let result: SendResult
-    try {
-      if (this.#disposed) return { ok: false, code: 'stopped' }
-      if (artifact && !this.config.autoSendFiles) return { ok: false, code: 'files-disabled' }
-      if (!this.#taskDeliveryAllowed(entry.target, entry.taskId)) return { ok: false, code: 'task-delivery-blocked' }
-      const task = entry.taskId === undefined ? undefined : this.#tasks.get(entry.target, entry.taskId)
-      if (task?.replyMessage !== undefined) adapter.restoreInbound?.({ ...task.replyMessage, ...entry.target, senderId: task.senderId })
-      result = await this.#deliver(adapter, entry.target, outgoing, entry.outgoing.text ?? '', entry.part === undefined ? entry.id : `${entry.id}:${entry.part}`)
-    } finally { await copy?.dispose() }
-    return result.ok && entry.unconfirmed ? { ...result, unconfirmed: true } : result
+  send(target: Target, outgoing: Outgoing, taskId?: string): Promise<SendResult[]> {
+    return this.#delivery.send(target, outgoing, taskId)
   }
 
   startOutboxRetry(intervalMs = 30_000): () => void {
     const timer = setInterval(() => {
       void this.resumePending()
-      void this.#outbox
-        .drain((entry) => this.#sendPending(entry))
+      void this.#delivery.retry()
         .catch((error: unknown) => this.#options.logger.warn(`outbox retry failed: ${String(error)}`))
     }, intervalMs)
     timer.unref?.()
@@ -1085,6 +928,7 @@ export class ChannelsRuntime {
   /** Stop every timer this runtime started, and reject every pending interaction. */
   dispose(): Promise<void> {
     this.#disposed = true
+    this.#delivery.dispose()
     this.#ingressStop.abort()
     this.#ingressTails.clear()
     this.#queue.dispose()

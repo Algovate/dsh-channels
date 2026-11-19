@@ -82,27 +82,6 @@ export class Outbox {
     return this.#store.write('outbox', { schemaVersion: 1, items } satisfies OutboxFile)
   }
 
-  /** Append a failed send. Refuse new entries once full, preserving replies already accepted. */
-  add(target: OutboxEntry['target'], outgoing: OutboxEntry['outgoing'], result: { code?: string; retryAfterMs?: number; id?: string; remaining?: string[]; taskId?: string }): OutboxEntry | undefined {
-    const text = outgoing.text ?? ''
-    if (text.trim() === '' || outgoing.kind !== 'reply') return undefined
-    const items = this.#read()
-    if (items === undefined) return undefined
-    if (items.length >= this.#max) { this.#warn('outbox is full; reply could not be saved'); return undefined }
-    const entry: OutboxEntry = {
-      id: result.id ?? `out-${this.#now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
-      target,
-      outgoing,
-      ...(result.taskId === undefined ? {} : { taskId: result.taskId }),
-      ...(result.remaining === undefined || result.remaining.length === 0 ? {} : { remaining: result.remaining }),
-      attempts: 0,
-      nextAt: this.#now() + retryDelay(1, result.retryAfterMs),
-      ...(result.code === undefined ? {} : { lastCode: result.code }),
-    }
-    items.push(entry)
-    return this.#write(items) ? entry : undefined
-  }
-
   list(): OutboxEntry[] {
     return this.#read() ?? []
   }

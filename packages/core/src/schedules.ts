@@ -1,5 +1,5 @@
 /** Native schedules execute in DSH; the bridge owns attribution, management scope and text relay. */
-import fs from 'node:fs'
+import { readSessionEvents, type SessionPersistence } from './session-reader.js'
 import { randomUUID } from 'node:crypto'
 import { ChannelSchedulesStore, type ScheduleBinding } from './store/schedules.js'
 import { createHostPort, type HostContext, type HostPort } from './host.js'
@@ -14,13 +14,6 @@ interface NativeSchedule {
   catalog(): NativeTask[] | Promise<NativeTask[]>
   edit(request: unknown, actor?: string, signal?: AbortSignal): Promise<unknown>
   history(request: unknown): Promise<{ records?: Array<{ messageId: string; targetSessionId: string }>; nextBefore?: string }>
-}
-interface Persistence {
-  open(id: string, access: 'read', options?: { signal: AbortSignal }): Promise<{
-    header: { cwd?: string }
-    read(offset: number, length: number, options?: { signal: AbortSignal }): Promise<{ events: Array<Record<string, unknown>> }>
-    close(): Promise<void>
-  }>
 }
 interface Options {
   ctx: HostContext
@@ -59,9 +52,9 @@ export class ChannelSchedules {
       }
     } catch (error) { options.logger.warn(`schedule hooks unavailable: ${String(error)}`) }
   }
-  #services(): { native: NativeSchedule; persistence: Persistence } {
+  #services(): { native: NativeSchedule; persistence: SessionPersistence } {
     const native = this.#host.get<NativeSchedule>('schedule')
-    const persistence = this.#host.get<Persistence>('sessionPersistence')
+    const persistence = this.#host.get<SessionPersistence>('sessionPersistence')
     if (!this.#activationRegistered || typeof native?.create !== 'function' || typeof native.catalog !== 'function' || typeof native.edit !== 'function' || typeof native.history !== 'function' || typeof persistence?.open !== 'function') throw new Error('宿主未启用兼容的 DSH 计划任务及会话持久化服务，当前不可用。')
     return { native, persistence }
   }
@@ -188,7 +181,7 @@ export class ChannelSchedules {
   sync(): Promise<void> {
     if (this.#syncing) return this.#syncing
     const work = this.#exclusive(async () => {
-      let services: { native: NativeSchedule; persistence: Persistence }
+      let services: { native: NativeSchedule; persistence: SessionPersistence }
       try { services = this.#services() } catch { return }
       await this.#recover(services.native)
       for (const binding of this.#store.read().bindings) {
@@ -214,7 +207,7 @@ export class ChannelSchedules {
     void work.finally(() => { if (this.#syncing === work) this.#syncing = undefined }).catch(() => {})
     return work
   }
-  async #collect(binding: ScheduleBinding, native: NativeSchedule, persistence: Persistence): Promise<void> {
+  async #collect(binding: ScheduleBinding, native: NativeSchedule, persistence: SessionPersistence): Promise<void> {
     const task = (await native.catalog()).find((item) => item.id === binding.scheduleId)
     if (!this.#matches(binding, task)) return
     const receipts: Array<{ messageId: string; targetSessionId: string }> = []; let before: string | undefined
@@ -230,15 +223,10 @@ export class ChannelSchedules {
     if (state.pending.filter((item) => item.bindingId === binding.id).length >= 10) return
     const progress = binding.progress ? TurnProgress.restore(binding.progress) : new TurnProgress(binding.cursor - 1, messageId)
     const signal = AbortSignal.any([this.#stop.signal, AbortSignal.timeout(10000)])
-    const handle = await persistence.open(binding.sessionId, 'read', { signal })
-    try {
-      if (!handle.header.cwd || fs.realpathSync(handle.header.cwd) !== fs.realpathSync(binding.workingDirectory)) throw new Error('计划会话目录已改变')
-      for (let page = 0; page < 16 && !progress.result; page++) {
-        const read = await handle.read(progress.nextSeq, 256, { signal })
-        if (!read.events.length) break
-        progress.update(read.events)
-      }
-    } finally { await handle.close() }
+    for await (const event of readSessionEvents(persistence, binding.sessionId, binding.workingDirectory, progress.nextSeq, signal)) {
+      progress.update([event])
+      if (progress.result) break
+    }
     if (progress.result) {
       const body = progress.result.failed ? '计划执行失败或已取消，请在 DSH 核对已经完成的操作。' : progress.result.text.slice(0, 16000) + (progress.result.text.length >= 16000 ? '\n（结果已截断，完整内容请在 DSH 查看。）' : '')
       state.pending.push({ id: `${binding.id}:${messageId}`, bindingId: binding.id, text: chatParagraphs(`【计划 #${binding.id.slice(0, 8)} · ${binding.title}】`, body || '计划已完成，没有可回传的文字。') })
