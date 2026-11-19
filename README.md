@@ -11,12 +11,13 @@
 | [`@derekluo/dsh-channels`](packages/core) | DSH 插件（bundle）：会话、权限、交互、重试、桌面状态卡片 |
 | [`@derekluo/dsh-channels-weixin`](packages/adapter-weixin) | 个人微信，通过 iLink 长轮询 |
 | [`@derekluo/dsh-channels-telegram`](packages/adapter-telegram) | Telegram Bot API，通过长轮询，不用配置 webhook |
+| [`@derekluo/dsh-channels-feishu`](packages/adapter-feishu) | 飞书/Lark，通过长连接 WebSocket，不用配置 webhook |
 
 ## 开始使用
 
 1. 准备装有 DSH 的机器（桌面版或 CLI）和 Node.js 22.13 或更高版本。此前的宿主集成验证使用 DSH `0.2.2-rc.3`；其他版本见[验证状态](docs/STATUS.md)。
 2. 按[安装指南](docs/OPERATIONS.md#安装)安装核心及所需适配器；`0.1.0` 发布到 npm 前走该节的源码构建路径。只把核心加进 DSH profile 的 bundle 列表。
-3. 按[微信](docs/OPERATIONS.md#微信)或 [Telegram](docs/OPERATIONS.md#telegram)一节配置凭证和适配器，再启动宿主。
+3. 按[微信](docs/OPERATIONS.md#微信)、[Telegram](docs/OPERATIONS.md#telegram)或[飞书](docs/OPERATIONS.md#飞书feishu--lark)一节配置凭证和适配器，再启动宿主。
 4. 给机器人发一条测试消息。未知发送者会收到“等待批准”的提示，并在 DSH 插件状态卡片出现“待批准”；点“允许”后重发即可。也可以从状态目录的 `logs/` 核对 `refused … not-allowed` 的发送者 ID，再手动加入白名单。通过白名单后，用 `/whoami` 核对发送者、账号和会话 ID。
 
 默认状态目录是 `~/.dsh/channels`；`DSH_CHANNELS_STATE_DIR` 可覆盖。手动编辑 `config.json` 后重启宿主。[配置参考](docs/OPERATIONS.md#配置)列出了默认值和可实时修改的设置。
@@ -53,7 +54,7 @@
 
 项目切换示例：`/projects` → `/project app` → 发送任务。`/new` 为当前项目开始新会话，历史会话在 DSH 桌面查看。选择会持久保存；切换只影响后续输入，已排队任务保留原项目及会话。群聊中这些选择由获准成员共享。项目需先由管理员配置，见[运维指南](docs/OPERATIONS.md#项目和会话切换)。
 
-桌面聊天中的通道消息带有微信或 Telegram 徽标。宿主支持工作区登记时，会话归入 **Channels**；通道状态和设置在 **Plugins → @derekluo/dsh-channels**。
+桌面聊天中的通道消息带有微信、Telegram 或飞书徽标。宿主支持工作区登记时，会话归入 **Channels**；通道状态和设置在 **Plugins → @derekluo/dsh-channels**。
 
 ## 开发与参考
 

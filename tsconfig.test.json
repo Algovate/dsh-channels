@@ -11,6 +11,8 @@
     "test/**/*.ts",
     "packages/core/src/**/*.ts",
     "packages/adapter-weixin/src/**/*.ts",
-    "packages/adapter-weixin/vendor/**/*.js"
+    "packages/adapter-weixin/vendor/**/*.js",
+    "packages/adapter-telegram/src/**/*.ts",
+    "packages/adapter-feishu/src/**/*.ts"
   ]
 }

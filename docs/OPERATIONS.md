@@ -14,7 +14,7 @@
 dsh plugin --profile default add @derekluo/dsh-channels@0.1.0 @derekluo/dsh-channels-weixin@0.1.0
 ```
 
-使用 Telegram 时，把微信适配器换成 `@derekluo/dsh-channels-telegram@0.1.0`。安装后按下文配置凭证和白名单，再重启宿主。
+使用 Telegram 时，把微信适配器换成 `@derekluo/dsh-channels-telegram@0.1.0`。使用飞书时，换成 `@derekluo/dsh-channels-feishu@0.1.0`。安装后按下文配置凭证和白名单，再重启宿主。
 
 `dsh plugin` 只是把参数转给 profile 目录里的 pnpm，所以装完要确认 profile 的 `dsh.profile.bundles` 有 `@derekluo/dsh-channels`，没有就补上。`desktop` profile 只能由桌面版自带的 `dsh` 管理，用 npm 装的 CLI 执行 `dsh plugin` 会被拒绝。升级时用新版本号重跑同一条命令，确认 bundle 行仍在，再重启宿主。
 
@@ -39,7 +39,8 @@ printf '%s\n' "$package_dir"
   "dependencies": {
     "@derekluo/dsh-channels": "file:/opt/dsh-packages/derekluo-dsh-channels-0.1.0.tgz",
     "@derekluo/dsh-channels-weixin": "file:/opt/dsh-packages/derekluo-dsh-channels-weixin-0.1.0.tgz",
-    "@derekluo/dsh-channels-telegram": "file:/opt/dsh-packages/derekluo-dsh-channels-telegram-0.1.0.tgz"
+    "@derekluo/dsh-channels-telegram": "file:/opt/dsh-packages/derekluo-dsh-channels-telegram-0.1.0.tgz",
+    "@derekluo/dsh-channels-feishu": "file:/opt/dsh-packages/derekluo-dsh-channels-feishu-0.1.0.tgz"
   },
   "dsh": {
     "profile": {
@@ -172,6 +173,32 @@ printf '%s\n' "$package_dir"
 ### 迁移旧账号键
 
 如果 `allowlistPerAccount` 使用旧 `botId` 或 `default`，把对应列表（包括显式空列表）迁移到新键，再重启。迁移之前，核心发现当前账号的旧覆盖项而缺少新键时会拒绝消息，避免退回更宽的全局白名单。旧会话和待重发仍保留原键，不会自动转移。
+
+## 飞书（Feishu / Lark）
+
+飞书适配器走开放平台的**长连接模式**：进程主动向网关建立一条 WebSocket，不需要公网 webhook、域名或证书。先在[飞书开放平台](https://open.feishu.cn)创建一个自建应用（海外 Lark 用 [open.larksuite.com](https://open.larksuite.com)），拿到应用凭证 `App ID`（形如 `cli_` 加 16 位十六进制）和 `App Secret`，然后：
+
+1. 在 **事件与回调 → 订阅方式** 选择「使用长连接接收事件/回调」。
+2. 在 **事件与回调 → 事件配置** 订阅 `im.message.receive_v1`（接收消息）；要在聊天里用原生按钮回答提问/审批，还需订阅 `card.action.trigger`（卡片回传交互）。
+3. 在 **权限管理** 开通机器人收发消息和素材权限：`im:message`、`im:message.group_at_msg`、`im:message.p2p_msg`、`im:resource`（下载图片/文件）、`im:image`（上传图片）、`im:file`（上传文件/视频/音频）。
+4. 在 **机器人** 菜单启用机器人能力，并把应用发布到企业；把机器人加入要使用的单聊或群聊。
+
+```json
+{
+  "adapters": ["@derekluo/dsh-channels-feishu"],
+  "adapterConfig": {
+    "@derekluo/dsh-channels-feishu": {
+      "appId": "cli_REPLACE_WITH_16_HEX",
+      "appSecret": "REPLACE_WITH_APP_SECRET",
+      "botId": "my_bot"
+    }
+  }
+}
+```
+
+`botId` 是可选的显示名称。账号键固定为 `app:<App ID>`，轮换 `App Secret` 时只要 `App ID` 不变，会话线、配额和白名单都保持不变。海外 Lark 在 `domain` 填 `https://open.larksuite.com`，默认是 `https://open.feishu.cn`。可选参数还有 `mediaEnabled`（默认开启）和 `maxInboundBytes`（默认每个附件 20 MiB）。启动成功的日志是 `feishu persistent connection established`。
+
+入站支持文本、富文本（`post`，提取为纯文字）、图片、文件、语音和视频；@ 提及的占位符会还原成显示名。出站文字超过通道上限会由核心分条；带原生按钮的提问和审批以交互卡片发送，点按钮等价于在该聊天回复对应文本。任务卡使用消息编辑能力原地更新。群聊默认仍按核心的 `groupTrigger: prefix` 规则，只响应 `/ask ...`，或在配置 `groupMention` 后接受 @ 机器人。飞书发送者 ID 是用户的 `open_id`，加白名单时使用 `open_id`（`/whoami` 可查）。
 
 ## 语音转写
 

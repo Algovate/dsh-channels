@@ -1,5 +1,15 @@
 # 验证状态
 
+## 2026-11-19 新增飞书（Feishu/Lark）适配器
+
+新增第三个内置通道 `@derekluo/dsh-channels-feishu`，通过开放平台长连接 WebSocket 接收事件，REST 只负责收发消息和素材，不需要公网 webhook。网关帧是固定的 protobuf `Frame`，包内自带零依赖 varint 编解码，运行时只用 Node 22 内置的 `WebSocket` 和 `fetch`，无第三方依赖。
+
+覆盖能力：文本与 `post` 富文本、图片/文件/语音/视频双向、@ 提及还原、原生卡片按钮（`card.action.trigger` 等价文本回复）、消息编辑任务卡、`sum`/`seq` 分片重组、`code:200/500` 确认与重投、按服务端节奏自动重连、按聊天串行与 `DSH_INBOUND_RETRY` 退避。账号键固定为 `app:<App ID>`，轮换 secret 不改身份。
+
+新增测试 29 项，分布在 `feishu.test.ts`（proto 编解码与事件归一化）、`feishu-transport.test.ts`（token、消息、卡片、上传、下载上限、限流）、`feishu-handoff.test.ts`（长连接、分片、确认、重连节奏、持久交接重试与顺序）和 `feishu-adapter.test.ts`（契约、凭证校验、账号隔离、入站下载、生命周期）。本地完整 `npm test` **497 项通过**，四个包 `npm run pack:check` 通过；`client.js` 增加飞书徽标行并更新对应渲染测试。
+
+本轮只做本地构建与模拟测试，**未连接真实飞书企业应用、未发布 npm、未部署到宿主**。真实账号的长连接建立、卡片按钮回调和素材收发仍待按[运维指南](OPERATIONS.md#飞书feishu--lark)做端到端验收。
+
 ## 2026-11-19 模块重构部署到 mini
 
 已将分支 `codex/refactor-channel-modules` 的 `a35305be6d8005b91182dd396bf3bf94c46bfcba` 部署到 mini Web profile；未合并 main。发布目录为 `~/dsh-plugin-pkgs/dsh-channels/a35305b/`，包含归档、SHA-256 清单、安装与隔离测试日志及部署记录。

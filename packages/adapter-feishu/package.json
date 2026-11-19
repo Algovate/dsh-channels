@@ -1,0 +1,52 @@
+{
+  "name": "@derekluo/dsh-channels-feishu",
+  "version": "0.1.0",
+  "description": "Feishu/Lark channel adapter for @derekluo/dsh-channels. Persistent WebSocket connection, text, images, files and video.",
+  "type": "module",
+  "license": "MIT",
+  "engines": {
+    "node": ">=22.13.0"
+  },
+  "main": "dist/src/index.js",
+  "types": "dist/src/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/src/index.d.ts",
+      "default": "./dist/src/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -b"
+  },
+  "peerDependencies": {
+    "@derekluo/dsh-channels": "*"
+  },
+  "peerDependenciesMeta": {
+    "@derekluo/dsh-channels": {
+      "optional": true
+    }
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Algovate/dsh-channels.git",
+    "directory": "packages/adapter-feishu"
+  },
+  "homepage": "https://github.com/Algovate/dsh-channels",
+  "bugs": {
+    "url": "https://github.com/Algovate/dsh-channels/issues"
+  },
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "feishu",
+    "lark",
+    "lark-bot",
+    "chatbot",
+    "channel",
+    "adapter"
+  ]
+}

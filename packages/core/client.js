@@ -33,6 +33,7 @@ window.__ModuleLoader__.load({
     const CHANNELS = [
       { id: 'weixin', row: 'weixin-user', badge: { en: 'WeChat', zh: '微信' }, accent: '#07C160', accentSoft: 'rgba(7, 193, 96, 0.12)' },
       { id: 'telegram', row: 'telegram-user', badge: { en: 'Telegram', zh: '电报' }, accent: '#2AABEE', accentSoft: 'rgba(42, 171, 238, 0.12)' },
+      { id: 'feishu', row: 'feishu-user', badge: { en: 'Feishu', zh: '飞书' }, accent: '#3370FF', accentSoft: 'rgba(51, 112, 255, 0.12)' },
     ]
 
     const byKind = new Map(CHANNELS.map((channel) => [channel.id, channel]))

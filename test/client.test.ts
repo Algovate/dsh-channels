@@ -99,7 +99,7 @@ test('the row claims weixin user messages exclusively and nothing else', async (
     },
   })
   assert.equal(typeof dispose, 'function', 'apply must return a disposer function, not the injection handle')
-  assert.equal(definitions.length, 2, 'one row per known channel')
+  assert.equal(definitions.length, 3, 'one row per known channel')
   const weixin = definitions.find((definition) => definition.kind === 'weixin-user')
   assert.ok(weixin !== undefined)
   assert.equal(definitions[0]?.kind, 'weixin-user')
@@ -118,9 +118,14 @@ test('the row claims weixin user messages exclusively and nothing else', async (
   assert.equal(seats[0]?.key, 'weixin-user')
   const telegram = definitions.find((definition) => definition.kind === 'telegram-user')
   assert.ok(telegram !== undefined, 'the second channel gets its own row')
+  const feishu = definitions.find((definition) => definition.kind === 'feishu-user')
+  assert.ok(feishu !== undefined, 'the third channel gets its own row')
+  const feishuMatch = feishu?.match as (event: unknown) => Record<string, any> | null
+  assert.equal(feishuMatch({ type: 'user/message', data: { id: 'm3', source: { kind: 'feishu' } } })?.id, 'm3')
+  assert.equal(feishuMatch({ type: 'user/message', data: { id: 'm4', source: { kind: 'weixin' } } }), null)
   assert.equal(typeof dispose, 'function')
   dispose?.()
-  assert.equal(definitions.length, 2, 'registration happened once')
+  assert.equal(definitions.length, 3, 'registration happened once')
   })
 })
 
