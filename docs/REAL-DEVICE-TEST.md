@@ -2,7 +2,7 @@
 
 > 本文是需要在真实微信 / Telegram 账号上执行的验收清单。CI 和 `npm test` 只覆盖模拟宿主；以下项目无法由单元测试代替。
 >
-> 当前代码来自未提交工作区。执行前先构建、打包并确认安装的是同一份产物。
+> 执行前记录待测 commit，构建、打包并确认安装的是同一份产物；已部署版本及验证范围见 [STATUS.md](STATUS.md)。
 
 ## 0. 范围与通过标准
 
@@ -21,7 +21,7 @@
 
 - 任务卡原地更新；Telegram 按钮和任务卡同时工作。
 - 计划创建、暂停/恢复/删除和结果回传。
-- 重启后收件箱恢复、任务状态显示未知、`state.json` 完整。
+- 重启后收件箱恢复；带精确输入绑定的任务恢复原回合结果，不重新执行；缺少绑定或无法确认结果时保持未知，`state.json` 完整。
 - 撤销白名单后旧排队消息不再执行。
 
 ## 1. 测试环境
@@ -322,13 +322,13 @@ DSH_CHANNELS_STATE_DIR="$state" npm run doctor
 ### I. 重启与状态（P1）
 
 1. 发一条普通消息，在回合开始前让宿主退出；重启后等待恢复。
-2. 发两条消息让第一条排队，重启宿主。
+2. 提交一个长任务，确认已开始执行且任务记录包含 `recovery` 输入绑定后重启宿主；另用没有恢复绑定的旧任务验证未知状态。
 3. 检查状态目录权限和 `doctor`。
 
 预期：
 
-- 未开始消息从 `inbox` 恢复；已开始回合不重跑，状态显示未知。
-- `state.json` 存在且解析正确；旧 `inbox.json`/`tasks.json` 镜像仍可读。
+- 未开始消息从 `sections.inbox` 恢复；已开始回合不重跑。带恢复绑定的任务只读匹配原会话日志，回传确认的结果；未结束时保存增量游标继续等待，缺少绑定或日志不可用时保持未知。
+- `state.json` 存在、版本为 2 且各段有效。迁移旧部署时，旧文件原始字节保存在 `legacy-state/`；全新安装无需这些备份。运行时不再生成或更新 `inbox.json`/`tasks.json` 等旧镜像。
 - `state.json` 权限 0600；目录 0700。
 - `doctor` 退出码 0（测试目录无未登记文件）。
 
@@ -388,7 +388,7 @@ mv "$state" "$state.smoke.$(date +%Y%m%d-%H%M%S)"
 
 | 现象 | 先看 |
 |---|---|
-| 未知发送者没有提示 | `logs/` 是否有 `refused`；`canReceive` 是否被适配器调用；`state.json.pairings` |
+| 未知发送者没有提示 | `logs/` 是否有 `refused`；`canReceive` 是否被适配器调用；`state.json` 的 `sections.pairings` 段 |
 | 状态卡片不显示待批准 | `/channels/status` 是否有 `pairings`；浏览器是否刷新；同源/鉴权 |
 | 批准后仍被拒 | `config.json` 的全局/账号覆盖是否写到了正确层级；是否重启/热更新 |
 | Telegram 按钮无反应 | bot 是否收到 `callback_query`；日志是否有 `answerCallbackQuery`；按钮 value 是否超过 64 字节 |
@@ -396,8 +396,8 @@ mv "$state" "$state.smoke.$(date +%Y%m%d-%H%M%S)"
 | 群聊没反应 | `groupTrigger` 是否为 `prefix`；消息是否以 `groupPrefix` 开头；bot 是否能看到群消息 |
 | `present` 文件没到 | 文件是否在工作目录内；`present` 是否成功；`logs/` 是否有附件未发送 |
 | 超时没有晚回传 | `session/event` 是否到达；任务是否仍在运行；`/status` 的执行状态 |
-| 重复执行 | `state.json.inbox` 与日志接收流水；平台重投；`DSH_INBOUND_RETRY` |
+| 重复执行 | `state.json` 的 `sections.inbox` 段与日志接收流水；平台重投；`DSH_INBOUND_RETRY` |
 
 ---
 
-**最后更新**：2026-11-18。对应代码为未提交工作区；执行前先 `npm test` 并留一份 `git diff` 或 commit hash。
+**最后更新**：2026-11-19。执行前先 `npm test` 并记录待测 commit；有本地改动时同时保留 `git diff`。本文是验收步骤，不代表所有真机项目均已通过；实际证据见 [STATUS.md](STATUS.md)。

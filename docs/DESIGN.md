@@ -9,7 +9,7 @@ DSH 持有会话、模型和工具。核心插件把一次聊天输入绑定到�
 
 ## 边界与会话
 
-核心是唯一的 DSH bundle。它按配置加载适配器库；适配器把平台消息转换成 `InboundMessage`，把 `Outgoing` 转成平台发送请求。字段定义以 [types.ts](../packages/core/src/types.ts) 为准。微信回复所需的 context token 留在适配器中。适配器优先实现 `startWithSink(sink)`：平台补全后把消息交给核心 `IngressSink`，核心负责按聊天串行 durable handoff、去重和 `DSH_INBOUND_RETRY` 重试；平台批次/游标确认和慢附件顺序仍由适配器承担。
+核心是唯一的 DSH bundle。它按配置加载适配器库；适配器把平台消息转换成 `InboundMessage`，把 `Outgoing` 转成平台发送请求。字段定义以 [types.ts](../packages/core/src/types.ts) 为准。微信回复所需的 context token 留在适配器中。适配器必须实现唯一入站入口 `startWithSink(sink)`：平台补全后把消息交给核心 `IngressSink`，核心负责按聊天串行 durable handoff、去重和 `DSH_INBOUND_RETRY` 重试；平台批次/游标确认和慢附件顺序仍由适配器承担。
 
 `channel`、`accountId` 和 `conversationId` 共同标识一个聊天。默认 DSH 会话 ID 由这三项派生，重启后可接回已有会话。每个聊天有一条串行队列，不同聊天可并行。`ChannelRoutes` 集中处理项目授权、会话身份、迁移与路由快照；`state.json` 的 `lines` 段保存聊天选择的项目，以及各项目当前与最大会话编号。`/new` 递增最大编号；历史切回入口已移除，升级继续使用原先选中的编号，并保留最大编号防止会话复用；默认项目沿用历史 ID，其他项目的 ID 同时包含别名和规范目录的派生值。项目只来自管理员配置的 `projects` 别名。已经排队的消息仍用入队时的会话及目录快照，恢复时重新检查目录仍获配置允许；项目移除时保留队列，避免退回默认目录执行。群聊选择由获准成员共享。群聊默认 `groupTrigger: prefix`，只处理带 `groupPrefix` 的消息；`mention` 模式还接受 `groupMention` 配置的机器人句柄，两者都在解析命令和回合前去掉。
 
@@ -48,13 +48,13 @@ Telegram 的 [polling.ts](../packages/adapter-telegram/src/polling.ts) 只负责
 
 ## 状态与桌面
 
-- 核心通过宿主 `channels` 存储域或回落文件保存限流计数。会话线号写入 `state.json.lines`，原子保存成功后才确认会话或项目切换，损坏状态拒绝新输入和切换；旧 counters 里的线号继续兼容读取。配额在单个运行实例内执行，每个发送者、每类配额只保存当前窗口一行；升级时保留旧文件或域中当前窗口的计数。状态根由 `state.lock` 加单写者锁，领取时独占创建短期 `state.claim`，使多进程的检查与接管串行。正常领取后删除 claim，进程退出后才允许另一个实例接管；领取途中进程被强制终止而遗留 claim 时，拒绝启动并要求核对进程后清理。记录形状由 [schema.ts](../packages/core/src/store/schema.ts) 声明，文件清单由 [layout.ts](../packages/core/src/store/layout.ts) 定义。
-- 出站调用前后各记一条流水；失败的普通文本回复可按原投递 ID 和原地址重试，每成功发送一条就保存剩余进度；平台的等待时间与本地退避取较大值，入队/删除失败不会报告成功，队列满时保留既有回复并拒绝新增项；同聊天的后续回复等待积压发完，其他聊天独立重试。手机 `/status` 的发送记录、待重发和待答状态限定到当前聊天。
+- 核心通过宿主 `channels` 存储域或 `state.json` 的 `sections.counters` 段保存限流计数。会话线号写入 `state.json` 的 `sections.lines` 段，原子保存成功后才确认会话或项目切换，损坏状态拒绝新输入和切换；旧 counters 里的线号继续兼容读取。配额在单个运行实例内执行，每个发送者、每类配额只保存当前窗口一行；升级时保留旧文件或域中当前窗口的计数。状态根由 `state.lock` 加单写者锁，领取时独占创建短期 `state.claim`，使多进程的检查与接管串行。正常领取后删除 claim，进程退出后才允许另一个实例接管；领取途中进程被强制终止而遗留 claim 时，拒绝启动并要求核对进程后清理。记录形状由 [schema.ts](../packages/core/src/store/schema.ts) 声明，文件清单由 [layout.ts](../packages/core/src/store/layout.ts) 定义。
+- 出站调用前后各记一条流水；失败的普通文本回复可按原投递 ID 和原地址重试，每成功发送一条就保存剩余进度；平台的等待时间与本地退避取较大值，入队/删除失败不会报告成功，队列满时保留既有回复并拒绝新增项；同聊天的后续回复等待积压发完，其他聊天独立重试。手机 `/status` 展示当前聊天的任务执行与投递状态、排队数量及交互提示，不读取 journal；最近发送预览由桌面状态卡提供。
 - 浏览器按 [client.js](../packages/core/client.js) 的 `CHANNELS` 表渲染通道消息。状态卡片读取 `GET /channels/status`，通过 `POST /channels/allowlist`、`POST /channels/pairing` 和 `POST /channels/settings` 写入；四个路由都使用宿主 `connection.requestRejection()` 验证请求；缺少鉴权服务时返回 503。写入还校验 `Origin`，正文限制 4096 字节、10 秒，落盘成功后才更新运行值。状态只列出启动成功的适配器及其实际账号与账号级白名单数量。
 
 ## 手机任务控制
 
-每个聊天保存最近已开始任务的摘要、发起者、开始/结束时间以及独立的执行和投递状态。排队消息继续以 `state.json.inbox` 为准，不建立第二套可重放任务队列。`state.json.tasks` 按每聊天最近 10 项保留已结束的历史任务，总计最多 500 项。此前记录可直接读取。写入失败时已接收的消息保留在收件箱，不开始执行；聊天收到一次阻塞原因通知，`/status` 继续显示原因，修复后重试。运行时用一份排队登记维护预留、调度和阻塞状态；预留的提交/释放幂等，清除及回调收尾不会重复退回配额。旧 `/tasks` 查询记录只在历史加载时过滤。
+每个聊天保存最近已开始任务的摘要、发起者、开始/结束时间以及独立的执行和投递状态。排队消息继续以 `state.json` 的 `sections.inbox` 段 为准，不建立第二套可重放任务队列。`state.json` 的 `sections.tasks` 段 按每聊天最近 10 项保留已结束的历史任务，总计最多 500 项。此前记录可直接读取。写入失败时已接收的消息保留在收件箱，不开始执行；聊天收到一次阻塞原因通知，`/status` 继续显示原因，修复后重试。运行时用一份排队登记维护预留、调度和阻塞状态；预留的提交/释放幂等，清除及回调收尾不会重复退回配额。旧 `/tasks` 查询记录只在历史加载时过滤。
 
 `/status` 展示当前任务，空闲时展示最近任务。`/tasks` 按开始顺序倒序展示最多 5 项已开始的任务，群聊仅列出请求者提交的任务。等待回答与等待审批从现有交互队列推导。回合到达时限时，先读取宿主已记录的终态。仍未确认结束的超时，以及重启后原先执行中或正在停止的任务，均显示未知。已开始的任务不自动重跑。若重启时同一任务还在收件箱中，恢复执行会更新原历史记录。原先发送中的结果在重启后显示投递结果未知。任务状态写入失败时，内存显示未知并记录警告。
 
@@ -74,7 +74,7 @@ Telegram 的 [polling.ts](../packages/adapter-telegram/src/polling.ts) 只负责
 
 ## 原生计划结果回传
 
-[ChannelSchedules](../packages/core/src/schedules.ts) 将原生计时/执行与聊天归属分开。创建意图先写入 [schedules.json](../packages/core/src/store/schedules.ts)，再为独立目标会话创建原生任务；未知创建结果只按唯一目标对账，不盲目重建。聊天命令只列出和修改原聊天、原发送者的绑定。激活钩子只接管 `chan-schedule-*` 命名空间，检查归属、权限和原项目，其余宿主计划直接委托给宿主。
+[ChannelSchedules](../packages/core/src/schedules.ts) 将原生计时/执行与聊天归属分开。创建意图先由 [ChannelSchedulesStore](../packages/core/src/store/schedules.ts) 写入 `state.json` 的 `sections.schedules` 段，再为独立目标会话创建原生任务；未知创建结果只按唯一目标对账，不盲目重建。聊天命令只列出和修改原聊天、原发送者的绑定。激活钩子只接管 `chan-schedule-*` 命名空间，检查归属、权限和原项目，其余宿主计划直接委托给宿主。
 
 回传读取原生 history 的消息 ID 和只读 Session 持久化句柄，以 `TurnProgress` 逐段匹配完成回合。部分进度可持久恢复，完成状态、处理过的消息 ID 和待发文本在同一次原子写中提交。原消息上下文只恢复到原账号/聊天，待发文本再交给共享 outbox。计划管理命令在实际出队和原生变更前重新检查当前发送者/账号权限；项目执行授权与管理授权分开，项目失效后仍允许原创建者删除计划。会话附着、原生目录查询和账号查询等异步等待结束后，重新检查权限、原项目、本地绑定及停用信号，避免撤权、删除或停用后的旧结果继续执行。发送分条及 outbox 重试均重新验证绑定与原生目标。通知至少一次，不承诺恰好一次；执行不会因此重跑。删除未确认绑定会阻止迟到的孤立任务激活，删除或变更后的外部目标不会被聊天命令修改。
 
