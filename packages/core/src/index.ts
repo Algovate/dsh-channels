@@ -120,20 +120,9 @@ export async function startChannels({ ctx, config }: { ctx: PluginContext; confi
         config: config.adapterConfig[spec] ?? {},
       })
       if (runtime.adapters().some((existing) => existing.id === adapter.id)) throw new Error(`duplicate channel id: ${adapter.id}`)
+      if (typeof adapter.startWithSink !== 'function') throw new Error('adapter must implement startWithSink(sink); legacy start/onInbound is no longer supported')
       const disposer = runtime.register(adapter)
-      // A driver with startWithSink owns only its platform loop. Older adapters
-      // keep the explicit onInbound registration until they migrate.
-      let off: (() => void) | undefined
-      try {
-        off = typeof adapter.startWithSink === 'function' ? undefined : adapter.onInbound((message) => runtime.dispatch(message))
-      } catch (error) {
-        disposer()
-        throw error
-      }
-      loaded.push({ adapter, disposer: () => {
-        off?.()
-        disposer()
-      } })
+      loaded.push({ adapter, disposer })
       adapters.push(adapter)
     } catch (error) {
       logger.warn(`adapter '${spec}' could not be loaded: ${String((error as Error)?.message ?? error)}`)
@@ -149,8 +138,7 @@ export async function startChannels({ ctx, config }: { ctx: PluginContext; confi
   }
   for (const { adapter, disposer } of loaded) {
     try {
-      if (typeof adapter.startWithSink === 'function') await adapter.startWithSink(sink)
-      else await adapter.start()
+      await adapter.startWithSink(sink)
     } catch (error) {
       disposer()
       try { await adapter.stop() } catch (error) { logger.warn(`failed adapter cleanup: ${String(error)}`) }

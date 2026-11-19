@@ -30,7 +30,7 @@ import { Journal } from './store/journal.js'
 import { TurnDriver, type TurnReply } from './turns.js'
 import type { HostContext } from './host.js'
 import { chatParagraphs, plainText, splitIntoBubbles } from './outbound.js'
-import { createTaskOutputDirectory, prepareTaskArtifacts } from './task-artifacts.js'
+import { prepareTaskArtifacts } from './task-artifacts.js'
 import { taskHistoryText, taskStatusText } from './task-messages.js'
 import type { ChannelAdapter, InboundMessage, IngressSink, Outgoing, SendResult, Target } from './types.js'
 import { setTimeout as delay } from 'node:timers/promises'
@@ -598,7 +598,7 @@ export class ChannelsRuntime {
           continue
         }
         this.#adapters.get(message.channel)?.restoreInbound?.(message)
-        await this.#finishTurn(message, record, result.reply, record.outputDirectory)
+        await this.#finishTurn(message, record, result.reply)
       } catch (error) { this.logger.warn(`task result recovery failed for ${record.id}: ${String(error)}`) }
     }
   }
@@ -820,11 +820,6 @@ export class ChannelsRuntime {
     if (initialCard !== undefined) await this.#editCard(message, initialCard, '执行中…')
     if (typeof adapter.typing === 'function') void adapter.typing(message).catch(() => {})
     const workingDirectory = record.workingDirectory ?? this.#options.workingDirectory
-    // The legacy fallback is opt-in: it is the only path that tells the model
-    // about an output directory. The normal path relays host `present` events.
-    let outputDir = this.#options.config.autoSendFiles === true && this.#options.config.legacyOutputScan === true
-      ? this.#turnOutputDirectory(workingDirectory)
-      : undefined
     try {
       let reply
       let late: ((result: TurnReply) => void) | undefined
@@ -841,7 +836,6 @@ export class ChannelsRuntime {
         reply = await this.#driver.run({
           message, signal, sessionId, workingDirectory,
           deliverFiles: this.#options.config.autoSendFiles,
-          ...(outputDir === undefined ? {} : { outputDirectory: outputDir }),
           onSettled: (result) => late?.(result),
           beforeSubmit: (binding) => {
             if (this.#disposed || !authorizeMessage(message, this.gateContext()).allow
@@ -869,22 +863,21 @@ export class ChannelsRuntime {
         return
       }
       this.#activeTasks.delete(key)
-      await this.#finishTurn(message, record, reply, outputDir, cardNow())
+      await this.#finishTurn(message, record, reply, cardNow())
     } finally {
       if (this.#activeTasks.get(key) === active) this.#activeTasks.delete(key)
-      if (outputDir !== undefined) { try { fs.rmdirSync(outputDir) } catch { /* Keep artifacts. */ } }
     }
   }
 
   /** Live execution and restart reconciliation share one result/attachment path. */
-  async #finishTurn(message: InboundMessage, record: TaskRecord, reply: TurnReply, outputDir?: string, taskCard?: { messageId: string }): Promise<void> {
+  async #finishTurn(message: InboundMessage, record: TaskRecord, reply: TurnReply, taskCard?: { messageId: string }): Promise<void> {
     const taskId = record.id
     const key = lineKey(message)
     const workingDirectory = record.workingDirectory ?? this.#options.workingDirectory
     const planned = !reply.failed && this.config.autoSendFiles
       ? await prepareTaskArtifacts({
         record: { outputDirectory: record.outputDirectory, artifacts: record.artifacts, artifactsIncomplete: record.artifactsIncomplete },
-        reply, workingDirectory, outputDirectory: outputDir,
+        reply, workingDirectory,
         maxFiles: this.config.maxProducedFiles, maxBytes: this.config.maxProducedBytes,
       })
       : { index: {}, attachments: [] as ArtifactDelivery[], notices: [] }
@@ -892,11 +885,10 @@ export class ChannelsRuntime {
       await this.send(message, { kind: 'notice', text }).catch((error: unknown) => this.logger.warn(`deliverable notice failed: ${String(error)}`))
     }
     const artifacts = planned.index
-    if (artifacts.outputDirectory !== undefined) outputDir = artifacts.outputDirectory
     const captureIncomplete = artifacts.artifactsIncomplete === true
     const completion: Partial<TaskRecord> = { ...artifacts, filesUnsent: (artifacts.artifacts?.length ?? 0) > 0 || captureIncomplete, execution: reply.cancelled === true ? 'cancelled' : reply.interrupted === true ? 'unknown' : reply.failed === true ? 'failed' : 'completed', endedAt: Date.now(), delivery: reply.failed === true ? 'none' : 'sending' }
     const saved = this.#tasks.update(message, taskId, completion)
-    if (!saved && !reply.failed && outputDir !== undefined) await this.send(message, { kind: 'notice', text: '产物索引未能保存，本轮结果仍会发送。请在 DSH 保留文件，历史取回暂不可用。' })
+    if (!saved && !reply.failed && artifacts.outputDirectory !== undefined) await this.send(message, { kind: 'notice', text: '产物索引未能保存，本轮结果仍会发送。请在 DSH 保留文件，历史取回暂不可用。' })
     this.logger.info(`turn for ${key} settled in ${Date.now() - record.startedAt}ms (${reply.text.length} chars)`)
     if (reply.failed === true) {
       if (reply.settled) this.#tasks.update(message, taskId, { recovery: undefined })
@@ -992,11 +984,6 @@ export class ChannelsRuntime {
       this.logger.warn(`task card edit failed: ${String(error)}`)
       return false
     }
-  }
-
-  #turnOutputDirectory(workingDirectory: string): string | undefined {
-    try { return createTaskOutputDirectory(workingDirectory) }
-    catch (error) { this.logger.warn(`could not create a turn output directory: ${String(error)}`); return undefined }
   }
 
   /** One send, journalled in two phases. */

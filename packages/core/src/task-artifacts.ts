@@ -14,18 +14,17 @@ export interface TaskArtifactPlan {
   notices: string[]
 }
 
-export function createTaskOutputDirectory(workingDirectory: string): string {
+function createTaskOutputDirectory(workingDirectory: string): string {
   const workspace = path.resolve(workingDirectory)
   fs.mkdirSync(workspace, { recursive: true })
   return fs.mkdtempSync(path.join(workspace, '.channel-output-'))
 }
 
 /** Existing indexes win during recovery: never recopy a later changed source. */
-export async function prepareTaskArtifacts({ record, reply, workingDirectory, outputDirectory, maxFiles, maxBytes }: {
+export async function prepareTaskArtifacts({ record, reply, workingDirectory, maxFiles, maxBytes }: {
   record: TaskArtifactIndex
   reply: Pick<TurnReply, 'text' | 'deliverables'>
   workingDirectory: string
-  outputDirectory?: string
   maxFiles: number
   maxBytes: number
 }): Promise<TaskArtifactPlan> {
@@ -35,7 +34,8 @@ export async function prepareTaskArtifacts({ record, reply, workingDirectory, ou
   let index: TaskArtifactIndex = {}
   if (record.outputDirectory !== undefined && record.artifacts !== undefined) index = { ...record }
   else if (declared.length) {
-    try { outputDirectory ??= createTaskOutputDirectory(workingDirectory) }
+    let outputDirectory: string
+    try { outputDirectory = createTaskOutputDirectory(workingDirectory) }
     catch { return { index: { artifactsIncomplete: true }, attachments: [], notices: ['附件未发送：无法创建产物目录，请在 DSH 核对。'] } }
     let failed = Math.max(0, declared.length - maxFiles)
     for (const file of declared.slice(0, maxFiles)) {
@@ -46,7 +46,7 @@ export async function prepareTaskArtifacts({ record, reply, workingDirectory, ou
       index.artifactsIncomplete = true
       notices.push(`${failed} 个附件未发送（超过数量或大小限制、已改变或无法安全读取），请在 DSH 核对。`)
     }
-  } else if (outputDirectory !== undefined) index = await captureArtifacts(outputDirectory)
+  }
 
   if (index.outputDirectory === undefined) return { index, attachments: [], notices }
   const directory = index.outputDirectory

@@ -278,7 +278,7 @@ DSH_CHANNELS_STATE_DIR="$state" npm run doctor
 - 聊天收到图片/文件；微信接口返回消息 ID。
 - `/files` 列出产物；`/resend` 能重发。
 - `state.json` 的 `tasks` 有产物索引和实际工作目录。
-- 聊天里没有“把文件复制到输出目录”的隐藏指令（旧 preset 除外）。
+- 聊天里没有“把文件复制到输出目录”的隐藏指令。
 
 **F2 工作目录外拒绝**
 
@@ -290,9 +290,9 @@ DSH_CHANNELS_STATE_DIR="$state" npm run doctor
 - 文件不外发；聊天收到“N 个附件未发送……”；任务标记附件未全部发送。
 - 日志出现 `copyDeliverable` 拒绝或 `deliverable notice` 相关记录。
 
-**F3 无 `present` 的旧 preset**
+**F3 无 `present` 的 preset**
 
-仅在需要兼容旧 preset 时测试：临时设 `legacyOutputScan: true`，确认旧输出目录路径仍能交付，再改回 `false`。
+使用没有 `present` 的 preset，在项目内生成图片，并在最终回复中独立成段嵌入本地 Markdown 图片，确认图片上传。再仅返回普通文件路径，确认不自动上传；普通文件交付需为 preset 挂载 `present`。旧 `legacyOutputScan` 开关已移除，不能用它启用目录扫描。
 
 ### G. 超时晚回传（P0）
 

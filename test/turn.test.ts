@@ -273,12 +273,11 @@ test('a new session is named once so the GUI lists it', async () => {
 test('the output instruction travels on the identified followup, not the active desktop turn', async () => {
   const h = createHarness()
   const driver = new TurnDriver({ ctx: h.ctx, logger: { info() {}, warn() {} }, workingDirectory: '/tmp', pollMs: 5, createUserMessage: h.createUserMessage })
-  await driver.run({ message: inbound({ text: 'make a file' }), outputDirectory: '/tmp/chat-unique' })
+  await driver.run({ message: inbound({ text: 'make a file' }), deliverFiles: true })
   const message = h.followedUp[0]?.message as { content: Array<{ text: string }>; source: Record<string, unknown> }
   assert.equal(h.injected.length, 0)
-  assert.match(message.content[0]?.text ?? '', /\/tmp\/chat-unique/)
-  assert.match(message.content[0]?.text ?? '', /copy.*output directory/i)
-  assert.match(message.content[0]?.text ?? '', /Markdown.*does not send/i)
+  assert.match(message.content[0]?.text ?? '', /call present/)
+  assert.match(message.content[0]?.text ?? '', /Inline local Markdown image/)
   assert.equal(message.content[1]?.text, 'make a file')
   assert.equal(message.source['hasOutputInstruction'], true)
 })

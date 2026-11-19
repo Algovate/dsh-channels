@@ -87,8 +87,6 @@ export interface TurnRequest {
   context?: TurnContextBlock[]
   /** Snapshot of the configured project chosen when this input was accepted. */
   workingDirectory?: string
-  /** The private attachment directory for this particular user message. */
-  outputDirectory?: string
   /** Add delivery instructions only to this channel input, never a desktop turn. */
   deliverFiles?: boolean
   signal?: AbortSignal
@@ -521,18 +519,10 @@ export class TurnDriver {
       // Attachments become text the model can act on ("saved here, open it
       // with read_image"); the person's own words stay last.
       content: [
-        ...(request.outputDirectory === undefined && request.deliverFiles === true ? [{
+        ...(request.deliverFiles === true ? [{
           type: 'text',
           text: 'This request arrived through a chat channel. To deliver final images or other files, call present with the completed files before your final reply. Only present files intended for this chat and inside the current project. A bare filesystem path or ordinary Markdown file link is not accessible on the phone. Inline local Markdown image embeds are also sent as image attachments. Keep the final reply concise and let the channel upload the files.',
         }] : []),
-        ...(request.outputDirectory === undefined ? [] : [{
-          type: 'text',
-          text: [
-            `Deliver any final image or other file requested below as a chat attachment. Before replying, save it in this turn's output directory: ${request.outputDirectory}.`,
-            'If a tool or skill saves the result somewhere else (for example, output/), keep the original and copy the finished file into the turn output directory before replying. Only put files intended for this chat in that directory.',
-            'A local Markdown image or file link in the reply does not send the file. The chat channel uploads files from the turn output directory, so omit local links and use the reply for a short description.',
-          ].join('\n'),
-        }]),
         { type: 'text', text: inboundTextWithMedia({ ...message, media: enriched }) },
       ],
       source: {
@@ -540,7 +530,7 @@ export class TurnDriver {
         form: 'message',
         conversationId: message.conversationId,
         group: message.group,
-        ...(request.outputDirectory === undefined && request.deliverFiles !== true ? {} : { hasOutputInstruction: true }),
+        ...(request.deliverFiles !== true ? {} : { hasOutputInstruction: true }),
         ...(message.group ? { senderId: message.senderId } : {}),
       },
     })

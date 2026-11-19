@@ -1,3 +1,4 @@
+import type { IngressSink } from '../packages/core/src/types.js'
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import os from 'node:os'
@@ -158,7 +159,7 @@ test('stop aborts a long poll already waiting for its response body', async () =
       return { ok: true, status: 200, json: () => { started.resolve(); return body.promise } }
     } },
   })
-  await adapter.start()
+  await adapter.startWithSink({ async offer() {} })
   await started.promise
   const stopping = adapter.stop()
   try {
@@ -220,8 +221,8 @@ test('downloads cancel a stream as soon as it exceeds the file cap', async (t) =
       }))
     } },
   })
-  adapter.onInbound((message) => delivered.resolve(message.media.length))
-  await adapter.start()
+  const sink: IngressSink = { async offer(message) { delivered.resolve(message.media.length) } }
+  await adapter.startWithSink(sink)
   try {
     assert.equal(await Promise.race([delivered.promise, delay(100, 'stalled')]), 0)
     assert.equal(cancelled, true)
@@ -244,11 +245,11 @@ test('a failed update does not drop the next update in the same poll', async () 
       return Response.json({ ok: true, result: [baseUpdate, { update_id: 11, message: { ...baseUpdate.message, text: 'later' } }] })
     } },
   })
-  adapter.onInbound((message) => {
+  const sink: IngressSink = { async offer(message) {
     if (message.text === baseUpdate.message.text) throw new Error('handler failed')
     delivered.resolve(message.text)
-  })
-  await adapter.start()
+  } }
+  await adapter.startWithSink(sink)
   try {
     assert.equal(await Promise.race([delivered.promise, delay(100, 'not delivered')]), 'later')
   } finally {
@@ -293,8 +294,8 @@ test('an ineligible inbound message never makes an attachment request', async (t
       ] })
     } },
   })
-  adapter.onInbound((message) => delivered.resolve(message))
-  await adapter.start()
+  const sink: IngressSink = { async offer(message) { delivered.resolve(message) } }
+  await adapter.startWithSink(sink)
   try {
     const message = await Promise.race([delivered.promise, delay(100)])
     assert.ok(message)
@@ -351,11 +352,11 @@ test('restarting mid-batch lets the interrupted Telegram update use the remainin
         return new Response('report contents')
       } },
     })
-    adapter.onInbound((message) => {
+    const sink: IngressSink = { async offer(message) {
       const decision = runtime.dispatch(message)
       routed.push({ text: message.text, allowed: decision.allow, attachments: message.media.length })
-    })
-    await adapter.start()
+    } }
+    await adapter.startWithSink(sink)
     try {
       assert.equal(await Promise.race([checkpoint.promise, delay(1000, 'stalled', { ref: false })]), interrupt ? 'downloading' : 'next poll')
       return routed
@@ -460,13 +461,47 @@ test('the Telegram adapter retries a failed durable handoff before confirming th
     if (offsets.length <= 2) return Response.json({ ok: true, result: [baseUpdate] })
     return new Promise(() => {})
   } } })
-  adapter.onInbound(() => {
+  const sink: IngressSink = { async offer(_message) {
     if (++attempts === 1) throw Object.assign(new Error('cannot persist'), { code: 'DSH_INBOUND_RETRY' })
     delivered.resolve()
-  })
-  await adapter.start()
+  } }
+  await adapter.startWithSink(sink)
   try {
     await delivered.promise
     assert.deepEqual(offsets.slice(0, 2), [0, baseUpdate.update_id])
+  } finally { await adapter.stop() }
+})
+
+
+test('Telegram keeps its active sink on repeated startup and accepts a new sink after stop', async () => {
+  const first: string[] = []
+  const ignored: string[] = []
+  const restarted: string[] = []
+  let phase = 'first'
+  const adapter = await createAdapter({ config: {
+    token: '123:secret', mediaEnabled: false,
+    fetchImpl: async (_url, init) => {
+      const offset = JSON.parse(String(init?.body)).offset ?? 0
+      if (offset <= 10) return Response.json({ ok: true, result: [{ ...baseUpdate, message: { ...baseUpdate.message, text: phase } }] })
+      return new Promise<never>((_resolve, reject) => {
+        const signal = init?.signal as AbortSignal
+        if (signal.aborted) reject(new Error('stopped'))
+        else signal.addEventListener('abort', () => reject(new Error('stopped')), { once: true })
+      })
+    },
+  } })
+  try {
+    await adapter.startWithSink({ async offer(message) { first.push(message.text) } })
+    await adapter.startWithSink({ async offer(message) { ignored.push(message.text) } })
+    for (let i = 0; i < 100 && first.length === 0; i++) await delay(5)
+    assert.deepEqual(first, ['first'])
+    assert.deepEqual(ignored, [])
+    await adapter.stop()
+    await adapter.stop()
+    phase = 'restarted'
+    await adapter.startWithSink({ async offer(message) { restarted.push(message.text) } })
+    for (let i = 0; i < 100 && restarted.length === 0; i++) await delay(5)
+    assert.deepEqual(restarted, ['restarted'])
+    assert.deepEqual(first, ['first'])
   } finally { await adapter.stop() }
 })

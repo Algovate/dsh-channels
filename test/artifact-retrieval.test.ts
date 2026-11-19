@@ -6,7 +6,7 @@ import path from 'node:path'
 import test from 'node:test'
 import { setTimeout as delay } from 'node:timers/promises'
 import { parseCommand, TASK_CONTROLS } from '../packages/core/src/commands.js'
-import { createChannelsRuntime, createFakeAdapter, createFakeUserMessage } from './runtime-helper.js'
+import { createChannelsRuntime, createFakeAdapter } from './runtime-helper.js'
 import { createHarness, inbound } from './harness.js'
 import { stateFile } from '../packages/core/src/store/state.js'
 
@@ -241,15 +241,12 @@ test('bounded multi-chunk copies retain file bytes and clean up after a failed u
 
 test('an artifact-index write failure is disclosed while the completed result is still delivered', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'channel-artifact-failure-'))
-  const h = createHarness({ onFollowup() {
+  const source = path.join(root, 'image.png')
+  fs.writeFileSync(source, 'png')
+  const h = createHarness({ deliverables: () => [{ path: source }], onFollowup() {
     stateFile(root).failNextWrite('tasks')
   } })
-  const runtime = createChannelsRuntime({ stateRoot: root, workingDirectory: root, ctx: h.ctx, config: { legacyOutputScan: true }, createUserMessage(fields) {
-    const blocks = fields['content'] as Array<{ text: string }>
-    const directory = /directory: (.+)\.$/m.exec(blocks[0]?.text ?? '')?.[1]
-    if (directory) fs.writeFileSync(path.join(directory, 'image.png'), 'png')
-    return createFakeUserMessage(fields)
-  } })
+  const runtime = createChannelsRuntime({ stateRoot: root, workingDirectory: root, ctx: h.ctx })
   const adapter = createFakeAdapter(); runtime.register(adapter)
   try {
     runtime.dispatch(inbound({ text: 'make image' }))

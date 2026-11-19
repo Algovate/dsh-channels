@@ -256,25 +256,27 @@ test('outbox does not retry via a replacement account', async () => {
   runtime.dispose()
 })
 
-test('the per-turn output directory cannot be replaced by a link to another directory', async () => {
+test('a declared deliverable cannot be a symlink to another directory’s private file', async () => {
   const workspace = temp()
   const shared = temp()
+  const source = path.join(workspace, 'report.txt')
   fs.writeFileSync(path.join(shared, 'private.txt'), 'private file')
-  const harness = createHarness({
-    onFollowup() {
-      const output = fs.readdirSync(workspace).find((entry) => entry.startsWith('.channel-output-'))!
-      fs.rmdirSync(path.join(workspace, output))
-      fs.symlinkSync(shared, path.join(workspace, output), 'junction')
-    },
-  })
-  const runtime = createChannelsRuntime({ ctx: harness.ctx, workingDirectory: workspace, config: { legacyOutputScan: true } })
+  fs.symlinkSync(path.join(shared, 'private.txt'), source)
+  const harness = createHarness({ deliverables: () => [{ path: source }] })
+  const runtime = createChannelsRuntime({ ctx: harness.ctx, workingDirectory: workspace })
   const adapter = createFakeAdapter()
   runtime.register(adapter)
-  runtime.dispatch(inbound())
-  await delay(50)
-  assert.equal(adapter.sent.filter((entry) => entry.outgoing.kind === 'reply').length, 1)
-  assert.ok(adapter.sent.every((entry) => entry.outgoing.media === undefined))
-  runtime.dispose()
+  try {
+    runtime.dispatch(inbound())
+    await delay(50)
+    assert.equal(adapter.sent.filter((entry) => entry.outgoing.kind === 'reply').length, 1)
+    assert.ok(adapter.sent.every((entry) => entry.outgoing.media === undefined))
+    assert.equal(fs.readFileSync(path.join(shared, 'private.txt'), 'utf8'), 'private file')
+  } finally {
+    await runtime.dispose()
+    fs.rmSync(workspace, { recursive: true, force: true })
+    fs.rmSync(shared, { recursive: true, force: true })
+  }
 })
 
 test('/status does not disclose another conversation’s queued sends or pending approvals', async () => {

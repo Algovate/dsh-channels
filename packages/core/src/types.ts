@@ -62,8 +62,6 @@ export interface OutgoingAction {
 
 export interface Outgoing {
   text?: string
-  /** @deprecated Ignored. Configure maxTextChars and bubbleGapMs on the core. */
-  bubbles?: { maxChars: number; gapMs: number }
   media?: OutgoingMedia[]
   /** Native buttons; adapters without `capabilities.actions` receive text only. */
   actions?: OutgoingAction[]
@@ -81,15 +79,7 @@ export type SendResult =
   | { ok: false; code: string; detail?: string; retryAfterMs?: number }
 
 export interface Capabilities {
-  /** @deprecated Core requires text sends; this flag is not consulted. */
-  text?: boolean
   media: { image: boolean; file: boolean; voice: boolean; video: boolean }
-  /** @deprecated Reserved flags are ignored; omit them on new adapters. */
-  stickers?: boolean
-  /** @deprecated Provide the optional adapter.typing method instead. */
-  typing?: boolean
-  /** @deprecated Use `actions` instead. */
-  buttons?: boolean
   /** Native inline actions for interaction prompts. */
   actions?: boolean
   /** The adapter can edit a previously sent message in place. */
@@ -97,18 +87,6 @@ export interface Capabilities {
   /** 0 means "no limit the core needs to enforce". */
   maxTextChars: number
 }
-
-export interface InteractionView {
-  id: string
-  kind: 'question' | 'approval'
-  conversation: Target
-  title: string
-  options: { id: string; label: string }[]
-  hint?: string
-  expiresAt: number
-}
-
-export type InteractionReply = { value: string }
 
 export interface AccountInfo {
   accountId: string
@@ -125,7 +103,7 @@ export interface AccountSurface {
 
 /** The core's durable ingress boundary; a driver offers one message at a time. */
 export interface IngressSink {
-  /** Resolve after the core has accepted (or refused) the message durably. */
+  /** Resolve after durable acceptance/refusal; DSH_INBOUND_RETRY means retain and retry the provider update. */
   offer(message: InboundMessage, options?: { priority?: boolean }): Promise<void>
 }
 
@@ -134,18 +112,9 @@ export interface ChannelAdapter {
   readonly label: { zh: string; en: string }
   readonly capabilities: Capabilities
   readonly accounts: AccountSurface
-  /** @deprecated Core renders and parses interactions. Optional for older adapters. */
-  readonly interactions?: {
-    format: 'numbered' | 'native'
-    render(view: InteractionView): Outgoing
-    parse(reply: string, view: InteractionView): InteractionReply | null
-  }
-  start(): Promise<void>
-  /** Preferred driver entry: the core owns durable handoff, ordering and retry. */
-  startWithSink?(sink: IngressSink): Promise<void>
+  /** The core owns durable handoff, ordering and retry. */
+  startWithSink(sink: IngressSink): Promise<void>
   stop(): Promise<void>
-  /** A handler error with code DSH_INBOUND_RETRY means durable handoff failed: do not acknowledge it. */
-  onInbound(handler: (message: InboundMessage) => void): () => void
   /** Restore platform-private routing context before replaying a persisted input. */
   restoreInbound?(message: InboundMessage): void
   send(target: Target, outgoing: Outgoing): Promise<SendResult>

@@ -30,7 +30,6 @@ const DEFAULTS: ChannelsConfig = {
   approvalsEnabled: true,
   interactionTimeoutMs: 600_000,
   autoSendFiles: true,
-  legacyOutputScan: false,
   maxProducedFiles: 3,
   maxProducedBytes: 20 * 1024 * 1024,
   workingDirectory: '',
@@ -60,7 +59,6 @@ export const Config = z.object({
   approvalsEnabled: z.boolean().default(DEFAULTS.approvalsEnabled).description('Let the chat approve or reject tool calls (allowed once only).'),
   interactionTimeoutMs: z.number().default(DEFAULTS.interactionTimeoutMs).description('How long one question or approval waits for a chat reply before falling back to the desktop.'),
   autoSendFiles: z.boolean().default(DEFAULTS.autoSendFiles).description('Send files declared with present or standalone local Markdown images as durable chat attachments.'),
-  legacyOutputScan: z.boolean().default(DEFAULTS.legacyOutputScan).description('Legacy fallback: instruct the model to copy files into a per-turn output directory and scan it after the turn.'),
   maxProducedFiles: z.number().default(DEFAULTS.maxProducedFiles).description('How many produced files one turn may send.'),
   maxProducedBytes: z.number().default(DEFAULTS.maxProducedBytes).description('Largest produced file that is sent (bytes).'),
   workingDirectory: z.string().default(DEFAULTS.workingDirectory).description('Where channel sessions run and their output directories are created. Empty means the plugin state root workspace.'),
@@ -87,7 +85,6 @@ export interface ChannelsConfig {
   approvalsEnabled: boolean
   interactionTimeoutMs: number
   autoSendFiles: boolean
-  legacyOutputScan: boolean
   maxProducedFiles: number
   maxProducedBytes: number
   workingDirectory: string
@@ -119,7 +116,6 @@ export function resolveConfig(raw: Partial<ChannelsConfig> | undefined): Channel
     approvalsEnabled: typeof input.approvalsEnabled === 'boolean' ? input.approvalsEnabled : DEFAULTS.approvalsEnabled,
     interactionTimeoutMs: bounded(input.interactionTimeoutMs, DEFAULTS.interactionTimeoutMs, 1, 2147483647),
     autoSendFiles: typeof input.autoSendFiles === 'boolean' ? input.autoSendFiles : DEFAULTS.autoSendFiles,
-    legacyOutputScan: typeof input.legacyOutputScan === 'boolean' ? input.legacyOutputScan : DEFAULTS.legacyOutputScan,
     maxProducedFiles: bounded(input.maxProducedFiles, DEFAULTS.maxProducedFiles, 0, 10000),
     maxProducedBytes: bounded(input.maxProducedBytes, DEFAULTS.maxProducedBytes, 0, 9007199254740991),
     workingDirectory: typeof input.workingDirectory === 'string' ? input.workingDirectory.trim() : DEFAULTS.workingDirectory,

@@ -77,18 +77,18 @@ test('partial attachment failures are visible in the model input', async () => {
 })
 
 test('automatic delivery uploads a bounded private snapshot and cleans it after the adapter reads it', async () => {
-  const root = temp(); let output = ''; const h = createHarness({ onFollowup: () => { fs.writeFileSync(path.join(output, 'result.txt'), 'original') } })
-  const runtime = createChannelsRuntime({ ctx: h.ctx, stateRoot: root, workingDirectory: root, config: { legacyOutputScan: true }, createUserMessage: (fields) => {
-    const content = fields.content as Array<{ text: string }>
-    const match = /output directory: ([^\n]+)\./.exec(content[0]!.text)
-    output = match![1]!
-    return { ...fields, id: 'snapshot-input', role: 'user' }
-  } })
+  const root = temp()
+  const source = path.join(root, 'result.txt')
+  const h = createHarness({
+    deliverables: () => [{ path: source }],
+    onFollowup: () => { fs.writeFileSync(source, 'original') },
+  })
+  const runtime = createChannelsRuntime({ ctx: h.ctx, stateRoot: root, workingDirectory: root })
   const adapter = createFakeAdapter(); let staged = ''; let uploaded = ''
   adapter.send = async (_target, outgoing) => {
     for (const item of outgoing.media ?? []) {
       staged = item.path
-      fs.writeFileSync(path.join(output, 'result.txt'), 'changed-after-scan')
+      fs.writeFileSync(source, 'changed-after-capture')
       uploaded = fs.readFileSync(staged, 'utf8')
     }
     return { ok: true, messageId: 'sent' }
@@ -98,7 +98,7 @@ test('automatic delivery uploads a bounded private snapshot and cleans it after 
     runtime.dispatch(inbound())
     for (let i = 0; i < 100 && !staged; i++) await delay(5)
     assert.ok(staged); assert.equal(uploaded, 'original')
-    assert.notEqual(path.dirname(staged), output)
+    assert.notEqual(staged, source)
     for (let i = 0; i < 100 && fs.existsSync(staged); i++) await delay(5)
     assert.equal(fs.existsSync(staged), false)
   } finally { await runtime.dispose(); fs.rmSync(root, { recursive: true, force: true }) }

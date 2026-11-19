@@ -321,3 +321,25 @@ test('recovery after a failed handoff reuses the captured artifact instead of re
     assert.equal(f.h.followedUp.length, 1)
   } finally { await next?.dispose(); await f.close() }
 })
+
+
+test('old scan configuration cannot turn unrelated workspace files into attachments', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'channel-old-scan-'))
+  let precreated = false
+  const h = createHarness({ onFollowup() {
+    precreated = fs.readdirSync(root).some((name) => name.startsWith('.channel-output-'))
+    fs.writeFileSync(path.join(root, 'unrelated.txt'), 'private workspace file')
+  } })
+  const config = JSON.parse('{"legacyOutputScan":true}')
+  const runtime = createChannelsRuntime({ ctx: h.ctx, stateRoot: root, workingDirectory: root, config })
+  const adapter = createFakeAdapter()
+  runtime.register(adapter)
+  try {
+    runtime.dispatch(inbound())
+    await until(() => stateFile(root).read<Array<{ delivery: string }>>('tasks')?.[0]?.delivery === 'sent')
+    const input = h.followedUp[0]!.message as { content: Array<{ text: string }> }
+    assert.match(input.content[0]!.text, /call present/)
+    assert.equal(precreated, false)
+    assert.equal(adapter.sent.flatMap((entry) => entry.outgoing.media ?? []).length, 0)
+  } finally { await runtime.dispose(); fs.rmSync(root, { recursive: true, force: true }) }
+})

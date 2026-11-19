@@ -1,11 +1,9 @@
 /**
  * Files the agent produced during one turn.
  *
- * A chat reply is text, but half of what an agent does ends in a file: a chart,
- * a PDF, a script. The reference implementation solved this by scanning the
- * agent's working directory for files newer than the turn started, and that is
- * the only trigger that works without asking the model to declare its outputs —
- * which it does inconsistently.
+ * Enumerate the task's private captured files for indexing and delivery.
+ * Only declared outputs are copied here; this scanner never discovers outputs
+ * by inspecting the agent's general working directory.
  *
  * The scan is bounded (depth, count, size) and never follows symlinks: the
  * working directory belongs to the user, and a stray link could otherwise point

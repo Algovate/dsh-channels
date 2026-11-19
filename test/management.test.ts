@@ -86,10 +86,9 @@ test('startup rejects duplicate channels, installs seams before polling, and exp
     export function createAdapter({ ctx, config }) {
       const audit = ctx.get('audit')
       return {
-        id: 'fake', label: { zh: '测试', en: 'Fake' }, capabilities: { text: true, maxTextChars: 600 },
+        id: 'fake', label: { zh: '测试', en: 'Fake' }, capabilities: { media: { image: false, file: false, voice: false, video: false }, maxTextChars: 600 },
         accounts: { list: async () => [{ accountId: 'actual', expired: true }] },
-        onInbound() { audit.push('subscribe'); if (config.subscriptionFail) throw new Error('subscription'); return () => audit.push('unsubscribe') },
-        async start() { audit.push('start'); if (config.fail) throw new Error('start') },
+        async startWithSink() { audit.push('start'); if (config.fail) throw new Error('start') },
         async stop() { audit.push('stop') },
         async send() { return { ok: true, unconfirmed: true } },
       }
@@ -107,13 +106,12 @@ test('startup rejects duplicate channels, installs seams before polling, and exp
     const config = resolveConfig({ adapters: [moduleFile, moduleFile], allowedSenders: ['global'], allowlistPerAccount: { actual: [] } })
     const plugin = await startChannels({ ctx, config })
     assert.equal(audit.filter((event) => event === 'start').length, 1)
-    assert.equal(audit.filter((event) => event === 'subscribe').length, 1)
     assert.ok(audit.indexOf('seam') < audit.indexOf('start'))
     const response = await status(new Request('http://localhost/channels/status'))
     const payload = await response.json() as { channels: Array<{ accounts: unknown[] }> }
     assert.deepEqual(payload.channels[0]?.accounts, [{ accountId: 'actual', expired: true, allowedSenders: 0 }])
     await plugin.dispose()
-    for (const failure of [{ fail: true }, { subscriptionFail: true }]) {
+    for (const failure of [{ fail: true }]) {
       const failed = await startChannels({ ctx, config: resolveConfig({ adapters: [moduleFile], adapterConfig: { [moduleFile]: failure } }) })
       assert.equal(failed.runtime.adapters().length, 0)
       assert.equal(failed.adapters.length, 0)
@@ -123,5 +121,33 @@ test('startup rejects duplicate channels, installs seams before polling, and exp
     if (previous === undefined) delete process.env.DSH_CHANNELS_STATE_DIR
     else process.env.DSH_CHANNELS_STATE_DIR = previous
     fs.rmSync(root, { recursive: true })
+  }
+})
+
+test('startup refuses legacy-only adapters before registration or polling', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'channels-legacy-adapter-'))
+  const previous = process.env.DSH_CHANNELS_STATE_DIR
+  process.env.DSH_CHANNELS_STATE_DIR = root
+  const moduleFile = path.join(root, 'legacy.mjs')
+  fs.writeFileSync(moduleFile, `export function createAdapter() { return {
+    id: 'legacy', label: { zh: '旧', en: 'Legacy' },
+    capabilities: { media: {}, maxTextChars: 600 },
+    accounts: { list: async () => [] },
+    onInbound() { throw new Error('legacy subscription must not run') },
+    async start() { throw new Error('legacy polling must not run') },
+    async stop() {}, async send() { return { ok: true, unconfirmed: true } },
+  } }`)
+  const warnings: string[] = []
+  try {
+    const plugin = await startChannels({ ctx: { logger: { warn: (line: string) => warnings.push(line), info() {} } }, config: resolveConfig({ adapters: [moduleFile] }) })
+    try {
+      assert.equal(plugin.adapters.length, 0)
+      assert.equal(plugin.runtime.adapters().length, 0)
+      assert.match(warnings.join('\n'), /startWithSink/)
+    } finally { await plugin.dispose() }
+  } finally {
+    if (previous === undefined) delete process.env.DSH_CHANNELS_STATE_DIR
+    else process.env.DSH_CHANNELS_STATE_DIR = previous
+    fs.rmSync(root, { recursive: true, force: true })
   }
 })

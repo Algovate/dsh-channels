@@ -24,10 +24,9 @@ test('the Telegram adapter satisfies the same contract the core registers', asyn
   assert.equal(adapter.id, 'telegram')
   assert.deepEqual(adapter.label, { zh: '电报', en: 'Telegram' })
   assert.equal(adapter.capabilities.maxTextChars > 0, true)
-  assert.equal(typeof adapter.start, 'function')
+  assert.equal(typeof adapter.startWithSink, 'function')
   assert.equal(typeof adapter.stop, 'function')
   assert.equal(typeof adapter.send, 'function')
-  assert.equal(typeof adapter.onInbound, 'function')
 
 })
 

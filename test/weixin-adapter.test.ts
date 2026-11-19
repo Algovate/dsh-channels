@@ -1,3 +1,4 @@
+import type { IngressSink } from '../packages/core/src/types.js'
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import { createServer, type RequestListener } from 'node:http'
@@ -172,8 +173,9 @@ test('slow Weixin media preserves conversation order without blocking other conv
   })
   const received: InboundMessage[] = []
   const receivedTexts = () => received.map((message) => message.text)
-  adapter.onInbound((message) => received.push(message))
-  await adapter.start()
+  const sink: IngressSink = { async offer(message) { received.push(message) } }
+  await adapter.startWithSink(sink)
+  await adapter.startWithSink({ async offer() { assert.fail('repeated startup replaced the active sink') } })
   try {
     await within(() => finishFirst !== undefined && receivedTexts().includes('independent'))
     assert.deepEqual(receivedTexts(), ['independent'])
@@ -228,8 +230,8 @@ test('stopping during a Weixin batch leaves the queued text available on restart
     runtime,
   })
   const received: string[] = []
-  adapter.onInbound((message) => received.push(message.text))
-  await adapter.start()
+  const sink: IngressSink = { async offer(message) { received.push(message.text) } }
+  await adapter.startWithSink(sink)
   try {
     await within(() => downloads === 1 && cursors.length === 2)
   } finally {
@@ -241,10 +243,12 @@ test('stopping during a Weixin batch leaves the queued text available on restart
   assert.deepEqual(admitted, [''])
   assert.deepEqual(released, [''])
 
-  await adapter.start()
+  const restarted: string[] = []
+  await adapter.startWithSink({ async offer(message) { restarted.push(message.text) } })
   try {
-    await within(() => received.length === 2 && cursors.length === 4)
-    assert.deepEqual(received, ['', 'still waiting'])
+    await within(() => restarted.length === 2 && cursors.length === 4)
+    assert.deepEqual(received, [])
+    assert.deepEqual(restarted, ['', 'still waiting'])
     assert.deepEqual(cursors, ['before', 'after', 'before', 'after'])
     assert.deepEqual(admitted, ['', '', 'still waiting'])
     assert.deepEqual(JSON.parse(fs.readFileSync(cursorFile, 'utf8')), { get_updates_buf: 'after' })
@@ -334,8 +338,8 @@ test('task controls bypass stalled media, while ordinary text remains ordered an
   const checked: string[] = []; const seen: string[] = []
   const runtime = { canBypassInbound: (message: InboundMessage) => message.text === '/cancel', canReceive: (message: InboundMessage) => { checked.push(message.senderId); return message.senderId !== 'blocked' } }
   const adapter = await createAdapter({ config: { accountId: 'acct', stateDir: stateDir(t, baseUrl), cdnBaseUrl, asrEnabled: false }, runtime })
-  adapter.onInbound((message) => seen.push(message.text || 'media'))
-  await adapter.start()
+  const sink: IngressSink = { async offer(message) { seen.push(message.text || 'media') } }
+  await adapter.startWithSink(sink)
   try {
     await within(() => finish !== undefined && seen.includes('/cancel'))
     assert.deepEqual(seen, ['/cancel']); assert.ok(checked.includes('blocked'))

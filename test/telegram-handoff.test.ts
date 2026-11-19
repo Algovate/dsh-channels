@@ -1,3 +1,4 @@
+import type { IngressSink } from '../packages/core/src/types.js'
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import fs from 'node:fs'
@@ -22,9 +23,9 @@ test('Telegram keeps the offset before pending downloads while later polls deliv
     if (url.endsWith('/getFile')) { downloading = true; await blocked; return Response.json({ ok: false, description: 'unavailable' }) }
     throw new Error('unexpected request')
   } } })
-  adapter.onInbound((message) => seen.push(message))
+  const sink: IngressSink = { async offer(message) { seen.push(message) } }
   try {
-    await adapter.start(); await until(() => downloading); await until(() => seen.some((message) => message.text === '/cancel'))
+    await adapter.startWithSink(sink); await until(() => downloading); await until(() => seen.some((message) => message.text === '/cancel'))
     assert.ok(offsets.every((offset) => offset <= 10), 'do not acknowledge a pending download')
     assert.equal(seen.length, 1)
     release(); await until(() => seen.length === 2); await until(() => offsets.some((offset) => offset === 12))
@@ -42,8 +43,8 @@ test('Telegram bounds ordinary downloads across chats while controls bypass the 
     if (url.endsWith('/getFile')) { downloads++; return new Promise<never>((_resolve, reject) => (init?.signal as AbortSignal).addEventListener('abort', () => reject(new Error('stopped')), { once: true })) }
     throw new Error('unexpected request')
   } } })
-  adapter.onInbound((message) => seen.push(message.text))
-  try { await adapter.start(); await until(() => seen.includes('/cancel')); await until(() => downloads === 2); await delay(120); assert.equal(downloads, 2); assert.deepEqual(seen, ['/cancel']) }
+  const sink: IngressSink = { async offer(message) { seen.push(message.text) } }
+  try { await adapter.startWithSink(sink); await until(() => seen.includes('/cancel')); await until(() => downloads === 2); await delay(120); assert.equal(downloads, 2); assert.deepEqual(seen, ['/cancel']) }
   finally { await adapter.stop(); fs.rmSync(root, { recursive: true, force: true }) }
 })
 
@@ -54,11 +55,11 @@ test('Telegram retries a failed durable handoff before delivering the next ordin
     if (offset > 11) return new Promise<never>((_resolve, reject) => (init?.signal as AbortSignal).addEventListener('abort', () => reject(new Error('stopped')), { once: true }))
     return Response.json({ ok: true, result: [update(10, 'first'), update(11, 'second')].filter((item) => item.update_id >= offset) })
   } } })
-  adapter.onInbound((message) => {
+  const sink: IngressSink = { async offer(message) {
     seen.push(message.text)
     if (message.text === 'first' && !failed) { failed = true; throw Object.assign(new Error('cannot persist'), { code: 'DSH_INBOUND_RETRY' }) }
-  })
-  try { await adapter.start(); await until(() => failed); await delay(50); assert.deepEqual(seen, ['first']); await until(() => seen.includes('second')); assert.deepEqual(seen, ['first', 'first', 'second']) }
+  } }
+  try { await adapter.startWithSink(sink); await until(() => failed); await delay(50); assert.deepEqual(seen, ['first']); await until(() => seen.includes('second')); assert.deepEqual(seen, ['first', 'first', 'second']) }
   finally { await adapter.stop() }
 })
 
@@ -72,16 +73,16 @@ test('Telegram reports local attachment save failures instead of dropping the in
     if (url.endsWith('/getFile')) return Response.json({ ok: true, result: { file_path: 'photo.jpg' } })
     return new Response('photo')
   } } })
-  adapter.onInbound((message) => seen.push(message))
-  try { await adapter.start(); await until(() => seen.length > 0); assert.equal(seen[0]?.media.length, 0); assert.ok(seen[0]?.attachmentErrors?.length) }
+  const sink: IngressSink = { async offer(message) { seen.push(message) } }
+  try { await adapter.startWithSink(sink); await until(() => seen.length > 0); assert.equal(seen[0]?.media.length, 0); assert.ok(seen[0]?.attachmentErrors?.length) }
   finally { await adapter.stop(); fs.rmSync(root, { recursive: true, force: true }) }
 })
 
 test('durable retry backoff keeps its chat position but releases capacity for healthy chats', async () => {
   const seen: number[] = []; const batch = [1, 2, 3].map((id) => { const item = update(id, 'ordinary'); item.message.chat.id = id; return item })
   const adapter = await createAdapter({ runtime: { canReceive: () => true }, config: { token: '123:test', mediaEnabled: false, fetchImpl: async () => Response.json({ ok: true, result: batch }) } })
-  adapter.onInbound((message) => { const id = Number(message.conversationId); seen.push(id); if (id < 3) throw Object.assign(new Error('route unavailable'), { code: 'DSH_INBOUND_RETRY' }) })
-  try { await adapter.start(); await until(() => seen.includes(3)); assert.deepEqual(seen.slice(0, 3), [1, 2, 3]) }
+  const sink: IngressSink = { async offer(message) { const id = Number(message.conversationId); seen.push(id); if (id < 3) throw Object.assign(new Error('route unavailable'), { code: 'DSH_INBOUND_RETRY' }) } }
+  try { await adapter.startWithSink(sink); await until(() => seen.includes(3)); assert.deepEqual(seen.slice(0, 3), [1, 2, 3]) }
   finally { await adapter.stop() }
 })
 
@@ -95,7 +96,7 @@ test('durable Telegram retries reuse enriched input rather than downloading the 
     if (url.endsWith('/getFile')) { downloads++; return Response.json({ ok: true, result: { file_path: 'photo.jpg' } }) }
     return new Response('photo')
   } } })
-  adapter.onInbound((message) => { seen.push(message); if (seen.length === 1) throw Object.assign(new Error('cannot persist'), { code: 'DSH_INBOUND_RETRY' }) })
-  try { await adapter.start(); await until(() => seen.length === 1); await until(() => seen.length === 2); assert.equal(downloads, 1); assert.equal(seen[0], seen[1]); assert.equal(seen[1]?.media.length, 1) }
+  const sink: IngressSink = { async offer(message) { seen.push(message); if (seen.length === 1) throw Object.assign(new Error('cannot persist'), { code: 'DSH_INBOUND_RETRY' }) } }
+  try { await adapter.startWithSink(sink); await until(() => seen.length === 1); await until(() => seen.length === 2); assert.equal(downloads, 1); assert.equal(seen[0], seen[1]); assert.equal(seen[1]?.media.length, 1) }
   finally { await adapter.stop(); fs.rmSync(root, { recursive: true, force: true }) }
 })
