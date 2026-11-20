@@ -19,7 +19,7 @@
 | 自研 JSON 状态层 | `store/` 15 文件、1831 行，含 v1/v2 迁移、legacy 镜像、单写者锁 | SQLite（WAL）+ 6 张表，约 500 行；去重用唯一索引，排队用事务 |
 | 三套配置来源 | loader patch + `config.json` overlay + live settings，25 个字段手写校验 | 一个文件、一个 schema、启动校验；仅安全字段热更新 |
 | outbox 与 journal 双写 | 投递状态机写两遍 | outbox 是唯一状态，诊断走普通日志 |
-| 上帝模块 | `runtime.ts` 940 行、`turns.ts` 667 行 | `ingest` / `turn-runner` / `outbox-worker` 三块 |
+| 上帝模块 | `runtime.ts` 940 行、`turns.ts` 667 行 | 已抽出 `inbound/policy`、`commands-runner`、`agent-pool`；runtime 837 行、turns 466 行 |
 | 手写 UI 运行时 | `client.js` 660 行单文件 | 已拆成 `client-src/` 模块，用 esbuild 打包成宿主加载的 `client.js` |
 | 适配器重复 | `safeName`/扩展名/落盘三份 | 核心 `adapter-kit` 纯函数（本阶段已完成） |
 | 飞书手写协议栈 | `socket.ts`+`proto.ts` 约 570 行 | 评估官方 SDK，与零依赖取舍 |
@@ -37,9 +37,11 @@
 - `store/` 换 SQLite：`sections` 表按事务保存七段（校验后的 JSON 载荷）；一次性导入旧 `state.json` 与旧段文件，删除文件锁/镜像/版本迁移代码。**不做**逐实体拆表：读者总是整段加载，文档上限（500 条入站、100 条计划）远低于需要行级索引的规模。
 - 验收：现有状态文件可导入；510 项测试全绿；mini 上重启后待处理队列、去重、配额行为一致。
 
-### Phase 3
+### Phase 3（已完成）
 
-- 拆分 `runtime.ts` / `turns.ts`；状态卡改为构建产物；飞书 SDK 以独立 PR 评估。
+- 入站策略、命令分发、会话池分别抽成 `inbound/policy.ts`、`commands-runner.ts`、`agent-pool.ts`。
+- 状态卡改为 `client-src/` 模块 + esbuild 产物 `client.js`。
+- 飞书 SDK 已评估并记录（ADR-13：保留手写栈）。
 - 验收：契约测试不变；真机消息、语音、卡片回调回归通过。
 
 ## 不做的事

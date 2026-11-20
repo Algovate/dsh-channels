@@ -21,8 +21,6 @@
  *
  * @module @derekluo/dsh-channels/turns
  */
-import fs from 'node:fs'
-import path from 'node:path'
 import type { InboundMessage, Target } from './types.js'
 import { createHostPort, type HostContext, type HostPort } from './host.js'
 import { setTimeout as delay } from 'node:timers/promises'
@@ -33,28 +31,9 @@ import { inboundTextWithMedia } from './media.js'
 import { extractDocumentText } from './documents.js'
 import { recoverTurn, type TurnBinding, type RecoveryCursor } from './turn-recovery.js'
 import type { InboundMedia } from './types.js'
+import { AgentPool, type AgentHandle, type AgentsService, type Attached, type MessageFactory } from './agent-pool.js'
 
-/** What `agents.create` / `agents.get` hand back, as far as this module cares. */
-export interface AgentHandle {
-  agent: {
-    status?: 'idle' | 'running'
-    session?: { seq?: number; header?: { cwd?: string }; id?: string; snapshotEvents?: (fromSeq?: number) => Array<Record<string, unknown>> } | undefined
-    inject?: (message: unknown) => void
-    followup?: (message: unknown) => void
-    steer?: (message: unknown) => void
-    cancel?: (cause: { kind: 'user' }, options: { keepInbox: true }) => void
-    inbox?: { remove?: (messageId: string) => boolean }
-  }
-  dispose?: () => Promise<void> | void
-}
-
-export interface AgentsService {
-  /** The live agent for a session, or undefined when nothing is running it. */
-  get?: (sessionId: string) => unknown
-  /** Load a persisted session back into an agent (cold start). */
-  resume?: (options: Record<string, unknown>) => Promise<AgentHandle>
-  create?: (options: Record<string, unknown>) => Promise<AgentHandle>
-}
+export type { AgentHandle, AgentsService } from './agent-pool.js'
 
 export interface PresentedFile {
   path: string
@@ -116,15 +95,6 @@ export interface TurnDriverOptions {
   titleFor?: (message: InboundMessage) => string
 }
 
-type MessageFactory = (fields: Record<string, unknown>) => unknown
-
-interface Attached {
-  handle: AgentHandle
-  sessionId: string
-  created?: boolean
-  named?: boolean
-}
-
 interface RunningTurn {
   agent: AgentHandle['agent']
   messageId: string
@@ -145,9 +115,7 @@ export class TurnDriver {
 
   readonly #options: TurnDriverOptions
   readonly #host: HostPort
-  readonly #attached = new Map<string, Attached>()
-  readonly #owned = new Map<AgentHandle, string>()
-  readonly #leases = new Map<string, number>()
+  readonly #pool: AgentPool
   readonly #running = new Map<AgentHandle['agent'], RunningTurn>()
   /** Session id → the channel turn waiting on it; events carry only the session. */
   readonly #bySession = new Map<string, RunningTurn>()
@@ -174,17 +142,20 @@ export class TurnDriver {
     this.#live = false
     this.#running.clear()
     this.#bySession.clear()
-    const handles = [...this.#owned.keys()]
-    this.#owned.clear()
-    this.#attached.clear()
-    await Promise.all(handles.map(async (handle) => {
-      try { await handle.dispose?.() } catch (error) { this.logger.warn(`agent disposal failed: ${String(error)}`) }
-    }))
+    await this.#pool.dispose()
   }
 
   constructor(options: TurnDriverOptions) {
     this.#options = options
     this.#host = createHostPort(options.ctx)
+    this.#pool = new AgentPool({
+      host: this.#host,
+      logger: options.logger,
+      workingDirectory: options.workingDirectory,
+      ...(options.createUserMessage === undefined ? {} : { createUserMessage: options.createUserMessage }),
+      ...(options.onAttach === undefined ? {} : { onAttach: options.onAttach }),
+      isDisposed: () => this.#disposed,
+    })
     if (this.#host.hasEventBus()) {
       try {
         const off = this.#host.on('session/event', ((session: { id?: string }, event: Record<string, unknown>) => {
@@ -235,173 +206,15 @@ export class TurnDriver {
     return this.#options.logger
   }
 
-  /**
-   * The host's current default model selection, as `agentOptions`.
-   *
-   * A session created without one has no provider/model and its very first step
-   * fails with "agent has no provider/model" — an error that reaches the person
-   * as a reply. `agentDefaultModel.currentSelection()` is the host's own answer,
-   * so it needs no per-plugin configuration and follows whatever the operator
-   * picked in the GUI.
-   */
-  #defaultRoute(): { provider: string; model: string } | undefined {
-    const defaults = this.#host.get<{ currentSelection?: () => { provider?: string; model?: string } | undefined }>('agentDefaultModel')
-    try {
-      const selection = defaults?.currentSelection?.()
-      if (typeof selection?.provider === 'string' && selection.provider !== '' && typeof selection.model === 'string' && selection.model !== '') {
-        return { provider: selection.provider, model: selection.model }
-      }
-    } catch {
-      // A host without this service is not an error: the agent may still have
-      // a route from its preset.
-    }
-    return undefined
-  }
-
-  #agents(): AgentsService | undefined {
-    const service = this.#host.get<AgentsService>('agents')
-    return service ?? undefined
-  }
-
-  async #factory(): Promise<MessageFactory> {
-    if (this.#options.createUserMessage !== undefined) return this.#options.createUserMessage
-    // The host package only resolves inside a DSH profile, and it is not a
-    // dependency of this package: a variable specifier keeps the import lazy and
-    // lets a host without it fail with a clear message instead of at load time.
-    const moduleName = '@deepseek-ai/dsh-llm'
-    const module = (await import(moduleName)) as { createUserMessage?: MessageFactory }
-    if (typeof module.createUserMessage !== 'function') throw new Error('@deepseek-ai/dsh-llm does not export createUserMessage')
-    return module.createUserMessage
-  }
-
-  /**
-   * Attach the conversation's session.
-   *
-   * Order matters and each step exists for a failure that was observed:
-   *  1. a live agent (the GUI opened this very session) — adopt it;
-   *  2. otherwise resume the persisted session — this is the normal cold start;
-   *  3. otherwise create it;
-   *  4. if create says the session already exists (a resume race), resume again.
-   * Skipping step 2 is what made a restart fail with `session already exists`.
-   */
-  async attach(target: Target, options: { system?: string; sessionId?: string; workingDirectory?: string; signal?: AbortSignal } = {}): Promise<Attached> {
-    const sessionId = options.sessionId ?? sessionIdFor(target)
-    const workingDirectory = options.workingDirectory ?? this.#options.workingDirectory
-    const canonical = (directory: string): string => { try { return fs.realpathSync(directory) } catch { return path.resolve(directory) } }
-    const checkDirectory = (agent: AgentHandle['agent']): void => {
-      const cwd = agent.session?.header?.cwd
-      if (cwd !== undefined && canonical(cwd) !== canonical(workingDirectory)) throw new Error('session working directory differs from selected project')
-    }
-    const known = this.#attached.get(sessionId)
-
-    const agents = this.#agents()
-    if (this.#disposed) throw new Error('the turn driver is disposed')
-    if (agents === undefined) throw new Error('the agents service is not available')
-    const live = agents.get?.(sessionId)
-    if (known !== undefined && (typeof agents.get !== 'function' || known.handle.agent === live)) {
-      checkDirectory(known.handle.agent)
-      return this.#remember(target, known, workingDirectory)
-    }
-    if (live !== undefined) {
-      checkDirectory(live as AgentHandle['agent'])
-      const attached = { handle: { agent: live as AgentHandle['agent'] }, sessionId }
-      return this.#remember(target, attached, workingDirectory)
-    }
-
-    // The preset is what gives the agent its tool set. A session created
-    // without one gets the bare default (a working-directory tool and little
-    // else), so `ask_user_question`, bash and the rest would be missing — the
-    // first thing a real turn exposes.
-    const presets = this.#host.get<{ resolve?: (id: undefined) => Promise<{ id?: string } | undefined>; mount?: (agentCtx: unknown, id: string) => Promise<unknown> }>('agentPresets')
-    let presetId: string | undefined
-    try {
-      const resolved = await presets?.resolve?.(undefined)
-      if (typeof resolved?.id === 'string' && resolved.id !== '') presetId = resolved.id
-    } catch (error) {
-      this.#options.logger.warn(`agentPresets.resolve failed (continuing without a preset): ${String((error as Error)?.message ?? error)}`)
-    }
-
-    const setup = async (agentCtx: Record<string, unknown>): Promise<void> => {
-      if (presetId !== undefined && typeof presets?.mount === 'function') {
-        try {
-          await presets.mount(agentCtx, presetId)
-        } catch (error) {
-          this.#options.logger.warn(`agentPresets.mount(${presetId}) failed: ${String((error as Error)?.message ?? error)}`)
-        }
-      }
-      const systemPrompt = agentCtx['systemPrompt'] as { section?: (options: Record<string, unknown>) => void } | undefined
-      if (options.system === undefined || typeof systemPrompt?.section !== 'function') return
-      systemPrompt.section({ name: 'channels:persona', order: 60, text: options.system, interpolate: false })
-    }
-    const route = this.#defaultRoute()
-    const routeOptions = route === undefined ? {} : { agentOptions: route }
-    const createOptions = {
-      sessionId,
-      ...routeOptions,
-      meta: { cwd: options.workingDirectory ?? this.#options.workingDirectory },
-      setup,
-      signal: options.signal === undefined ? AbortSignal.timeout(30_000) : AbortSignal.any([options.signal, AbortSignal.timeout(30_000)]),
-    }
-
-    const adopt = (agent: unknown): AgentHandle => ({ agent: agent as AgentHandle['agent'], dispose: () => {} })
-
-    let handle: AgentHandle | undefined
-    let created = false
-
-    if (handle === undefined && typeof agents.resume === 'function') {
-      try {
-        handle = await agents.resume({ resumeSessionId: sessionId, setup, signal: createOptions.signal, ...routeOptions })
-      } catch (error) {
-        options.signal?.throwIfAborted()
-        this.#options.logger.info(`resume of ${sessionId} failed (${String((error as Error)?.message ?? error)}); will create it`)
-      }
-    }
-
-    if (handle === undefined && typeof agents.create === 'function') {
-      try {
-        handle = await agents.create(createOptions)
-        created = true
-      } catch (error) {
-        if (!/already exists/i.test(String((error as Error)?.message ?? error))) throw error
-        // A resume raced us (the GUI resumed the same session); try again.
-        if (typeof agents.resume === 'function') {
-          handle = await agents.resume({ resumeSessionId: sessionId, setup, signal: createOptions.signal, ...routeOptions })
-        } else {
-          const again = agents.get?.(sessionId)
-          if (again === undefined) throw error
-          handle = adopt(again)
-        }
-      }
-    }
-    if (handle === undefined) throw new Error('the agents service can neither resume nor create sessions')
-
-    try { checkDirectory(handle.agent) }
-    catch (error) { await handle.dispose?.(); throw error }
-    if (this.#disposed || options.signal?.aborted) {
-      await handle.dispose?.()
-      throw new Error('the turn driver is disposed')
-    }
-    this.#owned.set(handle, sessionId)
-    return this.#remember(target, { handle, sessionId, created }, workingDirectory)
-  }
-
-  async #remember(target: Target, attached: Attached, workingDirectory: string): Promise<Attached> {
-    const { sessionId } = attached
-    const changed = this.#attached.get(sessionId) !== attached
-    this.#attached.delete(sessionId)
-    this.#attached.set(sessionId, attached)
-    if (changed) {
-      try { this.#options.onAttach?.(target, sessionId, workingDirectory) }
-      catch { /* Cosmetic grouping cannot fail a turn. */ }
-    }
-    await this.#prune(sessionId)
-    return attached
+  /** Attach the conversation's session through the shared pool. */
+  attach(target: Target, options: { system?: string; sessionId?: string; workingDirectory?: string; signal?: AbortSignal } = {}): Promise<Attached> {
+    return this.#pool.attach(target, options, (agent) => this.#running.has(agent))
   }
 
   /** Run one turn and return its reply; a wait timeout detaches without cancelling it. */
   async run(request: TurnRequest & { sessionId?: string }): Promise<TurnReply> {
     const leasedId = request.sessionId ?? sessionIdFor(request.message)
-    this.#leases.set(leasedId, (this.#leases.get(leasedId) ?? 0) + 1)
+    this.#pool.retain(leasedId)
     const sessionId = request.sessionId ?? sessionIdFor(request.message)
     // `preSubmit` stops an attach that ran past the deadline; `prompt` withdraws
     // interactions when the turn settles. Neither cancels a submitted turn.
@@ -482,9 +295,8 @@ export class TurnDriver {
       if (timer !== undefined) clearTimeout(timer)
       signal.removeEventListener('abort', onAbort)
       if (!timedOut) { try { prompt.abort() } catch { /* already aborted */ } }
-      const remaining = (this.#leases.get(leasedId) ?? 1) - 1
-      if (remaining === 0) this.#leases.delete(leasedId); else this.#leases.set(leasedId, remaining)
-      await this.#prune()
+      this.#pool.release(leasedId)
+      await this.#pool.prune(undefined, (agent) => this.#running.has(agent))
     }
   }
 
@@ -501,7 +313,7 @@ export class TurnDriver {
     signal?.throwIfAborted()
     await this.#nameSession(attached, message)
     signal?.throwIfAborted()
-    const factory = await this.#factory()
+    const factory = await this.#pool.factory()
     const agent = attached.handle.agent
     if (typeof agent.followup !== 'function') throw new Error('the agent cannot accept a followup message')
     const enriched = await this.#enrichDocuments(message, signal)
@@ -650,18 +462,5 @@ export class TurnDriver {
   }
 
   /** Bound idle owned agents; active channel turns and live desktop work are never evicted. */
-  async #prune(keepId?: string): Promise<void> {
-    const limit = 32
-    for (const [handle, id] of this.#owned) {
-      if (this.#owned.size <= limit) break
-      if (id === keepId || this.#leases.has(id) || handle.agent.status !== 'idle' || this.#running.has(handle.agent)) continue
-      this.#owned.delete(handle)
-      if (this.#attached.get(id)?.handle === handle) this.#attached.delete(id)
-      try { await handle.dispose?.() } catch (error) { this.logger.warn(`idle agent disposal failed: ${String(error)}`) }
-    }
-    for (const [id, attached] of this.#attached) {
-      if (this.#attached.size <= limit) break
-      if (id !== keepId && !this.#leases.has(id) && !this.#owned.has(attached.handle)) this.#attached.delete(id)
-    }
-  }
+
 }

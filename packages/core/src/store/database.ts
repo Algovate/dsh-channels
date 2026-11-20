@@ -109,12 +109,18 @@ export class StateDatabase {
     }
     let result = tryAcquire()
     if (result !== 'busy') return result
+    // A racing winner may have created the directory but not yet written the
+    // owner file; give it a moment instead of mistaking it for a stale lock.
     let holder: number | undefined
-    try {
-      const raw: unknown = JSON.parse(fs.readFileSync(owner, 'utf8'))
-      holder = raw !== null && typeof raw === 'object' ? (raw as { pid?: number }).pid : undefined
-    } catch {
-      holder = undefined
+    for (let attempt = 0; attempt < 25; attempt += 1) {
+      try {
+        const raw: unknown = JSON.parse(fs.readFileSync(owner, 'utf8'))
+        holder = raw !== null && typeof raw === 'object' ? (raw as { pid?: number }).pid : undefined
+        break
+      } catch {
+        holder = undefined
+        sleepBriefly(5)
+      }
     }
     if (Number.isSafeInteger(holder) && (holder as number) !== process.pid && isAlive(holder as number)) {
       return `another process (pid ${String(holder)}) owns this state root: ${this.#root}`
@@ -258,6 +264,11 @@ export class StateDatabase {
   releaseLock(): void {
     try { fs.rmSync(path.join(this.#root, 'state.lock.d'), { recursive: true, force: true }) } catch { /* Best effort. */ }
   }
+}
+
+/** Synchronous 5ms backoff for the lock-acquisition race. */
+function sleepBriefly(ms: number): void {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms)
 }
 
 function isAlive(pid: number): boolean {
