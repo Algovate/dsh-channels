@@ -1,7 +1,7 @@
 {
   "name": "@derekluo/dsh-channels",
   "version": "0.1.0",
-  "description": "Chat channels for DeepSeek Harness agents: turn driving, interactions, media, gates, durable state and a status card. WeChat and Telegram adapters.",
+  "description": "Chat channels for DeepSeek Harness agents: turn driving, interactions, media, gates, durable state and a status card. WeChat, Telegram and Feishu adapters.",
   "type": "module",
   "license": "MIT",
   "engines": {

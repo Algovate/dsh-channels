@@ -1,15 +1,16 @@
 # dsh-channels
 
-Use a DeepSeek Harness agent through personal WeChat or Telegram. This is a
-DSH plugin (a bundle): it handles sessions, tool approvals and replies. You
-need a DSH host, and the adapter for the chat service you use.
+Use a DeepSeek Harness agent through personal WeChat, Telegram or Feishu. This
+is a DSH plugin (a bundle): it handles sessions, tool approvals and replies.
+You need a DSH host, and the adapter for the chat service you use.
 
 ```sh
 dsh plugin --profile default add @derekluo/dsh-channels@0.1.0 @derekluo/dsh-channels-weixin@0.1.0
 ```
 
-For Telegram, install `@derekluo/dsh-channels-telegram@0.1.0` alongside the core
-instead. Add the adapter's package name to `adapters` in
+For Telegram or Feishu, install `@derekluo/dsh-channels-telegram@0.1.0` or
+`@derekluo/dsh-channels-feishu@0.1.0` alongside the core instead. Add the
+adapter's package name to `adapters` in
 `~/.dsh/channels/config.json`, then configure its credentials and add your
 sender ID to `allowedSenders`. The plugin denies senders by default.
 
