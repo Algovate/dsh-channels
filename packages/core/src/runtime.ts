@@ -16,6 +16,7 @@ import { applyLiveSettings, liveSettings, type LiveSettings, type LiveSettingsPa
 import { InteractionQueue } from './interaction/queue.js'
 import { isApprovalReply } from './interaction/approval.js'
 import { ConversationQueue } from './inbound/queue.js'
+import { canBypassPolicy, groupText } from './inbound/policy.js'
 import { authorizeMessage, createDurableRateLimiter, createRateLimiter, reserveMessage, type GateContext, type GateDecision, type Reservation } from './inbound/gates.js'
 import type { CounterStore } from './store/counters.js'
 import { allowlistFor, type ChannelsConfig } from './config.js'
@@ -391,35 +392,7 @@ export class ChannelsRuntime {
 
   /** Classification only. Adapters still call canReceive before handing off priority text. */
   canBypassInbound(message: InboundMessage): boolean {
-    const group = this.#groupText(message)
-    if (!group.addressed) return false
-    const text = group.text
-    const command = parseCommand(text)
-    return (command !== null && TASK_CONTROLS.has(command.name)) || isApprovalReply(text) || this.#interactions.busy(message)
-  }
-
-  /**
-   * Group addressing: `all` keeps the old behavior; `prefix` requires the
-   * configured prefix; `mention` accepts the prefix or the configured bot
-   * handle. Either is stripped before command parsing or the turn. An active
-   * interaction may be answered without addressing the bot.
-   */
-  #groupText(message: InboundMessage): { addressed: boolean; text: string } {
-    const config = this.#options.config
-    if (!message.group || config.groupTrigger === 'all') return { addressed: true, text: message.text }
-    const raw = message.text.trimStart()
-    const prefix = config.groupPrefix
-    if (raw === prefix || raw.startsWith(`${prefix} `) || raw.startsWith(`${prefix}\n`) || raw.startsWith(`${prefix}\t`)) {
-      return { addressed: true, text: raw.slice(prefix.length).trimStart() }
-    }
-    if (config.groupTrigger === 'mention' && config.groupMention !== '') {
-      const mention = config.groupMention
-      if (raw.toLowerCase().startsWith(mention.toLowerCase())) {
-        const rest = raw.slice(mention.length)
-        if (rest === '' || /^[\s,，:：]/.test(rest)) return { addressed: true, text: rest.trimStart() }
-      }
-    }
-    return { addressed: this.#interactions.busy(message), text: message.text }
+    return canBypassPolicy(message, this.#options.config, this.#interactions.busy(message))
   }
 
   /**
@@ -429,7 +402,7 @@ export class ChannelsRuntime {
    */
   canReceive(message: InboundMessage, hasAttachments = false, legacyAccountId?: string): boolean {
     if (this.#disposed) return false
-    const group = this.#groupText(message)
+    const group = groupText(message, this.#options.config, this.#interactions.busy(message))
     if (!group.addressed) return this.#refuse(message, { allow: false, reason: 'not-addressed' }).allow
     const context = this.gateContext()
     const scoped = this.#options.config.allowlistPerAccount
@@ -479,7 +452,7 @@ export class ChannelsRuntime {
   /** Run one inbound message through the gates and, if allowed, through a turn. */
   dispatch(message: InboundMessage): GateDecision {
     if (this.#disposed) return { allow: false, reason: 'not-logged-in' }
-    const group = this.#groupText(message)
+    const group = groupText(message, this.#options.config, this.#interactions.busy(message))
     if (!group.addressed) return this.#refuse(message, { allow: false, reason: 'not-addressed' })
     if (group.text !== message.text) message.text = group.text
     const context = this.gateContext()
