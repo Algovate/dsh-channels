@@ -16,6 +16,18 @@
 
 新增媒体嗅探与上传类型回归测试，完整 `npm test` **501 项通过**。
 
+## 2026-11-20 语音/视频真机验证
+
+继续验证语音与视频，暴露并修复了资源下载类型错误：`GET /im/v1/messages/:id/resources/:key` 的 `type` 只接受 `image` 或 `file`，音频和视频必须用 `file`；此前传 `audio`/`video` 会返回 HTTP 400。修复后部署提交 `4c0bb12`（发布目录 `~/dsh-plugin-pkgs/dsh-channels/4c0bb12/`，飞书归档 SHA-256 `fb62992b24c5c3d9c6c94bf70381c256ede5952bbf4aa99f02da1df1f1b474df`，宿主进程 `74717`）。
+
+真机结果：
+
+- 入站语音：`voice.ogg`（4847 字节，嗅探 `audio/ogg`）正常落盘并进入回合；本机无语音转写工具，模型如实说明拿不到逐字内容（适配器按设计只保存音频，不内置转写）。
+- 入站视频：`video.mp4`（8718276 字节，嗅探 `video/mp4`）正常落盘；模型用 ffmpeg 抽帧描述内容，并把九宫格截图作为图片回传到原聊天（媒体消息 `om_x100b60cda4faccb4b4c6e89ed549b1a`），顺带覆盖了「视频入站 → 图片出站」的组合链路。
+- 出站语音/视频（适配器层）：opus 语音与 mp4 视频均上传并发送成功（视频不需要封面，`image_key` 留空可用）。
+
+至此文本、图片、文件、语音、视频的入站与出站均已在真实飞书应用上验证。完整 `npm test` **502 项通过**。
+
 ## 2026-11-20 飞书适配器部署到 mini 并完成宿主全链路验证
 
 在真机协议验证之后，把提交 `d4a662a` 的 core、微信、飞书三个包部署到 mini 的 Web profile，与既有微信通道并行运行。发布目录为 mini 的 `~/dsh-plugin-pkgs/dsh-channels/d4a662a/`，含 `release.json`、`deployment.json` 和 `backup-20261120T005207Z/`（profile 文件与通道配置备份）。
