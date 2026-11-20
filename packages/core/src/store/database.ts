@@ -79,6 +79,7 @@ export class StateDatabase {
       this.#db.exec('PRAGMA busy_timeout = 5000')
       this.#db.exec(SCHEMA)
       this.#importLegacy()
+      this.#secureFiles()
     } catch (error) {
       this.#error = `state database unavailable; refusing new work: ${String((error as Error)?.message ?? error)}`
       this.#warn(this.#error)
@@ -202,6 +203,13 @@ export class StateDatabase {
     fs.unlinkSync(source)
   }
 
+  /** The database holds chat text: keep it private, including WAL sidecars. */
+  #secureFiles(): void {
+    for (const suffix of ['', '-wal', '-shm']) {
+      try { fs.chmodSync(`${this.#file}${suffix}`, 0o600) } catch { /* Not created yet. */ }
+    }
+  }
+
   #transaction(work: () => void): void {
     const db = this.#db!
     db.exec('BEGIN IMMEDIATE')
@@ -231,6 +239,7 @@ export class StateDatabase {
         const statement = this.#db!.prepare('INSERT INTO sections (name, json, updated_at) VALUES (?, ?, ?) ON CONFLICT(name) DO UPDATE SET json = excluded.json, updated_at = excluded.updated_at')
         for (const [name, value] of Object.entries(sections)) statement.run(name, JSON.stringify(value), Date.now())
       })
+      this.#secureFiles()
       return true
     } catch (error) {
       this.#warn(`state write failed: ${String((error as Error)?.message ?? error)}`)

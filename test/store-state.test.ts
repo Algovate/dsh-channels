@@ -102,3 +102,15 @@ test('a live lock owner blocks the root and a dead one is taken over', () => {
     fs.rmSync(stale, { recursive: true, force: true })
   }
 })
+
+test('the database and its WAL sidecars stay private', () => {
+  const root = temp()
+  try {
+    stateFile(root).write('lines', { chat: 1 })
+    for (const name of ['state.db', 'state.db-wal', 'state.db-shm']) {
+      const file = path.join(root, name)
+      if (!fs.existsSync(file)) continue
+      assert.equal(fs.statSync(file).mode & 0o777, 0o600, `${name} must be 0600`)
+    }
+  } finally { fs.rmSync(root, { recursive: true, force: true }) }
+})
