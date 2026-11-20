@@ -96,11 +96,14 @@ test('image, file, audio and video become attachment descriptors', () => {
     message: { message_type: 'audio', content: JSON.stringify({ file_key: 'a_k' }) },
   }), ACCOUNT)
   assert.equal(audio?.mediaItems?.[0]?.kind, 'voice')
+  // The resources endpoint only accepts `image` or `file`; audio/video use file.
+  assert.equal(audio?.mediaItems?.[0]?.type, 'file')
 
   const video = normalizeInbound(messageEvent({
     message: { message_type: 'video', content: JSON.stringify({ file_key: 'v_k', file_name: 'clip.mp4' }) },
   }), ACCOUNT)
   assert.equal(video?.mediaItems?.[0]?.kind, 'video')
+  assert.equal(video?.mediaItems?.[0]?.type, 'file')
 })
 
 test('a card button press becomes the text value it represents', () => {

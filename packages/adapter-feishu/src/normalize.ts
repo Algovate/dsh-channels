@@ -137,14 +137,14 @@ function parseContent(messageType: string, raw: string, messageId: string, menti
       return { text: '', media }
     case 'audio':
       if (typeof content['file_key'] === 'string') {
-        media.push({ kind: 'voice', fileKey: content['file_key'], messageId, type: 'audio', mime: 'audio/ogg' })
+        media.push({ kind: 'voice', fileKey: content['file_key'], messageId, type: 'file', mime: 'audio/ogg' })
       }
       return { text: '', media }
     case 'video':
     case 'media':
       if (typeof content['file_key'] === 'string') {
         media.push({
-          kind: 'video', fileKey: content['file_key'], messageId, type: 'video',
+          kind: 'video', fileKey: content['file_key'], messageId, type: 'file',
           ...(typeof content['file_name'] === 'string' ? { fileName: content['file_name'] } : {}),
           mime: 'video/mp4',
         })
