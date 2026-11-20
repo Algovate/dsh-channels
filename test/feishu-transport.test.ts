@@ -185,3 +185,28 @@ test('a download aborts as soon as the stream exceeds the byte cap', async (t) =
   // The cap path already cancelled the stream, which closes its controller.
   if (stream !== undefined) try { stream.close() } catch { /* already closed */ }
 })
+
+test('file upload maps extensions to the allowed file_type enum', async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'feishu-upload-type-'))
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }))
+  const notes = path.join(dir, 'notes.txt')
+  const pdf = path.join(dir, 'doc.pdf')
+  fs.writeFileSync(notes, 'hello')
+  fs.writeFileSync(pdf, '%PDF-1.4')
+  const types: string[] = []
+  const transport = new FeishuTransport({
+    appId: APP_ID, appSecret: SECRET, logger: silent,
+    fetchImpl: async (url, init) => {
+      if (url.endsWith('/tenant_access_token/internal')) {
+        return { ok: true, status: 200, body: null, json: async () => ({ code: 0, tenant_access_token: 't', expire: 7200 }) }
+      }
+      const form = init?.['body'] as FormData
+      types.push(String(form.get('file_type')))
+      return { ok: true, status: 200, body: null, json: async () => ({ code: 0, data: { file_key: 'fk' } }) }
+    },
+  })
+  assert.equal(await transport.uploadFile(notes, 'file'), 'fk')
+  assert.equal(await transport.uploadFile(pdf, 'file'), 'fk')
+  // An arbitrary text extension is not a valid file_type and must become stream.
+  assert.deepEqual(types, ['stream', 'pdf'])
+})

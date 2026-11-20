@@ -61,9 +61,15 @@ interface ConnectConfig {
 
 interface TokenInfo { token: string; expiresAt: number }
 
+/** The `file_type` enum the upload endpoint accepts; anything else is `stream`. */
+function fileTypeFor(filePath: string): string {
+  const extension = path.extname(filePath).slice(1).toLowerCase()
+  const allowed = new Set(['opus', 'mp4', 'pdf', 'doc', 'docx', 'xls', 'xlsx', 'ppt', 'pptx'])
+  return allowed.has(extension) ? extension : 'stream'
+}
+
 /** Build the interactive-card content for one text body plus native actions. */
-function cardContent(text: string, actions?: readonly OutgoingAction[]): string {
-  const elements: Array<Record<string, unknown>> = [
+function cardContent(text: string, actions?: readonly OutgoingAction[]): string {  const elements: Array<Record<string, unknown>> = [
     { tag: 'div', text: { tag: 'lark_md', content: text } },
   ]
   if (actions !== undefined && actions.length > 0) {
@@ -246,7 +252,7 @@ export class FeishuTransport {
 
   /** Upload one local file/video/audio and return its file_key. */
   async uploadFile(filePath: string, kind: 'file' | 'video' | 'voice', durationMs?: number): Promise<string> {
-    const fileType = kind === 'video' ? 'mp4' : kind === 'voice' ? 'opus' : (path.extname(filePath).slice(1) || 'bin')
+    const fileType = kind === 'video' ? 'mp4' : kind === 'voice' ? 'opus' : fileTypeFor(filePath)
     const form = new FormData()
     form.set('file_type', fileType)
     form.set('file_name', path.basename(filePath))
