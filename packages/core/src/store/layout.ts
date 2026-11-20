@@ -52,27 +52,31 @@ export const STATE_LAYOUT: Readonly<Record<string, LayoutEntry>> = Object.freeze
     reason: '身份变更须原子保存成功后确认；旧 counters 的线号按需兼容读取',
   },
   stateLock: {
-    kind: 'file',
-    relative: 'state.lock',
+    kind: 'dir',
+    relative: 'state.lock.d',
     label: '单写者锁',
     store: STORE.FILE,
-    reason: '一个状态根只允许一个进程写；持有者 pid 存活时拒绝读写，进程退出后可接管',
-  },
-  stateClaim: {
-    kind: 'file', relative: 'state.claim', label: '状态锁领取互斥', store: STORE.FILE,
-    reason: '独占创建以串行检查和领取 state.lock；中断遗留时拒绝启动，核对进程后人工清理',
+    reason: '原子 mkdir 领取；持有者 pid 存活时拒绝读写，进程退出后可接管',
   },
   state: {
     kind: 'file',
-    relative: 'state.json',
-    label: '统一状态文档',
+    relative: 'state.db',
+    label: 'SQLite 状态库',
     store: STORE.FILE,
-    reason: 'v2 权威快照，原子替换；旧状态一次性迁移到 legacy-state 后不再双写',
+    reason: 'sections 表按事务提交；旧 JSON 状态首次打开时导入并归档到 legacy-state',
+  },
+  stateWal: {
+    kind: 'file', relative: 'state.db-wal', label: 'SQLite WAL', store: STORE.FILE,
+    reason: 'SQLite 预写日志，运行时存在；关闭后由检查点回收',
+  },
+  stateShm: {
+    kind: 'file', relative: 'state.db-shm', label: 'SQLite 共享内存', store: STORE.FILE,
+    reason: 'SQLite WAL 的共享索引，运行时存在',
   },
   legacyState: {
     kind: 'dir', relative: 'legacy-state', label: '旧状态迁移备份', store: STORE.FILE,
-    reason: '统一状态成功提交后保存旧文件原始字节；不再参与运行时读取或写入',
-    contents: '*.json.bak · state.v1.json.bak',
+    reason: 'SQLite 首次导入后保存旧文件原始字节；不再参与运行时读取或写入',
+    contents: '*.json.bak',
   },
   inbox: {
     kind: 'file',

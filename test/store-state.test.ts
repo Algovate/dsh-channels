@@ -15,7 +15,7 @@ function temp(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'channels-state-'))
 }
 
-test('the edge state document is canonical and no legacy mirrors are created', () => {
+test('SQLite is the canonical medium and every store shares it', () => {
   const root = temp()
   try {
     const inbox = new Inbox(root, () => {})
@@ -24,73 +24,81 @@ test('the edge state document is canonical and no legacy mirrors are created', (
     assert.equal(tasks.save({ id: entry.id, target: inbound(), senderId: 'sender', summary: 'kept', startedAt: 1, execution: 'running', delivery: 'none' }), true)
     assert.equal(new SessionLines(root, () => {}).saveRouting('chat', { project: 'default', sessions: { default: { current: 2, max: 2 } } }), true)
     assert.equal(new Outbox({ stateRoot: root }).enqueue(inbound(), ['later'])?.outgoing.text, 'later')
-    assert.ok(fs.existsSync(path.join(root, 'state.json')))
+    assert.ok(fs.existsSync(path.join(root, 'state.db')))
+    assert.equal(fs.existsSync(path.join(root, 'state.json')), false)
     assert.equal(fs.existsSync(path.join(root, 'inbox.json')), false)
 
-    // A fresh process sees the canonical document even if a mirror is stale.
+    // A reopen sees the same rows without any JSON mirror.
     resetStateFile(root)
     assert.equal(new Inbox(root, () => {}).list()[0]?.message.text, 'kept')
     assert.equal(new Tasks(root, () => {}).latest(inbound())?.summary, 'kept')
+    assert.equal(fs.existsSync(path.join(root, 'inbox.json')), false)
   } finally { fs.rmSync(root, { recursive: true, force: true }) }
 })
 
-test('a newer legacy file cannot overwrite canonical state after migration', () => {
+test('a stale legacy file cannot overwrite a live database', () => {
   const root = temp()
   try {
     const first = new Inbox(root, () => {})
-    const entry = first.add(inbound({ text: 'first' }), 'session')
-    const legacy = path.join(root, 'inbox.json')
-    fs.writeFileSync(legacy, JSON.stringify([{ ...entry, message: { ...entry.message, text: 'edited' } }]))
-    const future = Date.now() + 10_000
-    fs.utimesSync(legacy, future, future)
+    first.add(inbound({ text: 'first' }), 'session')
+    // Writing the old mirror afterwards must not resurrect it on reopen.
+    fs.writeFileSync(path.join(root, 'inbox.json'), JSON.stringify([{ id: 'x', message: inbound({ text: 'edited' }), sessionId: 's' }]))
     resetStateFile(root)
     assert.equal(new Inbox(root, () => {}).list()[0]?.message.text, 'first')
-    assert.equal(JSON.parse(fs.readFileSync(path.join(root, 'state.json'), 'utf8')).sections.inbox[0].message.text, 'first')
-    assert.ok(fs.existsSync(path.join(root, 'legacy-state/inbox.json.bak')))
+    // The stale file is archived as a leftover, never imported over live rows.
+    assert.equal(fs.existsSync(path.join(root, 'inbox.json')), false)
+    assert.equal(fs.readFileSync(path.join(root, 'legacy-state/inbox.json.bak'), 'utf8').includes('edited'), true)
   } finally { fs.rmSync(root, { recursive: true, force: true }) }
 })
 
-test('a corrupt canonical document fails closed instead of falling back to mirrors', () => {
+test('a corrupt database fails closed instead of recreating state', () => {
   const root = temp()
   try {
     new Inbox(root, () => {}).add(inbound(), 'session')
-    fs.writeFileSync(path.join(root, 'state.json'), '{')
-    fs.writeFileSync(path.join(root, 'inbox.json'), '[]')
     resetStateFile(root)
-    const inbox = new Inbox(root, () => {})
-    assert.throws(() => inbox.add(inbound(), 'session'), /persist/)
-    assert.ok(fs.existsSync(path.join(root, 'inbox.json')), 'mirrors are left for repair')
+    fs.writeFileSync(path.join(root, 'state.db'), 'not a database')
+    const warnings: string[] = []
+    const inbox = new Inbox(root, (line) => warnings.push(line))
+    assert.ok(warnings.some((line) => /state database unavailable/.test(line)))
+    assert.throws(() => inbox.add(inbound(), 'session'), /persisted|DSH_INBOUND_RETRY/)
+    assert.equal(fs.existsSync(path.join(root, 'inbox.json')), false)
   } finally { fs.rmSync(root, { recursive: true, force: true }) }
 })
 
-test('the canonical document is a single atomically replaced object', () => {
-  const root = temp()
-  try {
-    new Inbox(root, () => {}).add(inbound(), 'session')
-    new Tasks(root, () => {}).save({ id: 'task', target: inbound(), senderId: 'sender', summary: 'x', startedAt: 1, execution: 'running', delivery: 'none' })
-    const saved = JSON.parse(fs.readFileSync(path.join(root, 'state.json'), 'utf8')) as { version: number; sections: Record<string, unknown> }
-    assert.equal(saved.version, 2)
-    assert.deepEqual(Object.keys(saved.sections).sort(), ['inbox', 'tasks'])
-    assert.ok(stateFile(root).read('inbox'))
-  } finally { fs.rmSync(root, { recursive: true, force: true }) }
-})
-
-test('a failed multi-section commit changes neither section on disk or in memory', () => {
+test('a failed multi-section commit rolls back both sections', () => {
   const root = temp()
   try {
     const store = stateFile(root)
     store.write('counters', { old: 1 })
     store.write('lines', { old: 1 })
-    const commit = store.writeMany.bind(store)
     store.failNextWrite('lines')
-    assert.equal(commit({ counters: { new: 2 }, lines: { new: 2 } }), false)
+    assert.equal(store.writeMany({ counters: { new: 2 }, lines: { new: 2 } }), false)
     assert.deepEqual(store.read('counters'), { old: 1 })
     assert.deepEqual(store.read('lines'), { old: 1 })
     resetStateFile(root)
     assert.deepEqual(stateFile(root).read('counters'), { old: 1 })
-    assert.equal(commit({ counters: { new: 2 }, lines: { new: 2 } }), true)
+    assert.equal(stateFile(root).writeMany({ counters: { new: 2 }, lines: { new: 2 } }), true)
     resetStateFile(root)
     assert.deepEqual(stateFile(root).read('counters'), { new: 2 })
     assert.deepEqual(stateFile(root).read('lines'), { new: 2 })
   } finally { fs.rmSync(root, { recursive: true, force: true }) }
+})
+
+test('a live lock owner blocks the root and a dead one is taken over', () => {
+  const busy = temp()
+  const stale = temp()
+  try {
+    fs.mkdirSync(path.join(busy, 'state.lock.d'))
+    fs.writeFileSync(path.join(busy, 'state.lock.d/owner.json'), JSON.stringify({ pid: 1, startedAt: 1 }))
+    assert.throws(() => stateFile(busy).read('lines'), /another process \(pid 1\) owns this state root/)
+    resetStateFile(busy)
+
+    fs.mkdirSync(path.join(stale, 'state.lock.d'))
+    fs.writeFileSync(path.join(stale, 'state.lock.d/owner.json'), JSON.stringify({ pid: 999_999, startedAt: 1 }))
+    assert.deepEqual(stateFile(stale).read('lines'), undefined)
+    assert.equal(stateFile(stale).write('lines', { chat: 1 }), true)
+  } finally {
+    fs.rmSync(busy, { recursive: true, force: true })
+    fs.rmSync(stale, { recursive: true, force: true })
+  }
 })

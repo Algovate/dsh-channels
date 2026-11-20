@@ -1,4 +1,4 @@
-import { readSectionJson, writeSectionJson } from './state-helper.js'
+import { corruptSectionJson, readRawSectionJson, readSectionJson, writeSectionJson } from './state-helper.js'
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import os from 'node:os'
@@ -86,11 +86,11 @@ test('corrupt attribution blocks native activation and preserves the state file'
   const f = fixture()
   try {
     f.send('/schedule after 1 检查部署'); await until(() => f.creates.length === 1); const id = f.binding().sessionId
-    fs.writeFileSync(path.join(f.root, 'state.json'), '{'); resetStateFile(f.root); await f.restart()
+    corruptSectionJson(f.root, 'schedules', '{'); await f.restart()
     const hook = f.hooks.get('schedule/resolve-agent')!
     await assert.rejects(hook(id, async () => ({ secret: true })), /不可读/)
     f.send('/schedules'); await until(() => f.text().includes('不可读'))
-    assert.equal(fs.readFileSync(path.join(f.root, 'state.json'), 'utf8'), '{')
+    assert.equal(readRawSectionJson(f.root, 'schedules'), '{')
   } finally { await f.close() }
 })
 

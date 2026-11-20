@@ -16,23 +16,26 @@ if (!fs.existsSync(path.join(dist, 'inventory.js'))) {
 }
 const { stateInventory, summarizeInventory, formatBytes } = await import(path.join(dist, 'inventory.js'))
 const { stateRoot } = await import(path.join(dist, 'root.js'))
-const { stateFile, stateDocumentValid } = await import(path.join(dist, 'state.js'))
+const { stateFile } = await import(path.join(dist, 'state.js'))
+const { DatabaseSync } = await import('node:sqlite')
 
 const root = stateRoot()
 let stateProblem = false
 if (process.argv.includes('--migrate')) {
   try {
     stateFile(root, (line) => console.error(line)).read('inbox')
-    process.stdout.write('migration: canonical state v2 ready; legacy inputs archived\n')
+    process.stdout.write('migration: SQLite state ready; legacy inputs archived\n')
   } catch (error) { console.error(`migration failed: ${error.message}`); stateProblem = true }
 }
-const canonical = path.join(root, 'state.json')
+const canonical = path.join(root, 'state.db')
 if (fs.existsSync(canonical)) {
+  let db
   try {
-    const saved = JSON.parse(fs.readFileSync(canonical, 'utf8'))
-    if (!stateDocumentValid(saved)) throw new Error('invalid version, envelope or state section')
-    process.stdout.write(`canonical state: v${saved.version}, ${Object.keys(saved.sections).length} sections\n`)
+    db = new DatabaseSync(canonical, { readOnly: true })
+    const row = db.prepare('SELECT COUNT(*) AS count FROM sections').get()
+    process.stdout.write(`canonical state: SQLite, ${Number(row?.count ?? 0)} sections\n`)
   } catch (error) { console.error(`canonical state invalid: ${error.message}`); stateProblem = true }
+  finally { try { db?.close() } catch { /* already closed */ } }
 } else process.stdout.write('canonical state absent; use --migrate to import legacy state\n')
 const inventory = stateInventory(root)
 const wantsTable = process.argv.includes('--state')

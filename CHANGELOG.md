@@ -2,6 +2,7 @@
 
 ## 0.1.0 — 未发布
 
+- 重构 Phase 2：状态持久化从自研 JSON 文档（原子写 + v1/v2 迁移 + legacy 镜像 + 双文件锁）换成 SQLite（`state.db` 的 `sections` 表）。多段提交用事务；首次打开一次性导入旧 `state.json` 与旧段文件并归档到 `legacy-state/`；单写者锁改为原子 mkdir 的 `state.lock.d/`。`doctor --migrate` 与 `--state` 同步更新。
 - 重构 Phase 1：历史计划/评审/部署日记归档到 `docs/notes/`，`STATUS.md` 只保留当前记录；新增 `@derekluo/dsh-channels/adapter-kit`（`safeFileSegment`/`extensionOfName`/`defaultExtensionFor`）供三个适配器共用，适配器对核心包改为必需运行时依赖。
 - 重构：ASR 桥接脚本从两个适配器各自一份收敛为核心包 `bin/asr-transcribe.py` 一份，微信与飞书共用；环境变量统一为 `DSH_ASR_*`（兼容旧 `DSH_WEIXIN_ASR_*`/`DSH_FEISHU_ASR_*`），两个适配器都支持 `asrModel`/`asrDevice`/`asrComputeType`。飞书 transport 的发送路径合并为单入口，事件归一化删除不可达分支，重连预算改为降速重试，测试共享 `test/feishu-mocks.ts`。
 - 飞书适配器支持可选语音转写：随包提供 `bin/asr-transcribe.py` 桥接脚本，复用微信的 Python 虚拟环境与 whisper 模型（`asrCommand`/`asrModelDir`/`asrModel`/`asrDevice`/`asrComputeType`/`asrLanguage`/`asrTimeoutMs`，`DSH_FEISHU_ASR_*` 与 `DSH_WEIXIN_ASR_*` 均可用）；转写失败只记录原因，音频照常交付。

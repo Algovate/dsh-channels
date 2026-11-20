@@ -129,9 +129,10 @@ test('a queued recovered reply is not duplicated while its platform delivery is 
 test('recovery ownership moves atomically to outbox before a platform send can start', async () => {
   const f = fixture()
   f.adapter.send = async () => {
-    const saved = JSON.parse(fs.readFileSync(path.join(f.root, 'state.json'), 'utf8'))
-    assert.equal(saved.sections.tasks[0].recovery, undefined)
-    assert.equal(saved.sections.outbox.items[0].outgoing.text, 'handoff result')
+    const tasks = stateFile(f.root).read<Array<{ recovery?: unknown }>>('tasks') ?? []
+    const outbox = stateFile(f.root).read<{ items: Array<{ outgoing: { text: string } }> }>('outbox')
+    assert.equal(tasks[0]?.recovery, undefined)
+    assert.equal(outbox?.items[0]?.outgoing.text, 'handoff result')
     return { ok: true, messageId: 'accepted' }
   }
   try {
@@ -266,10 +267,11 @@ test('final outbox removal and task uncertainty are committed together', async (
   f.adapter.send = async () => ({ ok: true, unconfirmed: true })
   try {
     await f.runtime.send(inbound(), { kind: 'reply', text: 'unconfirmed result' }, 'task')
-    const saved = JSON.parse(fs.readFileSync(path.join(f.root, 'state.json'), 'utf8'))
-    assert.equal(saved.sections.outbox.items.length, 0)
-    assert.equal(saved.sections.tasks[0].unconfirmed, true)
-    assert.equal(saved.sections.tasks[0].delivery, 'unknown')
+    const outbox = stateFile(f.root).read<{ items: unknown[] }>('outbox')
+    const tasks = stateFile(f.root).read<Array<{ unconfirmed?: boolean; delivery: string }>>('tasks') ?? []
+    assert.equal(outbox?.items.length, 0)
+    assert.equal(tasks[0]?.unconfirmed, true)
+    assert.equal(tasks[0]?.delivery, 'unknown')
   } finally { await f.close() }
 })
 
@@ -304,7 +306,7 @@ test('recovery preserves file overflow across restart and never reports complete
     f.turn('input', 'bulk recovery', false)
     f.events.push({ seq: 3, type: 'deliverables/presented', data: { turn: 1, files: files.map((file) => ({ path: file })) } })
     await f.runtime.resumePending()
-    const saved = JSON.parse(fs.readFileSync(path.join(f.root, 'state.json'), 'utf8')).sections.tasks[0].recovery.cursor
+    const saved = (stateFile(f.root).read<Array<{ recovery: { cursor: { deliverables: unknown[]; deliverablesIncomplete?: boolean } } }>>('tasks') ?? [])[0]!.recovery.cursor
     assert.equal(saved.deliverables.length, 100)
     assert.equal(saved.deliverablesIncomplete, true)
     await f.runtime.dispose()
@@ -314,9 +316,9 @@ test('recovery preserves file overflow across restart and never reports complete
     const adapter = createFakeAdapter()
     restarted.register(adapter)
     await restarted.resumePending()
-    const task = JSON.parse(fs.readFileSync(path.join(f.root, 'state.json'), 'utf8')).sections.tasks[0]
+    const task = (stateFile(f.root).read<Array<{ artifacts?: unknown[]; artifactsIncomplete?: boolean; filesUnsent?: boolean; delivery?: string }>>('tasks') ?? [])[0]!
     assert.equal(adapter.sent.flatMap((item) => item.outgoing.media ?? []).length, 100)
-    assert.equal(task.artifacts.length, 100)
+    assert.equal(task.artifacts!.length, 100)
     assert.equal(task.artifactsIncomplete, true)
     assert.equal(task.filesUnsent, true)
     assert.equal(task.delivery, 'failed')

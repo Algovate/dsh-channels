@@ -61,7 +61,7 @@ test('skipped output files prevent an all-sent task state and notify the chat', 
   const adapter = createFakeAdapter(); runtime.register(adapter)
   try {
     runtime.dispatch(inbound())
-    await until(() => fs.existsSync(path.join(root, 'state.json')) && JSON.parse(readSectionJson(root, 'tasks'))?.some((t: { delivery: string }) => t.delivery !== 'none' && t.delivery !== 'sending') === true)
+    await until(() => JSON.parse(readSectionJson(root, 'tasks'))?.some((t: { delivery: string }) => t.delivery !== 'none' && t.delivery !== 'sending') === true)
     const task = JSON.parse(readSectionJson(root, 'tasks'))[0]
     assert.equal(task.filesUnsent, true)
     assert.notEqual(task.delivery, 'sent')

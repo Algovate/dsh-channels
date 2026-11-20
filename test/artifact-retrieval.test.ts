@@ -150,7 +150,7 @@ test('new task artifacts are persisted before delivery and can be recovered afte
   const first = open(); first.register(createFakeAdapter())
   try {
     first.dispatch(inbound({ text: 'create image' }))
-    await until(() => fs.existsSync(path.join(root, 'state.json')) && JSON.parse(readSectionJson(root, 'tasks'))?.[0]?.delivery === 'sent')
+    await until(() => JSON.parse(readSectionJson(root, 'tasks'))?.[0]?.delivery === 'sent')
     const task = JSON.parse(readSectionJson(root, 'tasks'))[0]
     assert.deepEqual(task.artifacts, ['new.png'])
     assert.ok(task.outputDirectory)

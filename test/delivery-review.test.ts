@@ -94,7 +94,7 @@ test('a queued ordinary message survives restart, while a started turn is not re
   await delay(10)
   first.dispatch(inbound({ text: 'queued', platformMessageId: '2' }))
   await first.dispose()
-  assert.ok(fs.existsSync(path.join(root, 'state.json')))
+  assert.ok(fs.existsSync(path.join(root, 'state.db')))
   const secondHost = createHarness()
   const second = open(secondHost)
   second.register(createFakeAdapter())

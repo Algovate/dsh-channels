@@ -21,7 +21,7 @@
 
 - 任务卡原地更新；Telegram 按钮和任务卡同时工作。
 - 计划创建、暂停/恢复/删除和结果回传。
-- 重启后收件箱恢复；带精确输入绑定的任务恢复原回合结果，不重新执行；缺少绑定或无法确认结果时保持未知，`state.json` 完整。
+- 重启后收件箱恢复；带精确输入绑定的任务恢复原回合结果，不重新执行；缺少绑定或无法确认结果时保持未知，状态库完整。
 - 撤销白名单后旧排队消息不再执行。
 
 ## 1. 测试环境
@@ -63,7 +63,7 @@ chmod 700 "$state"
 chmod 600 "$state/config.json" 2>/dev/null || true
 ```
 
-不要把含 token、聊天正文或用户发送者 ID 的 `config.json`、`state.json`、日志提交到版本库。
+不要把含 token、聊天正文或用户发送者 ID 的 `config.json`、`state.db`、日志提交到版本库。
 
 ### 2.3 配置
 
@@ -112,15 +112,15 @@ tail -f "$state/logs/channels-$(date +%F).log"
 ```bash
 state="${DSH_CHANNELS_STATE_DIR:-$HOME/.dsh/channels}"
 python3 - <<'PY'
-import json, os
-path = os.path.join(os.environ.get('DSH_CHANNELS_STATE_DIR', os.path.expanduser('~/.dsh/channels')), 'state.json')
-data = json.load(open(path))
-sections = data.get('sections', {})
-print('inbox', len(sections.get('inbox', [])))
-print('tasks', len(sections.get('tasks', [])))
-print('outbox', len(sections.get('outbox', {}).get('items', [])))
-print('pairings', len(sections.get('pairings', [])))
-print('lines', sections.get('lines', {}))
+import json, os, sqlite3
+path = os.path.join(os.environ.get('DSH_CHANNELS_STATE_DIR', os.path.expanduser('~/.dsh/channels')), 'state.db')
+db = sqlite3.connect(f'file:{path}?mode=ro', uri=True)
+rows = {name: json.loads(raw) for name, raw in db.execute('SELECT name, json FROM sections')}
+print('inbox', len(rows.get('inbox', [])))
+print('tasks', len(rows.get('tasks', [])))
+print('outbox', len(rows.get('outbox', {}).get('items', [])))
+print('pairings', len(rows.get('pairings', [])))
+print('lines', rows.get('lines', {}))
 PY
 ```
 
@@ -146,7 +146,7 @@ DSH_CHANNELS_STATE_DIR="$state" npm run doctor
 
 - stranger 收到一次“消息已收到，但发送者尚未获准……”；第二条不再重复提示。
 - 桌面状态卡片出现“待批准的发送者”，显示通道、账号、发送者 ID 和消息预览。
-- `state.json` 的 `pairings` 有 1 条；`inbox` 没有该消息。
+- 状态库的 `pairings` 有 1 条；`inbox` 没有该消息。
 - 日志出现 `pairing requested from …`，没有模型回合。
 
 **A2 批准后生效**
@@ -277,7 +277,7 @@ DSH_CHANNELS_STATE_DIR="$state" npm run doctor
 
 - 聊天收到图片/文件；微信接口返回消息 ID。
 - `/files` 列出产物；`/resend` 能重发。
-- `state.json` 的 `tasks` 有产物索引和实际工作目录。
+- 状态库的 `tasks` 段有产物索引和实际工作目录。
 - 聊天里没有“把文件复制到输出目录”的隐藏指令。
 
 **F2 工作目录外拒绝**
@@ -328,8 +328,8 @@ DSH_CHANNELS_STATE_DIR="$state" npm run doctor
 预期：
 
 - 未开始消息从 `sections.inbox` 恢复；已开始回合不重跑。带恢复绑定的任务只读匹配原会话日志，回传确认的结果；未结束时保存增量游标继续等待，缺少绑定或日志不可用时保持未知。
-- `state.json` 存在、版本为 2 且各段有效。迁移旧部署时，旧文件原始字节保存在 `legacy-state/`；全新安装无需这些备份。运行时不再生成或更新 `inbox.json`/`tasks.json` 等旧镜像。
-- `state.json` 权限 0600；目录 0700。
+- `state.db` 存在且 `sections` 行可读、各段通过 schema 校验。迁移旧部署时，旧文件原始字节保存在 `legacy-state/`；全新安装无需这些备份。运行时不再生成旧镜像。
+- `state.db` 权限 0600；目录 0700。
 - `doctor` 退出码 0（测试目录无未登记文件）。
 
 ### J. 安全与清理（P0）
@@ -360,14 +360,14 @@ DSH_CHANNELS_STATE_DIR="$state" npm run doctor
 | G1 | 超时晚回传 |  | 时间线截图 |  |
 | G2 | 超时后取消 |  | 截图 / `/status` |  |
 | H1 | 计划执行与回传 |  | 原生记录 / 截图 |  |
-| I1 | 重启恢复 |  | `state.json` 快照 |  |
+| I1 | 重启恢复 |  | 状态库快照 |  |
 | J1 | 未知附件不下载 |  | `media/inbound` 对比 |  |
 
 **证据要求**
 
 - 手机截图保留时间、发送者、消息 ID（脱敏后）。
 - 日志只截取相关行，不贴 token、完整聊天正文或无关用户 ID。
-- 状态快照只保留 `state.json` 的计数/键，不提交正文。
+- 状态快照只保留状态库各段的计数/键，不提交正文。
 - 失败时记录：时间、命令/消息、预期、实际、日志行、是否可重复。
 
 ## 5. 清理
@@ -388,7 +388,7 @@ mv "$state" "$state.smoke.$(date +%Y%m%d-%H%M%S)"
 
 | 现象 | 先看 |
 |---|---|
-| 未知发送者没有提示 | `logs/` 是否有 `refused`；`canReceive` 是否被适配器调用；`state.json` 的 `sections.pairings` 段 |
+| 未知发送者没有提示 | `logs/` 是否有 `refused`；`canReceive` 是否被适配器调用；状态库的 `pairings` 段 |
 | 状态卡片不显示待批准 | `/channels/status` 是否有 `pairings`；浏览器是否刷新；同源/鉴权 |
 | 批准后仍被拒 | `config.json` 的全局/账号覆盖是否写到了正确层级；是否重启/热更新 |
 | Telegram 按钮无反应 | bot 是否收到 `callback_query`；日志是否有 `answerCallbackQuery`；按钮 value 是否超过 64 字节 |
@@ -396,7 +396,7 @@ mv "$state" "$state.smoke.$(date +%Y%m%d-%H%M%S)"
 | 群聊没反应 | `groupTrigger` 是否为 `prefix`；消息是否以 `groupPrefix` 开头；bot 是否能看到群消息 |
 | `present` 文件没到 | 文件是否在工作目录内；`present` 是否成功；`logs/` 是否有附件未发送 |
 | 超时没有晚回传 | `session/event` 是否到达；任务是否仍在运行；`/status` 的执行状态 |
-| 重复执行 | `state.json` 的 `sections.inbox` 段与日志接收流水；平台重投；`DSH_INBOUND_RETRY` |
+| 重复执行 | 状态库的 `inbox` 段与日志接收流水；平台重投；`DSH_INBOUND_RETRY` |
 
 ---
 

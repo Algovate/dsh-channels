@@ -32,9 +32,9 @@
 - 新增 `@derekluo/dsh-channels/adapter-kit`：`safeFileSegment`、`extensionOfName`、`defaultExtensionFor`，三个适配器共用；适配器对 core 的 peer 依赖改为必需。
 - 验收：全量测试通过（含新增 kit 测试）；三个包逐文件校验一致；部署后双通道启动无告警。
 
-### Phase 2
+### Phase 2（已完成）
 
-- `store/` 换 SQLite：`inbox`、`tasks`、`outbox`、`lines`、`schedules`、`counters`、`pairings` 表；一次性导入旧 `state.json`，删除迁移与镜像代码。
+- `store/` 换 SQLite：`sections` 表按事务保存七段（校验后的 JSON 载荷）；一次性导入旧 `state.json` 与旧段文件，删除文件锁/镜像/版本迁移代码。**不做**逐实体拆表：读者总是整段加载，文档上限（500 条入站、100 条计划）远低于需要行级索引的规模。
 - 验收：现有状态文件可导入；510 项测试全绿；mini 上重启后待处理队列、去重、配额行为一致。
 
 ### Phase 3

@@ -180,26 +180,26 @@ test('failed plugin hook registration removes every subscription already install
   }
 })
 
-test('an interrupted lock claim fails closed without rewriting the previous owner', () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'review-claim-'))
+test('a live lock owner fails closed without rewriting the owner record', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'review-lock-'))
   try {
-    const lock = JSON.stringify({ pid: process.pid, startedAt: 1 })
-    fs.writeFileSync(path.join(root, 'state.lock'), lock)
-    fs.writeFileSync(path.join(root, 'state.claim'), '{"pid":123}')
-    assert.throws(() => stateFile(root).read('lines'), /state\.claim/)
-    assert.equal(fs.readFileSync(path.join(root, 'state.lock'), 'utf8'), lock)
-    assert.equal(fs.existsSync(path.join(root, 'state.json')), false)
+    const owner = JSON.stringify({ pid: 1, startedAt: 1 })
+    fs.mkdirSync(path.join(root, 'state.lock.d'))
+    fs.writeFileSync(path.join(root, 'state.lock.d/owner.json'), owner)
+    assert.throws(() => stateFile(root).read('lines'), /another process \(pid 1\) owns this state root/)
+    assert.equal(fs.readFileSync(path.join(root, 'state.lock.d/owner.json'), 'utf8'), owner)
+    assert.equal(fs.existsSync(path.join(root, 'state.db')), false)
   } finally { fs.rmSync(root, { recursive: true, force: true }) }
 })
 
-test('a dead owner can be replaced and normal acquisition removes its short-lived claim', () => {
+test('a dead owner is replaced on the next acquisition', () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'review-stale-lock-'))
   try {
     const child = spawnSync(process.execPath, ['-e', 'process.stdout.write(String(process.pid))'], { encoding: 'utf8' })
     assert.equal(child.status, 0)
-    fs.writeFileSync(path.join(root, 'state.lock'), JSON.stringify({ pid: Number(child.stdout), startedAt: 1 }))
+    fs.mkdirSync(path.join(root, 'state.lock.d'))
+    fs.writeFileSync(path.join(root, 'state.lock.d/owner.json'), JSON.stringify({ pid: Number(child.stdout), startedAt: 1 }))
     assert.equal(stateFile(root).read('lines'), undefined)
-    assert.equal(JSON.parse(fs.readFileSync(path.join(root, 'state.lock'), 'utf8')).pid, process.pid)
-    assert.equal(fs.existsSync(path.join(root, 'state.claim')), false)
+    assert.equal(JSON.parse(fs.readFileSync(path.join(root, 'state.lock.d/owner.json'), 'utf8')).pid, process.pid)
   } finally { fs.rmSync(root, { recursive: true, force: true }) }
 })
