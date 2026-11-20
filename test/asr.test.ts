@@ -100,3 +100,9 @@ test('disposing the bridge stops deferred transcription from opening a process',
   assert.deepEqual(await pending, { ok: false, reason: 'bridge closed' })
   assert.equal(children.length, 0)
 })
+
+test('engine diagnostics on stdout do not break the protocol answer', async () => {
+  const { spawnImpl } = fakeSpawn(() => `Detected language: Chinese\n${JSON.stringify({ ok: true, text: '好的' })}\n`)
+  const asr = bridge(spawnImpl)
+  assert.deepEqual(await asr.transcribe(wavFile()), { ok: true, text: '好的' })
+})

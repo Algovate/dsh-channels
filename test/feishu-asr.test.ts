@@ -186,3 +186,9 @@ test('a failed transcription still delivers the audio without a transcript', { t
     await adapter.stop()
   }
 })
+
+test('engine diagnostics on stdout do not break the protocol answer', async () => {
+  // mlx-whisper prints "Detected language: …" to stdout before the JSON line.
+  const asr = bridge(fakeSpawn(() => `Detected language: Chinese\n${JSON.stringify({ ok: true, text: '请把这句话重复一遍。' })}\n`))
+  assert.deepEqual(await asr.transcribe(audioFile()), { ok: true, text: '请把这句话重复一遍。' })
+})

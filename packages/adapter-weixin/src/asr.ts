@@ -126,7 +126,12 @@ export class AsrBridge {
             const line = buffered.slice(0, newline).trim()
             buffered = buffered.slice(newline + 1)
             if (line === '') continue
-            if (buffered.trim() !== '') return protocolError('unexpected extra ASR answer')
+            // The engines write diagnostics such as "Detected language: …" to
+            // stdout, so only a JSON object is a protocol answer.
+            if (!line.startsWith('{')) {
+              this.#options.logger.info(`asr: ${line.slice(0, 200)}`)
+              continue
+            }
             try {
               const parsed = JSON.parse(line) as { ok?: boolean; text?: string; error?: string }
               cleanup()
