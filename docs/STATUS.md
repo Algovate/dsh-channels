@@ -27,7 +27,7 @@
 | 引擎 | 热态耗时（约 4 秒语音） | 结果 |
 |---|---|---|
 | mlx small | 约 0.3 秒 | 2/3 正确，「也好吧」正确 |
-| mlx large-v3-turbo（1.5G） | 约 0.9 秒 | 3 条中 2 条出错，短句更差 |
+| mlx large-v3-turbo（1.5G，对比后已删除） | 约 0.9 秒 | 3 条中 2 条出错，短句更差 |
 | faster-whisper medium（CPU int8，1.4G） | 约 5 秒 | 3/3 正确，「转写测速成功」完全正确 |
 
 最终默认选用 **faster-whisper medium**（独立 venv `~/dsh-plugin-pkgs/asr-venv-fw`，模型 `~/dsh/channels/asr-models/Systran__faster-whisper-medium`），部署提交 `d2ab828`（宿主进程 `75572`，发布目录 `~/dsh-plugin-pkgs/dsh-channels/d2ab828/`）。宿主层真机确认：语音入站 → 转写 `transcribed voice note (15 chars)` → 模型按内容正确回答。
