@@ -2,7 +2,7 @@
 
 ## 0.1.0 — 未发布
 
-- 飞书适配器支持可选语音转写：随包提供 `bin/asr-transcribe.py` 桥接脚本，复用微信的 Python 虚拟环境与 whisper 模型（`asrCommand`/`asrModelDir`/`asrModel`/`asrLanguage`/`asrTimeoutMs`，`DSH_FEISHU_ASR_*` 与 `DSH_WEIXIN_ASR_*` 均可用）；转写失败只记录原因，音频照常交付。
+- 飞书适配器支持可选语音转写：随包提供 `bin/asr-transcribe.py` 桥接脚本，复用微信的 Python 虚拟环境与 whisper 模型（`asrCommand`/`asrModelDir`/`asrModel`/`asrDevice`/`asrComputeType`/`asrLanguage`/`asrTimeoutMs`，`DSH_FEISHU_ASR_*` 与 `DSH_WEIXIN_ASR_*` 均可用）；转写失败只记录原因，音频照常交付。
 - 新增飞书/Lark 适配器 `@derekluo/dsh-channels-feishu`：开放平台长连接 WebSocket 接收事件，无需公网 webhook；REST 负责收发消息与素材。覆盖文本/富文本、图片/文件/语音/视频双向、@ 提及、卡片原生按钮（`card.action.trigger`）、消息编辑任务卡、事件分片重组和 `200/500` 确认重投。WebSocket 用 `ws` 库（官方 SDK 同款，message 直接给 Buffer），protobuf 帧为零依赖手写编解码，账号键为 `app:<App ID>`。真机端到端修复：兼容扁平 tenant token 响应、任务卡始终以可编辑的交互卡片发送、拒绝 Blob 帧而非静默丢弃。桌面客户端新增飞书徽标行。
 
 - 手机 `/status` 只显示任务、执行与投递状态、队列和交互提示；移除重复的最近发送预览及每次查询的 journal 读取。桌面发送预览、诊断流水与入站去重保持。

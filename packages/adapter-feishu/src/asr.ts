@@ -29,6 +29,10 @@ export interface AsrOptions {
   modelDir: string
   /** Model size ("large-v3-turbo") or an explicit checkpoint path. */
   model?: string
+  /** Compute device for faster-whisper: "cpu" (default) or "mps". */
+  device?: string
+  /** ctranslate2 compute type; defaults to int8 on cpu and float16 on mps. */
+  computeType?: string
   language?: string
   timeoutMs?: number
   logger: { info: (line: string) => void; warn: (line: string) => void }
@@ -64,6 +68,8 @@ export class AsrBridge {
       ...process.env,
       DSH_FEISHU_ASR_MODEL_DIR: this.#options.modelDir,
       ...(this.#options.model === undefined ? {} : { DSH_FEISHU_ASR_MODEL: this.#options.model }),
+      ...(this.#options.device === undefined ? {} : { DSH_FEISHU_ASR_DEVICE: this.#options.device }),
+      ...(this.#options.computeType === undefined ? {} : { DSH_FEISHU_ASR_COMPUTE_TYPE: this.#options.computeType }),
       ...(this.#options.language === undefined ? {} : { DSH_FEISHU_ASR_LANGUAGE: this.#options.language }),
     }
     try {

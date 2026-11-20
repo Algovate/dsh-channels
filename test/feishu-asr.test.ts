@@ -209,3 +209,20 @@ test('the configured model is passed to the bridge environment', async () => {
   await asr.transcribe(audioFile())
   assert.equal(envs[0]?.['DSH_FEISHU_ASR_MODEL'], 'large-v3-turbo')
 })
+
+test('the configured device and compute type reach the bridge environment', async () => {
+  const envs: Array<Record<string, string | undefined>> = []
+  const spawnImpl = ((_command: string, _args: string[], options: { env: Record<string, string | undefined> }) => {
+    envs.push(options.env)
+    const stdin = new PassThrough()
+    const stdout = new PassThrough()
+    const stderr = new PassThrough()
+    const child = { stdin, stdout, stderr, exitCode: null as number | null, kill: () => { child.exitCode = 0 }, on: () => child, once: () => child, off: () => child }
+    stdin.on('data', () => stdout.write(`${JSON.stringify({ ok: true, text: 'ok' })}\n`))
+    return child
+  }) as unknown as typeof import('node:child_process').spawn
+  const asr = bridge(spawnImpl, { device: 'mps', computeType: 'float16' })
+  await asr.transcribe(audioFile())
+  assert.equal(envs[0]?.['DSH_FEISHU_ASR_DEVICE'], 'mps')
+  assert.equal(envs[0]?.['DSH_FEISHU_ASR_COMPUTE_TYPE'], 'float16')
+})

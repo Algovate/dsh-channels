@@ -53,6 +53,10 @@ export interface FeishuAdapterOptions {
     asrLanguage?: string
     /** Whisper size ("large-v3-turbo") or an explicit checkpoint path; default small. */
     asrModel?: string
+    /** faster-whisper device: "cpu" (default) or "mps" on Apple Silicon. */
+    asrDevice?: string
+    /** ctranslate2 compute type; defaults to int8 on cpu, float16 on mps. */
+    asrComputeType?: string
     asrTimeoutMs?: number
     /** Override the shipped bridge script (e.g. a custom transcriber). */
     asrScriptPath?: string
@@ -122,6 +126,8 @@ export async function createAdapter({ runtime, config = {}, stateRoot = '' }: Fe
         modelDir: config.asrModelDir ?? path.join(stateRoot, 'asr-models'),
         ...(config.asrCommand === undefined ? {} : { command: config.asrCommand }),
         ...(config.asrModel === undefined ? {} : { model: config.asrModel }),
+        ...(config.asrDevice === undefined ? {} : { device: config.asrDevice }),
+        ...(config.asrComputeType === undefined ? {} : { computeType: config.asrComputeType }),
         ...(config.asrLanguage === undefined ? {} : { language: config.asrLanguage }),
         ...(config.asrTimeoutMs === undefined ? {} : { timeoutMs: config.asrTimeoutMs }),
         ...(config.asrSpawnImpl === undefined ? {} : { spawnImpl: config.asrSpawnImpl }),
