@@ -9,13 +9,12 @@
  */
 import fs from 'node:fs'
 import path from 'node:path'
-import { fileURLToPath } from 'node:url'
 
 import { CDN_BASE_URL, listIndexedWeixinAccountIds } from '../vendor/openclaw-weixin/auth/accounts.js'
 import type { AccountInfo, AdapterRuntime, ChannelAdapter, InboundMessage, IngressSink, Outgoing, SendResult, Target } from '@derekluo/dsh-channels'
 import { mediaItemsOf, normalizeInbound, type NormalizedInbound, type RawMediaItem, type RawMessage } from './normalize.js'
 import { MAX_INBOUND_MEDIA, MAX_INBOUND_MESSAGE_BYTES, saveInboundItem } from './media.js'
-import { AsrBridge } from './asr.js'
+import { AsrBridge, sharedAsrScript } from './asr.js'
 import { WeixinTransport, readAccount } from './transport.js'
 
 export const CHANNEL_ID = 'weixin'
@@ -49,6 +48,10 @@ export interface WeixinAdapterOptions {
     asrEnabled?: boolean
     asrCommand?: string
     asrModelDir?: string
+    asrModel?: string
+    asrDevice?: string
+    asrComputeType?: string
+    asrScriptPath?: string
     asrLanguage?: string
   }
 }
@@ -132,14 +135,17 @@ export async function createAdapter({ runtime, config = {}, stateRoot }: WeixinA
   // Voice notes become text when the Python bridge and a model are available;
   // otherwise the WAV path travels and the note says it could not be listened
   // to. The bridge is optional on purpose (python3 + whisper is not something a
-  // channel plugin may require).
+  // channel plugin may require). It ships with the core package, shared with
+  // the Feishu adapter.
+  const scriptPath = config.asrScriptPath ?? sharedAsrScript()
+  if ((config.asrEnabled ?? true) && scriptPath === undefined) logger.warn('asr bridge not found: voice notes will not be transcribed')
   const createAsr = () =>
-    (config.asrEnabled ?? true) && stateRootUsed !== ''
+    (config.asrEnabled ?? true) && stateRootUsed !== '' && scriptPath !== undefined
       ? new AsrBridge({
-          // `import.meta.url` is `dist/src/index.js` in the published package and
-          // `src/index.ts` in a checkout, so the package root is found by walking
-          // up to the manifest instead of guessing `..` twice.
-          scriptPath: path.join(packageRoot(path.dirname(fileURLToPath(import.meta.url))), 'bin', 'asr-bridge.py'),
+          scriptPath,
+          ...(config.asrModel === undefined ? {} : { model: config.asrModel }),
+          ...(config.asrDevice === undefined ? {} : { device: config.asrDevice }),
+          ...(config.asrComputeType === undefined ? {} : { computeType: config.asrComputeType }),
           modelDir: config.asrModelDir ?? path.join(stateRootUsed, 'asr-models'),
           ...(config.asrCommand === undefined ? {} : { command: config.asrCommand }),
           ...(config.asrLanguage === undefined ? {} : { language: config.asrLanguage }),

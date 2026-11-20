@@ -1,15 +1,17 @@
 #!/usr/bin/env python3
-"""Transcribe WAV files for the dsh-channels Weixin adapter.
+"""Transcribe audio files for the dsh-channels adapters (WeChat and Feishu).
 
 The adapter keeps this bridge running and sends a JSON request per line:
   stdin:  {"wav": "/abs/path/file.wav"}\n
   stdout: {"ok": true, "text": "..."}\n or {"ok": false, "error": "..."}\n
 Diagnostic messages go to stderr.
 
-Configure asrCommand, asrModelDir, and asrLanguage under the Weixin adapter
-in the channels config. The adapter passes the model directory and language
-as DSH_WEIXIN_ASR_MODEL_DIR and DSH_WEIXIN_ASR_LANGUAGE. See
-docs/OPERATIONS.md for setup and offline model paths.
+This script ships in @derekluo/dsh-channels and is shared by both adapters,
+which pass settings as DSH_ASR_* environment variables. The older
+DSH_FEISHU_ASR_* and DSH_WEIXIN_ASR_* spellings are still read, so existing
+setups keep working. Feishu voice notes arrive as Ogg/Opus, which whisper
+decodes directly; WeChat notes arrive as SILK or WAV. See docs/OPERATIONS.md
+for setup and offline model paths.
 
 The bridge tries mlx-whisper first, then faster-whisper on CPU.
 DSH_WEIXIN_ASR_MODEL chooses a model size (default: small) or an existing
@@ -30,6 +32,17 @@ import traceback
 # characters when nothing biases it, which reads as a bug to a mainland user.
 # The sentence is deliberately generic so it biases style, not content.
 DEFAULT_ZH_PROMPT = "以下是普通话的句子。"
+
+_ENV_PREFIXES = ("DSH_ASR_", "DSH_FEISHU_ASR_", "DSH_WEIXIN_ASR_")
+
+
+def env(suffix: str, default: str = "") -> str:
+    """Read one setting, preferring the shared prefix and falling back to legacy ones."""
+    for prefix in _ENV_PREFIXES:
+        value = os.environ.get(prefix + suffix)
+        if value is not None and value.strip() != "":
+            return value
+    return default
 
 
 # A failed decode can raise with an entire ffmpeg banner attached (hundreds of
@@ -53,7 +66,7 @@ def short_error(error: object) -> str:
 
 
 def model_root() -> str:
-    root = os.environ.get("DSH_WEIXIN_ASR_MODEL_DIR")
+    root = env("MODEL_DIR")
     if root and root.strip():
         return os.path.expanduser(root.strip())
     return os.path.expanduser("~/.dsh/weixin/asr-models")
@@ -82,9 +95,9 @@ def resolve_model(engine: str) -> tuple[str, str | None]:
     Only a directory that exists and carries a `config.json` counts; a bare
     name falls through to the engine's own downloader.
     """
-    language = os.environ.get("DSH_WEIXIN_ASR_LANGUAGE", "").strip() or None
+    language = env("LANGUAGE").strip() or None
 
-    explicit = os.environ.get("DSH_WEIXIN_ASR_MODEL_PATH", "").strip()
+    explicit = env("MODEL_PATH").strip()
     if explicit:
         return os.path.expanduser(explicit), language
 
@@ -97,7 +110,7 @@ def resolve_model(engine: str) -> tuple[str, str | None]:
     # directory is therefore treated as the root, not as a size — otherwise the
     # bridge would look for a checkpoint directly inside the root and fail with
     # "No such file or directory: <root>/config.json".
-    configured = os.environ.get("DSH_WEIXIN_ASR_MODEL", "").strip()
+    configured = env("MODEL").strip()
     if configured != "" and os.path.isdir(os.path.expanduser(configured)):
         root = os.path.expanduser(configured)
         configured = ""
@@ -154,7 +167,12 @@ def load_faster():
     # The guard wraps construction too, not just the import: that is when the
     # native library is actually loaded and the banner is emitted.
     with quiet_native_stdout():
-        model = WhisperModel(source, device="cpu", compute_type="int8", download_root=model_root())
+        # MPS runs the same weights on Apple Silicon's GPU (measured ~4x faster
+        # than CPU int8); it is opt-in because it needs a recent ctranslate2.
+        device = env("DEVICE").strip() or "cpu"
+        default_compute = "int8" if device == "cpu" else "float16"
+        compute_type = env("COMPUTE_TYPE").strip() or default_compute
+        model = WhisperModel(source, device=device, compute_type=compute_type, download_root=model_root())
     return ("faster", (None, model)), source, language
 
 
@@ -311,7 +329,7 @@ def main() -> int:
     log(f"asr-bridge: ready (pid {os.getpid()}, models in {model_root()})")
     engine = None
     language = None
-    prompt = os.environ.get("DSH_WEIXIN_ASR_PROMPT", DEFAULT_ZH_PROMPT).strip() or None
+    prompt = env("PROMPT", DEFAULT_ZH_PROMPT).strip() or None
     loaded = False
     for line in sys.stdin:
         line = line.strip()

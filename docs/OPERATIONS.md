@@ -14,7 +14,7 @@
 dsh plugin --profile default add @derekluo/dsh-channels@0.1.0 @derekluo/dsh-channels-weixin@0.1.0
 ```
 
-使用 Telegram 时，把微信适配器换成 `@derekluo/dsh-channels-telegram@0.1.0`。安装后按下文配置凭证和白名单，再重启宿主。
+使用 Telegram 时，把微信适配器换成 `@derekluo/dsh-channels-telegram@0.1.0`。使用飞书时，换成 `@derekluo/dsh-channels-feishu@0.1.0`。安装后按下文配置凭证和白名单，再重启宿主。
 
 `dsh plugin` 只是把参数转给 profile 目录里的 pnpm，所以装完要确认 profile 的 `dsh.profile.bundles` 有 `@derekluo/dsh-channels`，没有就补上。`desktop` profile 只能由桌面版自带的 `dsh` 管理，用 npm 装的 CLI 执行 `dsh plugin` 会被拒绝。升级时用新版本号重跑同一条命令，确认 bundle 行仍在，再重启宿主。
 
@@ -39,7 +39,8 @@ printf '%s\n' "$package_dir"
   "dependencies": {
     "@derekluo/dsh-channels": "file:/opt/dsh-packages/derekluo-dsh-channels-0.1.0.tgz",
     "@derekluo/dsh-channels-weixin": "file:/opt/dsh-packages/derekluo-dsh-channels-weixin-0.1.0.tgz",
-    "@derekluo/dsh-channels-telegram": "file:/opt/dsh-packages/derekluo-dsh-channels-telegram-0.1.0.tgz"
+    "@derekluo/dsh-channels-telegram": "file:/opt/dsh-packages/derekluo-dsh-channels-telegram-0.1.0.tgz",
+    "@derekluo/dsh-channels-feishu": "file:/opt/dsh-packages/derekluo-dsh-channels-feishu-0.1.0.tgz"
   },
   "dsh": {
     "profile": {
@@ -173,9 +174,35 @@ printf '%s\n' "$package_dir"
 
 如果 `allowlistPerAccount` 使用旧 `botId` 或 `default`，把对应列表（包括显式空列表）迁移到新键，再重启。迁移之前，核心发现当前账号的旧覆盖项而缺少新键时会拒绝消息，避免退回更宽的全局白名单。旧会话和待重发仍保留原键，不会自动转移。
 
+## 飞书（Feishu / Lark）
+
+飞书适配器走开放平台的**长连接模式**：进程主动向网关建立一条 WebSocket，不需要公网 webhook、域名或证书。先在[飞书开放平台](https://open.feishu.cn)创建一个自建应用（海外 Lark 用 [open.larksuite.com](https://open.larksuite.com)），拿到应用凭证 `App ID`（形如 `cli_` 加 16 位十六进制）和 `App Secret`，然后：
+
+1. 在 **事件与回调 → 订阅方式** 选择「使用长连接接收事件/回调」。
+2. 在 **事件与回调 → 事件配置** 订阅 `im.message.receive_v1`（接收消息）；要在聊天里用原生按钮回答提问/审批，还需订阅 `card.action.trigger`（卡片回传交互）。
+3. 在 **权限管理** 开通机器人收发消息和素材权限：`im:message`、`im:message.group_at_msg`、`im:message.p2p_msg`、`im:resource`（下载图片/文件）、`im:image`（上传图片）、`im:file`（上传文件/视频/音频）。
+4. 在 **机器人** 菜单启用机器人能力，并把应用发布到企业；把机器人加入要使用的单聊或群聊。
+
+```json
+{
+  "adapters": ["@derekluo/dsh-channels-feishu"],
+  "adapterConfig": {
+    "@derekluo/dsh-channels-feishu": {
+      "appId": "cli_REPLACE_WITH_16_HEX",
+      "appSecret": "REPLACE_WITH_APP_SECRET",
+      "botId": "my_bot"
+    }
+  }
+}
+```
+
+`botId` 是可选的显示名称。账号键固定为 `app:<App ID>`，轮换 `App Secret` 时只要 `App ID` 不变，会话线、配额和白名单都保持不变。海外 Lark 在 `domain` 填 `https://open.larksuite.com`，默认是 `https://open.feishu.cn`。可选参数还有 `mediaEnabled`（默认开启）和 `maxInboundBytes`（默认每个附件 20 MiB）。启动成功的日志是 `feishu persistent connection established`。
+
+入站支持文本、富文本（`post`，提取为纯文字）、图片、文件、语音和视频；@ 提及的占位符会还原成显示名。出站文字超过通道上限会由核心分条；带原生按钮的提问和审批以交互卡片发送，点按钮等价于在该聊天回复对应文本。任务卡使用消息编辑能力原地更新。群聊默认仍按核心的 `groupTrigger: prefix` 规则，只响应 `/ask ...`，或在配置 `groupMention` 后接受 @ 机器人。飞书发送者 ID 是用户的 `open_id`，加白名单时使用 `open_id`（`/whoami` 可查）。
+
 ## 语音转写
 
-微信可用可选的 `silk-wasm` 将 SILK 转成 WAV。转写另需 Python 和模型；转写不可用时保留已保存的音频，模型会收到无法读取音频的说明。
+微信可用可选的 `silk-wasm` 将 SILK 转成 WAV；飞书语音本身就是 Ogg/Opus，whisper 可直接解码，无需转码。转写另需 Python 和模型；转写不可用时保留已保存的音频，模型会收到无法读取音频的说明。两个适配器可共用同一个 Python 环境与模型目录。
 
 在独立虚拟环境安装所用引擎。下例给出 Apple silicon 的 MLX 方案；CPU 方案将 `mlx-whisper` 换成 `faster-whisper`。检查时使用一个已存在的 WAV 文件：
 
@@ -184,13 +211,30 @@ state="${DSH_CHANNELS_STATE_DIR:-$HOME/.dsh/channels}"
 python3 -m venv "$HOME/.venvs/dsh-asr"
 "$HOME/.venvs/dsh-asr/bin/python" -m pip install mlx-whisper
 printf '{"wav":"/absolute/path/to/sample.wav"}\n' |
-  DSH_WEIXIN_ASR_MODEL_DIR="$state/asr-models" \
-  "$HOME/.venvs/dsh-asr/bin/python" packages/adapter-weixin/bin/asr-bridge.py
+  DSH_ASR_MODEL_DIR="$state/asr-models" \
+  "$HOME/.venvs/dsh-asr/bin/python" <profile>/node_modules/@derekluo/dsh-channels/bin/asr-transcribe.py
 ```
 
-成功时输出 `{"ok":true,"text":"…"}`。首次转写可能需要下载模型。若要离线运行，先把 MLX 的 small 模型放到模型根目录的 `mlx-community__whisper-small-mlx/`，或把 faster-whisper 的 small 模型放到 `Systran__faster-whisper-small/`。两种引擎需要不同权重；也可用环境变量 `DSH_WEIXIN_ASR_MODEL_PATH` 指定模型路径。
+成功时输出 `{"ok":true,"text":"…"}`。首次转写可能需要下载模型。若要离线运行，先把 MLX 的 small 模型放到模型根目录的 `mlx-community__whisper-small-mlx/`，或把 faster-whisper 的 small 模型放到 `Systran__faster-whisper-small/`。两种引擎需要不同权重；也可用环境变量 `DSH_ASR_MODEL_PATH` 指定模型路径。桥接脚本只随核心包发布一份，两个适配器共用；环境变量以 `DSH_ASR_*` 为准，旧版 `DSH_WEIXIN_ASR_*`、`DSH_FEISHU_ASR_*` 仍可读取。
 
 在微信的 `adapterConfig` 里把 `asrCommand` 设为上述 Python 的绝对路径。可选 `asrModelDir`（默认微信状态根目录下的 `asr-models/`）、`asrLanguage`（默认由引擎识别）及 `asrEnabled`（默认开启）。
+
+飞书用同一套参数与同一个桥接脚本，也可直接复用上面的虚拟环境与模型：
+
+```json
+{
+  "adapterConfig": {
+    "@derekluo/dsh-channels-feishu": {
+      "appId": "cli_…",
+      "appSecret": "…",
+      "asrCommand": "/Users/example/.venvs/dsh-asr/bin/python",
+      "asrModelDir": "/Users/example/.dsh/channels/asr-models"
+    }
+  }
+}
+```
+
+可选 `asrModel`（模型名如 `large-v3-turbo`，或显式 checkpoint 目录；默认 `small`）、`asrDevice`（`cpu` 默认，或 Apple Silicon 上的 `mps`，实测约 4 倍提速）、`asrComputeType`（默认 cpu 用 `int8`、mps 用 `float16`）、`asrLanguage`、`asrTimeoutMs`（默认 60000）、`asrEnabled`（默认开启）和 `asrScriptPath`（换成自定义桥接脚本）。模型名对应模型根目录下的 `mlx-community__whisper-<名字>-mlx/`（MLX）或 `<名字>/`、`Systran__faster-whisper-<名字>/`（CPU）。
 
 ## 手机任务控制
 

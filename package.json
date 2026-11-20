@@ -11,16 +11,17 @@
     "node": ">=22.13.0"
   },
   "scripts": {
-    "build": "tsc -b packages/core packages/adapter-weixin packages/adapter-telegram",
+    "build": "tsc -b packages/core packages/adapter-weixin packages/adapter-telegram packages/adapter-feishu",
     "clean": "rm -rf packages/*/dist packages/*/*.tsbuildinfo dist-test",
     "test:build": "tsc -p tsconfig.test.json",
     "test": "npm run build && npm run test:build && node --test --test-concurrency=4 \"dist-test/test/**/*.test.js\"",
     "check": "npm test",
     "doctor": "node packages/core/bin/doctor.mjs",
-    "pack:check": "npm pack --dry-run -w @derekluo/dsh-channels -w @derekluo/dsh-channels-weixin -w @derekluo/dsh-channels-telegram"
+    "pack:check": "npm pack --dry-run -w @derekluo/dsh-channels -w @derekluo/dsh-channels-weixin -w @derekluo/dsh-channels-telegram -w @derekluo/dsh-channels-feishu"
   },
   "devDependencies": {
     "@types/node": "^26.6.6",
+    "@types/ws": "^8.18.2",
     "typescript": "^5.9.3"
   }
 }
