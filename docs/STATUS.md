@@ -1,5 +1,21 @@
 # 验证状态
 
+## 2026-11-20 媒体双向真机验证
+
+在第一轮部署后继续验证媒体，暴露并修复了两个只有真机才会出现的问题，随后部署提交 `a7a71c6`（发布目录 `~/dsh-plugin-pkgs/dsh-channels/a7a71c6/`，飞书归档 SHA-256 `11022c52263d5ce3b9d2312e1dcc1ea712a4d2f23eac6014d8e68a471fdd08d2`，宿主进程 `74523`，备份 `backup-20261120T005744Z/`）。
+
+1. **附件类型误判**：飞书会把 JPEG 以 `.webp` 文件消息投递，`file` 消息又不带 mime，落盘后模型先报格式不符、需自己改名才能读取。新增 [media.ts](../packages/adapter-feishu/src/media.ts) 按魔术字节嗅探 jpeg/png/gif/webp/pdf/ogg/mp3/wav/mp4/mov/zip，文本类按扩展名给 `text/plain`，落盘扩展名与 mime 以内容为准。部署后重发同一张图，保存为 `-file.jpg`（`image/jpeg`），模型直接 `read_image` 读取成功。
+2. **上传 `file_type` 非法**：`/im/v1/files` 只接受 `opus/mp4/pdf/doc/docx/xls/xlsx/ppt/pptx`，其他一律必须 `stream`；直接传扩展名会让 `.txt` 报 `Invalid request param.`。改为白名单映射，其余回退 `stream`。
+
+宿主层验证结果：
+
+- 入站图片：落盘 167016 字节，嗅探为 `image/jpeg`，回合 5762ms 正常回复。
+- 入站文件（`.md`，8472 字节）：回合 79752ms 完成并投递 1330 字回复。
+- 出站适配器层：真实上传并发送图片（`om_x…`）与 txt 文件（`file_key`、`om_x…`）均成功。
+- 出站宿主层：让 agent 创建 `hello.txt` 并用 `present` 声明，核心自动投递附件，`delivery:"accepted"`、媒体消息 ID `om_x100b60cdfb9298accf212cb22b75376`，回合 3390ms。
+
+新增媒体嗅探与上传类型回归测试，完整 `npm test` **501 项通过**。
+
 ## 2026-11-20 飞书适配器部署到 mini 并完成宿主全链路验证
 
 在真机协议验证之后，把提交 `d4a662a` 的 core、微信、飞书三个包部署到 mini 的 Web profile，与既有微信通道并行运行。发布目录为 mini 的 `~/dsh-plugin-pkgs/dsh-channels/d4a662a/`，含 `release.json`、`deployment.json` 和 `backup-20261120T005207Z/`（profile 文件与通道配置备份）。
