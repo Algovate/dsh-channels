@@ -1,5 +1,18 @@
 # 验证状态
 
+## 2026-11-20 重构 Phase 2：状态持久化换成 SQLite
+
+状态层从「整份 JSON 原子重写 + v1/v2 迁移 + legacy 镜像 + 双文件锁」换成 SQLite：`state.db` 的 `sections` 表按事务保存七个段，单写者锁改为原子 `mkdir` 的 `state.lock.d/owner.json`。首次打开在事务里导入旧 `state.json` 与六个旧段文件，校验后归档到 `legacy-state/*.bak`；归档中断会在下次打开补完，不重复导入。`doctor --state` 只读查询数据库，`--migrate` 执行同一导入。
+
+真机验证（部署提交 `be383d7`，宿主进程 `77048`，发布目录 `~/dsh-plugin-pkgs/dsh-channels/be383d7/`）：
+
+- 首次启动完成导入：`sections` 含 `inbox`、`outbox`、`tasks`；`state.json` 已归档，状态根只剩 `state.db`、`-wal`、`-shm`、`state.lock.d`、`legacy-state`。
+- 权限：`state.db`、`-wal`、`-shm` 均为 0600（发现默认 umask 生成 0644 后修复并加测试）。
+- 重启后三个 section 的 SHA-256 完全一致，无重复导入、无新告警；微信与飞书两个通道正常注册。
+- 完整 `npm test` **512 项通过**（新增事务回滚、损坏库拒绝、锁接管、导入归档、权限等用例）。
+
+媒体真实消息的回合验证在 Phase 1 已覆盖；本轮未再发送新消息，持久化以「重启前后哈希一致」和导入/回滚测试为准。
+
 ## 2026-11-20 重构 Phase 1：历史归档与共享适配器 kit
 
 按 [设计评审](DESIGN-REVIEW.md) 执行第一阶段：历史计划、审查与部署日记移入 `docs/notes/`，`STATUS.md` 只保留当前记录；新增核心子路径 `@derekluo/dsh-channels/adapter-kit`（`safeFileSegment`、`extensionOfName`、`defaultExtensionFor`），三个适配器共用文件名与扩展名规则，微信通过参数保留 SILK 默认扩展名；适配器对核心包改为必需运行时依赖。
