@@ -2,6 +2,7 @@
 
 ## 0.1.0 — 未发布
 
+- 重构 Phase 1：历史计划/评审/部署日记归档到 `docs/notes/`，`STATUS.md` 只保留当前记录；新增 `@derekluo/dsh-channels/adapter-kit`（`safeFileSegment`/`extensionOfName`/`defaultExtensionFor`）供三个适配器共用，适配器对核心包改为必需运行时依赖。
 - 重构：ASR 桥接脚本从两个适配器各自一份收敛为核心包 `bin/asr-transcribe.py` 一份，微信与飞书共用；环境变量统一为 `DSH_ASR_*`（兼容旧 `DSH_WEIXIN_ASR_*`/`DSH_FEISHU_ASR_*`），两个适配器都支持 `asrModel`/`asrDevice`/`asrComputeType`。飞书 transport 的发送路径合并为单入口，事件归一化删除不可达分支，重连预算改为降速重试，测试共享 `test/feishu-mocks.ts`。
 - 飞书适配器支持可选语音转写：随包提供 `bin/asr-transcribe.py` 桥接脚本，复用微信的 Python 虚拟环境与 whisper 模型（`asrCommand`/`asrModelDir`/`asrModel`/`asrDevice`/`asrComputeType`/`asrLanguage`/`asrTimeoutMs`，`DSH_FEISHU_ASR_*` 与 `DSH_WEIXIN_ASR_*` 均可用）；转写失败只记录原因，音频照常交付。
 - 新增飞书/Lark 适配器 `@derekluo/dsh-channels-feishu`：开放平台长连接 WebSocket 接收事件，无需公网 webhook；REST 负责收发消息与素材。覆盖文本/富文本、图片/文件/语音/视频双向、@ 提及、卡片原生按钮（`card.action.trigger`）、消息编辑任务卡、事件分片重组和 `200/500` 确认重投。WebSocket 用 `ws` 库（官方 SDK 同款，message 直接给 Buffer），protobuf 帧为零依赖手写编解码，账号键为 `app:<App ID>`。真机端到端修复：兼容扁平 tenant token 响应、任务卡始终以可编辑的交互卡片发送、拒绝 Blob 帧而非静默丢弃。桌面客户端新增飞书徽标行。

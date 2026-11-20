@@ -13,6 +13,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 
 import type { InboundMedia } from '@derekluo/dsh-channels'
+import { defaultExtensionFor, extensionOfName, safeFileSegment } from '@derekluo/dsh-channels/adapter-kit'
 import { resolveMediaType } from './media.js'
 import type { RawMedia } from './normalize.js'
 import type { FeishuTransport, TransportLogger } from './transport.js'
@@ -26,19 +27,8 @@ export interface AttachmentOptions {
   logger: TransportLogger
 }
 
-/** A file name that is safe to write and keeps the extension Feishu implied. */
-function safeName(name: string, fallback: string): string {
-  const base = name.replace(/[^A-Za-z0-9._-]/g, '_').slice(0, 80)
-  return base === '' ? fallback : base
-}
-
-/** Extension to try before sniffing, based on the kind and the name Feishu gave. */
 function extensionFor(item: RawMedia): string {
-  if (item.fileName !== undefined && path.extname(item.fileName) !== '') return path.extname(item.fileName)
-  if (item.kind === 'image') return '.jpg'
-  if (item.kind === 'video') return '.mp4'
-  if (item.kind === 'voice') return '.ogg'
-  return '.bin'
+  return extensionOfName(item.fileName) || defaultExtensionFor(item.kind)
 }
 
 /** Download one attachment and write it under the account's media directory. */
@@ -51,7 +41,7 @@ export async function saveInboundAttachment(item: RawMedia, options: AttachmentO
   }
   try {
     const resolved = resolveMediaType(downloaded.bytes, item.mime, item.fileName, extensionFor(item))
-    const directory = path.join(mediaRoot, safeName(accountId, 'feishu'))
+    const directory = path.join(mediaRoot, safeFileSegment(accountId, 'feishu'))
     fs.mkdirSync(directory, { recursive: true })
     const file = path.join(directory, `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}-${item.kind}${resolved.extension}`)
     fs.writeFileSync(file, downloaded.bytes, { mode: 0o600 })
@@ -61,7 +51,7 @@ export async function saveInboundAttachment(item: RawMedia, options: AttachmentO
       path: file,
       mime: resolved.mime,
       bytes: downloaded.bytes.length,
-      ...(item.fileName === undefined ? {} : { name: safeName(item.fileName, 'file') }),
+      ...(item.fileName === undefined ? {} : { name: safeFileSegment(item.fileName, 'file') }),
     }
   } catch (error) {
     logger.warn(`feishu attachment could not be saved: ${String(error)}`)

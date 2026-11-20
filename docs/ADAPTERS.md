@@ -18,6 +18,8 @@
 
 飞书长连接上的网关帧是固定的 protobuf `Frame`，适配器内置一个只覆盖该 schema 的零依赖编解码器（见 [proto.ts](../packages/adapter-feishu/src/proto.ts)），不引入 protobuf 运行时。事件可能按 `sum`/`seq` 分片，适配器先重组再处理，且只在核心持久交接成功后回 `code:200` 的确认帧；处理失败回 `code:500` 请网关重投。
 
+适配器可以 `import` 核心的纯函数子路径 `@derekluo/dsh-channels/adapter-kit`（`safeFileSegment`、`extensionOfName`、`defaultExtensionFor`），共用文件名与扩展名规则；因此适配器对核心包是运行时依赖，不只是类型依赖。
+
 每个适配器实例使用一个账号。凭证、可用配置和迁移见[运维指南](OPERATIONS.md)，真机覆盖见[验证状态](STATUS.md)。
 
 ## 接口

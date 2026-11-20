@@ -14,6 +14,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 
 import type { AccountInfo, AdapterRuntime, ChannelAdapter, InboundMedia, IngressSink, Outgoing, SendResult, Target } from '@derekluo/dsh-channels'
+import { defaultExtensionFor, extensionOfName, safeFileSegment } from '@derekluo/dsh-channels/adapter-kit'
 import { DEFAULT_API_BASE, MAX_TEXT_CHARS, TelegramTransport, type FetchLike } from './transport.js'
 import { runTelegramPolling } from './polling.js'
 import { CHANNEL_ID, mediaOf, type NormalizedInbound } from './normalize.js'
@@ -39,12 +40,6 @@ export interface TelegramAdapterOptions {
 
 const MAX_INBOUND_MEDIA = 8
 const DEFAULT_MAX_INBOUND_BYTES = 20 * 1024 * 1024
-
-/** A file name that is safe to write and keeps the extension Telegram implied. */
-function safeName(name: string, fallback: string): string {
-  const base = name.replace(/[^A-Za-z0-9._-]/g, '_').slice(0, 80)
-  return base === '' ? fallback : base
-}
 
 export async function createAdapter({ runtime, config = {}, stateRoot = '' }: TelegramAdapterOptions): Promise<ChannelAdapter> {
   const logger = runtime?.logger ?? { info: () => {}, warn: () => {} }
@@ -87,9 +82,9 @@ export async function createAdapter({ runtime, config = {}, stateRoot = '' }: Te
       logger.warn(`telegram ${item.kind} not downloaded: ${downloaded.error}`)
       return undefined
     }
-    const extension = path.extname(item.fileName ?? downloaded.filePath) || (item.kind === 'image' ? '.jpg' : item.kind === 'video' ? '.mp4' : item.kind === 'voice' ? '.ogg' : '.bin')
+    const extension = extensionOfName(item.fileName ?? downloaded.filePath) || defaultExtensionFor(item.kind)
     try {
-      const directory = path.join(mediaRoot, safeName(accountId, 'telegram'))
+      const directory = path.join(mediaRoot, safeFileSegment(accountId, 'telegram'))
       fs.mkdirSync(directory, { recursive: true })
       const file = path.join(directory, `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}-${item.kind}${extension}`)
       fs.writeFileSync(file, downloaded.bytes, { mode: 0o600 })
@@ -99,7 +94,7 @@ export async function createAdapter({ runtime, config = {}, stateRoot = '' }: Te
         path: file,
         mime: item.mime ?? 'application/octet-stream',
         bytes: downloaded.bytes.length,
-        ...(item.fileName === undefined ? {} : { name: safeName(item.fileName, 'file') }),
+        ...(item.fileName === undefined ? {} : { name: safeFileSegment(item.fileName, 'file') }),
       }
       return media
     } catch (error) {

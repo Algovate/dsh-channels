@@ -20,6 +20,7 @@ import { downloadMediaFromItem } from '../vendor/openclaw-weixin/media/media-dow
 import { getMimeFromFilename } from '../vendor/openclaw-weixin/media/mime.js'
 import { MessageItemType } from '../vendor/openclaw-weixin/api/types.js'
 import type { InboundMedia } from '@derekluo/dsh-channels'
+import { defaultExtensionFor, extensionOfName, safeFileSegment } from '@derekluo/dsh-channels/adapter-kit'
 
 /** iLink item type → the kind the core understands. */
 const ITEM_KIND: Record<number, InboundMedia['kind'] | undefined> = {
@@ -29,10 +30,7 @@ const ITEM_KIND: Record<number, InboundMedia['kind'] | undefined> = {
   [MessageItemType.VIDEO]: 'video',
 }
 
-function safeName(name: string): string {
-  const safe = name.replace(/[^A-Za-z0-9._-]/g, '_').slice(0, 80)
-  return safe === '' || safe === '.' || safe === '..' ? 'attachment' : safe
-}
+
 
 /** MIME → extension, for the common kinds WeChat actually carries. */
 const EXTENSIONS: Record<string, string> = {
@@ -49,12 +47,6 @@ const EXTENSIONS: Record<string, string> = {
 }
 
 /** Last-resort extension by kind, when the bytes are not recognisable either. */
-const KIND_EXTENSION: Record<InboundMedia['kind'], string> = {
-  image: '.jpg',
-  video: '.mp4',
-  voice: '.silk',
-  file: '.bin',
-}
 
 /**
  * Read the real type from the first bytes.
@@ -79,10 +71,10 @@ export function sniffMime(buffer: Buffer): string | undefined {
 
 /** The extension a saved inbound file should carry. */
 export function extensionFor({ mime, kind, originalName }: { mime?: string; kind: InboundMedia['kind']; originalName?: string }): string {
-  const fromName = typeof originalName === 'string' ? path.extname(originalName).toLowerCase() : ''
-  if (fromName !== '' && fromName.length <= 8) return fromName
+  const fromName = extensionOfName(originalName)
+  if (fromName !== '') return fromName
   if (typeof mime === 'string' && EXTENSIONS[mime] !== undefined) return EXTENSIONS[mime]
-  return KIND_EXTENSION[kind]
+  return defaultExtensionFor(kind, '.silk')
 }
 
 export interface InboundMediaOptions {
@@ -107,8 +99,8 @@ export async function saveInboundItem(
   const kind = item?.type === undefined ? undefined : ITEM_KIND[item.type]
   if (kind === undefined) return { ok: false, kind: 'file', reason: 'unsupported-item' }
 
-  const directory = path.join(options.mediaRoot, safeName(options.accountId))
-  const stamp = `${safeName(options.messageId)}-${randomUUID()}`
+  const directory = path.join(options.mediaRoot, safeFileSegment(options.accountId))
+  const stamp = `${safeFileSegment(options.messageId)}-${randomUUID()}`
   let media: InboundMedia | undefined
 
   const saveMedia = async (buffer: Buffer, mime?: string, _subdir?: string, maxBytes?: number, originalName?: string): Promise<{ path: string }> => {
@@ -117,7 +109,7 @@ export async function saveInboundItem(
     const declared = typeof mime === 'string' && mime !== '' && mime !== 'application/octet-stream' ? mime : undefined
     const type = declared ?? sniffMime(buffer) ?? getMimeFromFilename(originalName ?? kind)
     const extension = extensionFor({ mime: type, kind, originalName })
-    const base = originalName === undefined ? `${stamp}-${kind}${extension}` : `${stamp}-${safeName(originalName)}`
+    const base = originalName === undefined ? `${stamp}-${kind}${extension}` : `${stamp}-${safeFileSegment(originalName)}`
     const file = path.join(directory, base)
     await fs.mkdir(directory, { recursive: true })
     await fs.writeFile(file, buffer, { flag: 'wx', mode: 0o600 })
@@ -126,7 +118,7 @@ export async function saveInboundItem(
       path: file,
       mime: type,
       bytes: buffer.length,
-      ...(originalName === undefined ? {} : { name: safeName(originalName) }),
+      ...(originalName === undefined ? {} : { name: safeFileSegment(originalName) }),
     }
     return { path: file }
   }

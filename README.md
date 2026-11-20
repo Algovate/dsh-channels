@@ -65,6 +65,7 @@ npm test
 
 - [运维指南](docs/OPERATIONS.md)：安装、升级与卸载、配置、账号迁移、语音转写和排障。
 - [设计](docs/DESIGN.md)与[决策记录](docs/DECISIONS.md)：消息如何进入回合，以及主要设计取舍。
+- [设计评审与重构路线](docs/DESIGN-REVIEW.md)：当前架构判断与分阶段计划。
 - [适配器指南](docs/ADAPTERS.md)：平台能力、接口和接入步骤。
 - [验证状态](docs/STATUS.md)与[变更记录](CHANGELOG.md)：测试范围、已知限制和升级注意事项。
 - [真机测试](docs/REAL-DEVICE-TEST.md)：微信/Telegram 账号上的验收步骤、结果记录和排障。

@@ -12,7 +12,8 @@
   "exports": {
     ".": "./dist/src/index.js",
     "./client": "./client.js",
-    "./package.json": "./package.json"
+    "./package.json": "./package.json",
+    "./adapter-kit": "./dist/src/adapter-kit.js"
   },
   "files": [
     "dist",
