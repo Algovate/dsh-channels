@@ -1,5 +1,11 @@
 # 验证状态
 
+## 2026-11-20 拆分飞书适配器职责并部署
+
+把飞书适配器的 REST 层拆成 [api.ts](../packages/adapter-feishu/src/api.ts)（域名、`fetch` 注入、请求时限、生命周期、tenant token、网关票据）与 [transport.ts](../packages/adapter-feishu/src/transport.ts)（消息、卡片、上传下载）；附件下载与落盘从入口抽到 [attachments.ts](../packages/adapter-feishu/src/attachments.ts)。`index.ts` 只保留配置解析与装配。测试夹具合并：`test/asr-fixtures.ts`（两个适配器共用）与 `test/feishu-fixtures.ts`，并删掉 API/transport 中未使用的 `logger` 选项。
+
+部署提交 `3c8ff96`（宿主进程 `76413`，发布目录 `~/dsh-plugin-pkgs/dsh-channels/3c8ff96/`），三个包逐文件校验一致（core 149 / 微信 123 / 飞书 33）。用安装后的代码对真实飞书做了只读冒烟：tenant token 换取成功、网关票据返回 `msg-frontier.feishu.cn`（PingInterval 90），两个通道启动无告警。完整 `npm test` **510 项通过**。
+
 ## 2026-11-20 合并到 main 并部署
 
 `feat/feishu-channel` 以 `--no-ff` 合并进 main（合并提交 `9105c47`），并推送 `origin/main`（`d9f4504..9105c47`）。合并后在干净树重跑完整测试 **510 项通过**。
