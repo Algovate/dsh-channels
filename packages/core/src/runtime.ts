@@ -11,7 +11,7 @@
 import fs from 'node:fs'
 import path from 'node:path'
 
-import { answerArtifactCommand, type ArtifactDelivery } from './artifacts.js'
+import type { ArtifactDelivery } from './artifacts.js'
 import { applyLiveSettings, liveSettings, type LiveSettings, type LiveSettingsPatch } from './live-settings.js'
 import { InteractionQueue } from './interaction/queue.js'
 import { isApprovalReply } from './interaction/approval.js'
@@ -21,7 +21,7 @@ import { authorizeMessage, createDurableRateLimiter, createRateLimiter, reserveM
 import type { CounterStore } from './store/counters.js'
 import { allowlistFor, type ChannelsConfig } from './config.js'
 import { lineKey, sameTarget } from './ids.js'
-import { helpText, parseCommand, TASK_CONTROLS, type CommandName } from './commands.js'
+import { parseCommand, TASK_CONTROLS, type CommandName } from './commands.js'
 import { ChannelSchedules } from './schedules.js'
 import { ChannelRoutes } from './routing.js'
 import { Inbox, type InboxEntry } from './store/inbox.js'
@@ -33,8 +33,8 @@ import { Journal } from './store/journal.js'
 import { TurnDriver, type TurnReply } from './turns.js'
 import type { HostContext } from './host.js'
 import { chatParagraphs } from './outbound.js'
+import { ChatCommandRunner } from './commands-runner.js'
 import { prepareTaskArtifacts } from './task-artifacts.js'
-import { taskHistoryText, taskStatusText } from './task-messages.js'
 import type { ChannelAdapter, InboundMessage, IngressSink, Outgoing, SendResult, Target } from './types.js'
 import { setTimeout as delay } from 'node:timers/promises'
 
@@ -69,6 +69,7 @@ export class ChannelsRuntime {
   #resuming = false
   readonly #delivery: Delivery
   readonly #journal: Journal
+  readonly #commands: ChatCommandRunner
   readonly #driver: TurnDriver
   readonly #interactions: InteractionQueue
   /** Sessions already reported to the host's workspace grouping. */
@@ -161,6 +162,29 @@ export class ChannelsRuntime {
         return this.send(message, { kind: deliveryId ? 'reply' : 'notice', text }, deliveryId)
       },
       queued: (id) => this.#delivery.outbox.list().some((entry) => entry.taskId === id),
+    })
+    this.#commands = new ChatCommandRunner({
+      config: this.#options.config,
+      workspace: this.#options.workingDirectory,
+      send: (message, outgoing) => this.send(message, outgoing),
+      canManage: (message) => this.canManage(message),
+      schedules: { command: (message, name, args) => this.#schedules.command(message, name, args) },
+      routes: {
+        command: (message, name, args) => this.#routes.command(message, name, args),
+        artifactWorkspace: (task) => this.#routes.artifactWorkspace(task),
+        snapshot: (message) => this.#routes.snapshot(message),
+      },
+      tasks: this.#tasks,
+      inbox: this.#inbox,
+      delivery: { outbox: this.#delivery.outbox },
+      interactions: this.#interactions,
+      adapters: this.#adapters,
+      activeTask: (message) => this.#activeTasks.get(lineKey(message)),
+      queuedInput: (id) => this.#queuedInputs.get(id),
+      dropQueuedInput: (id) => { this.#queuedInputs.delete(id) },
+      authorized: (message) => !this.#disposed && authorizeMessage(message, this.gateContext()).allow,
+      acceptInbound: (message) => this.#acceptInbound(message),
+      pendingInputs: (message) => this.pendingInputs(message),
     })
   }
 
@@ -665,107 +689,7 @@ export class ChannelsRuntime {
 
   /** Run one chat command and answer in the chat. Never starts a turn. */
   async #runCommand(message: InboundMessage, name: CommandName, args: string): Promise<void> {
-    if (name === 'schedule' || name === 'schedules') {
-      if (!this.canManage(message)) { await this.send(message, { text: '只有管理员可以管理计划。', kind: 'notice' }); return }
-      await this.#schedules.command(message, name, args); return
-    }
-    if (name === 'sessions' || name === 'session') {
-      await this.send(message, { kind: 'notice', text: '已移除手机历史会话切换。请在 DSH 查看历史会话；/new 可开始新会话。' })
-      return
-    }
-    if (name === 'projects' || name === 'project' || name === 'new') {
-      if (name !== 'projects' && !this.canManage(message)) { await this.send(message, { text: '只有管理员可以切换项目或会话。', kind: 'notice' }); return }
-      await this.send(message, { kind: 'notice', text: this.#routes.command(message, name, args) })
-      return
-    }
-    if (name === 'files' || name === 'resend') {
-      await answerArtifactCommand({
-        message, name, args, tasks: this.#tasks,
-        workspace: this.#options.workingDirectory,
-        workspaceFor: (task) => this.#routes.artifactWorkspace(task),
-        maxBytes: this.config.maxProducedBytes,
-        authorized: () => !this.#disposed && authorizeMessage(message, this.gateContext()).allow,
-        send: (outgoing) => this.send(message, outgoing),
-      })
-      return
-    }
-    if (name === 'help') {
-      await this.send(message, { text: helpText(), kind: 'notice' })
-      return
-    }
-    if (name === 'whoami') {
-      await this.send(message, {
-        text: chatParagraphs(
-          '【当前聊天】',
-          `发送者 ID：${message.senderId}`,
-          `聊天 ID：${message.conversationId}`,
-          `通道：${message.channel}（账号 ${message.accountId}）`,
-          `角色：${this.canManage(message) ? '管理员' : '成员'}`,
-          `DSH 会话：${this.#routes.snapshot(message).sessionId}`,
-        ),
-        kind: 'notice',
-      })
-      return
-    }
-    if (name === 'cancel') {
-      const active = this.#activeTasks.get(lineKey(message))
-      if (active === undefined || active.record.execution === 'completed') {
-        await this.send(message, { text: '当前没有可停止的任务。', kind: 'notice' })
-        return
-      }
-      if (active.record.senderId !== message.senderId) {
-        await this.send(message, { text: '只有任务发起者可以停止当前任务。', kind: 'notice' })
-        return
-      }
-      active.record = { ...active.record, execution: 'stopping' }
-      this.#tasks.update(message, active.record.id, { execution: 'stopping' })
-      const notice = this.send(message, { text: '已请求停止当前任务。排队消息会保留。', kind: 'notice' })
-      active.controller.abort('user-cancel')
-      await notice
-      return
-    }
-    if (name === 'clear') {
-      const entries = this.#inbox.list().filter((entry) => sameTarget(entry.message, message) && entry.message.senderId === message.senderId)
-      if (entries.length === 0) {
-        await this.send(message, { text: '你没有尚未开始的排队消息。', kind: 'notice' })
-        return
-      }
-      try { this.#inbox.clear(new Set(entries.map((entry) => entry.id))) }
-      catch {
-        await this.send(message, { text: '未能清除排队消息。请在 DSH 检查通道状态后重试。', kind: 'notice' })
-        return
-      }
-      for (const entry of entries) {
-        this.#queuedInputs.get(entry.id)?.finish?.(false)
-        this.#queuedInputs.delete(entry.id)
-        this.#acceptInbound(entry.message)
-      }
-      await this.send(message, { text: `已清除 ${entries.length} 条你的排队消息。`, kind: 'notice' })
-      return
-    }
-    if (name === 'tasks' || name === 'status') {
-      const outbox = this.#delivery.outbox.list().filter((entry) => sameTarget(entry.target, message))
-      const context = {
-        active: this.#activeTasks.get(lineKey(message))?.record,
-        interaction: this.#interactions.active(message),
-        pendingTaskIds: new Set(outbox.flatMap((entry) => entry.taskId === undefined ? [] : [entry.taskId])),
-      }
-      const text = name === 'tasks'
-        ? taskHistoryText(this.#tasks.recent(message, message.group ? message.senderId : undefined), context)
-        : taskStatusText({
-          channel: this.#adapters.get(message.channel)?.label.zh ?? message.channel,
-          latest: this.#tasks.latest(message),
-          queued: this.pendingInputs(message),
-          pending: outbox.length,
-          promptSending: context.interaction === undefined && this.#interactions.busy(message),
-          context,
-        })
-      const blocked = this.#inbox.list().some((entry) => sameTarget(entry.message, message) && this.#queuedInputs.get(entry.id)?.blocked)
-      await this.send(message, { text: blocked ? `${text}\n\n排队任务暂未开始：请在 DSH 检查项目目录及任务状态存储。` : text, kind: 'notice' })
-      return
-    }
-    const unknown: never = name
-    throw new Error(`unknown command: ${String(unknown)}`)
+    await this.#commands.run(message, name, args)
   }
 
   async #runTurn(message: InboundMessage, sessionId: string, queueSignal: AbortSignal, record: TaskRecord, project = 'default'): Promise<void> {
