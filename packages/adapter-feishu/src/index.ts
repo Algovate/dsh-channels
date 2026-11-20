@@ -18,10 +18,9 @@
  */
 import fs from 'node:fs'
 import path from 'node:path'
-import { fileURLToPath } from 'node:url'
 
 import type { AccountInfo, AdapterRuntime, ChannelAdapter, InboundMedia, IngressSink, Outgoing, SendResult, Target } from '@derekluo/dsh-channels'
-import { AsrBridge } from './asr.js'
+import { AsrBridge, sharedAsrScript } from './asr.js'
 import { createDispatcher } from './polling.js'
 import { FeishuSocket } from './socket.js'
 import { FeishuTransport, MAX_TEXT_CHARS, type FetchLike } from './transport.js'
@@ -86,22 +85,6 @@ function extensionFor(item: RawMedia): string {
   return '.bin'
 }
 
-/** Walk up to the package manifest: `dist/src` in the published package, `src` in a checkout. */
-export function packageRoot(from: string): string {
-  let dir = path.resolve(from)
-  for (let depth = 0; depth < 6; depth += 1) {
-    try {
-      if (fs.existsSync(path.join(dir, 'package.json'))) return dir
-    } catch {
-      // Keep walking.
-    }
-    const parent = path.dirname(dir)
-    if (parent === dir) break
-    dir = parent
-  }
-  return path.resolve(from)
-}
-
 export async function createAdapter({ runtime, config = {}, stateRoot = '' }: FeishuAdapterOptions): Promise<ChannelAdapter> {
   const logger = runtime?.logger ?? { info: () => {}, warn: () => {} }
   const appId = (config.appId ?? '').trim()
@@ -120,9 +103,11 @@ export async function createAdapter({ runtime, config = {}, stateRoot = '' }: Fe
   // Voice notes become text when python + whisper are available; otherwise the
   // audio path travels and the model is told it could not be transcribed. The
   // bridge is optional on purpose: a channel plugin may not require python.
-  const asr = (config.asrEnabled ?? true) && stateRoot !== ''
+  const scriptPath = config.asrScriptPath ?? sharedAsrScript()
+  if (config.asrEnabled !== false && scriptPath === undefined) logger.warn('asr bridge not found: voice notes will not be transcribed')
+  const asr = (config.asrEnabled ?? true) && stateRoot !== '' && scriptPath !== undefined
     ? new AsrBridge({
-        scriptPath: config.asrScriptPath ?? path.join(packageRoot(path.dirname(fileURLToPath(import.meta.url))), 'bin', 'asr-transcribe.py'),
+        scriptPath,
         modelDir: config.asrModelDir ?? path.join(stateRoot, 'asr-models'),
         ...(config.asrCommand === undefined ? {} : { command: config.asrCommand }),
         ...(config.asrModel === undefined ? {} : { model: config.asrModel }),

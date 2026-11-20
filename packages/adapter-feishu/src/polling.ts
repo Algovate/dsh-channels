@@ -13,12 +13,12 @@
  */
 import { setTimeout as delay } from 'node:timers/promises'
 
-import type { NormalizedInbound } from './normalize.js'
+import type { FeishuEnvelope, NormalizedInbound } from './normalize.js'
 import type { TransportLogger } from './transport.js'
 
 export interface FeishuDispatcher {
   /** Called for every reassembled event; resolves after the durable handoff. */
-  onEvent(envelope: import('./normalize.js').FeishuEnvelope): Promise<void>
+  onEvent(envelope: FeishuEnvelope): Promise<void>
 }
 
 interface DeliveryHooks {
@@ -26,7 +26,7 @@ interface DeliveryHooks {
   priority: (message: NormalizedInbound) => boolean
   /** Normalize then enrich and offer; throws DSH_INBOUND_RETRY to retain the event. */
   deliver: (message: NormalizedInbound) => Promise<void>
-  normalize: (envelope: import('./normalize.js').FeishuEnvelope, accountId: string) => NormalizedInbound | null
+  normalize: (envelope: FeishuEnvelope, accountId: string) => NormalizedInbound | null
   logger: TransportLogger
 }
 

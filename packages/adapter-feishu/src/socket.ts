@@ -84,6 +84,7 @@ export class FeishuSocket {
   #reconnectNonceMs = 30_000
   #reconnectCount = -1
   #attempts = 0
+  #budgetWarned = false
   #abort = new AbortController()
 
   constructor(options: SocketOptions) {
@@ -141,6 +142,7 @@ export class FeishuSocket {
       try {
         await this.#connect(config.URL)
         this.#attempts = 0
+        this.#budgetWarned = false
       } catch (error) {
         this.#logger.warn(`feishu websocket connect failed: ${String((error as Error)?.message ?? error)}`)
       }
@@ -214,16 +216,18 @@ export class FeishuSocket {
   }
 
   async #backoff(): Promise<void> {
-    if (this.#reconnectCount >= 0) {
-      this.#attempts += 1
-      if (this.#attempts > this.#reconnectCount) {
-        // The gateway gave a finite retry budget; wait one full interval before re-reading it.
-        this.#attempts = 0
-      }
-    }
     if (this.#stopped) return
+    this.#attempts += 1
+    // A finite ReconnectCount is treated as "slow down", not "give up": a
+    // channel that stops retrying stays dead until someone restarts the host.
+    const budgetExhausted = this.#reconnectCount >= 0 && this.#attempts > this.#reconnectCount
+    if (budgetExhausted && !this.#budgetWarned) {
+      this.#budgetWarned = true
+      this.#logger.warn(`feishu reconnect budget (${this.#reconnectCount}) exhausted; retrying at a slower pace`)
+    }
+    const base = budgetExhausted ? Math.max(this.#reconnectIntervalMs, 60_000) : this.#reconnectIntervalMs
     const jitter = this.#reconnectNonceMs * Math.random()
-    await delay(this.#reconnectIntervalMs + jitter, undefined, { signal: this.#abort.signal }).catch(() => {})
+    await delay(base + jitter, undefined, { signal: this.#abort.signal }).catch(() => {})
   }
 
   #send(bytes: Uint8Array): void {

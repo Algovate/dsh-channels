@@ -3,37 +3,14 @@ import test from 'node:test'
 import { setTimeout as delay } from 'node:timers/promises'
 
 import { decodeFrame, encodeFrame, FrameType } from '../packages/adapter-feishu/src/proto.js'
-import { FeishuSocket, toBytes, type WebSocketLike } from '../packages/adapter-feishu/src/socket.js'
+import { FeishuSocket, toBytes } from '../packages/adapter-feishu/src/socket.js'
 import { createDispatcher } from '../packages/adapter-feishu/src/polling.js'
 import { normalizeInbound, type FeishuEnvelope, type NormalizedInbound } from '../packages/adapter-feishu/src/normalize.js'
+import { MockWebSocket } from './feishu-mocks.js'
 
 const silent = { info: () => {}, warn: () => {} }
 const APP_ID = 'cli_0000000000000001'
 
-class MockWebSocket implements WebSocketLike {
-  static OPEN = 1
-  static instances: MockWebSocket[] = []
-  readonly readyState = 1
-  sent: Uint8Array[] = []
-  url: string
-  #listeners = new Map<string, Array<(data?: unknown) => void>>()
-  constructor(url: string) { this.url = url; MockWebSocket.instances.push(this) }
-
-  on(type: string, listener: (data?: unknown) => void): void {
-    const list = this.#listeners.get(type) ?? []
-    list.push(listener)
-    this.#listeners.set(type, list)
-  }
-  emit(type: string, data?: unknown): void {
-    for (const listener of this.#listeners.get(type) ?? []) listener(data)
-  }
-  open(): void { this.emit('open') }
-  message(data: Uint8Array): void { this.emit('message', data) }
-  closeSocket(): void { this.emit('close') }
-  send(data: Uint8Array): void { this.sent.push(data) }
-  close(): void {}
-  terminate(): void {}
-}
 
 function eventFrame(envelope: FeishuEnvelope, messageId: string, sum = 1, seq = 0): Uint8Array {
   return encodeFrame({
@@ -80,7 +57,7 @@ function decodeAck(bytes: Uint8Array): { code: number } {
 }
 
 test('an event is delivered and its frame acknowledged with code 200', async () => {
-  MockWebSocket.instances.length = 0
+  MockWebSocket.reset()
   const transport = { pullConnectConfig: async () => ({ URL: 'wss://gateway/ws?service_id=7', ClientConfig: { PingInterval: 120, ReconnectCount: -1, ReconnectInterval: 0, ReconnectNonce: 0 } }), signal: new AbortController().signal }
   const received: FeishuEnvelope[] = []
   const socket = new FeishuSocket({
@@ -106,7 +83,7 @@ test('an event is delivered and its frame acknowledged with code 200', async () 
 })
 
 test('fragmented events are reassembled by seq before one ack is sent', async () => {
-  MockWebSocket.instances.length = 0
+  MockWebSocket.reset()
   const transport = { pullConnectConfig: async () => ({ URL: 'wss://gateway/ws?service_id=7', ClientConfig: { PingInterval: 120, ReconnectCount: -1, ReconnectInterval: 0, ReconnectNonce: 0 } }), signal: new AbortController().signal }
   const received: FeishuEnvelope[] = []
   const socket = new FeishuSocket({
@@ -133,7 +110,7 @@ test('fragmented events are reassembled by seq before one ack is sent', async ()
 })
 
 test('a handler failure acks 500 so the gateway redelivers', async () => {
-  MockWebSocket.instances.length = 0
+  MockWebSocket.reset()
   const transport = { pullConnectConfig: async () => ({ URL: 'wss://gateway/ws?service_id=7', ClientConfig: { PingInterval: 120, ReconnectCount: -1, ReconnectInterval: 0, ReconnectNonce: 0 } }), signal: new AbortController().signal }
   const socket = new FeishuSocket({
     transport: transport as never, logger: silent, onEvent: async () => { throw new Error('durable handoff down') },
@@ -154,7 +131,7 @@ test('a handler failure acks 500 so the gateway redelivers', async () => {
 })
 
 test('a pong refreshes the reconnect timing and a ping frame stays unacknowledged', async () => {
-  MockWebSocket.instances.length = 0
+  MockWebSocket.reset()
   const transport = { pullConnectConfig: async () => ({ URL: 'wss://gateway/ws?service_id=7', ClientConfig: { PingInterval: 120, ReconnectCount: -1, ReconnectInterval: 0, ReconnectNonce: 0 } }), signal: new AbortController().signal }
   const socket = new FeishuSocket({
     transport: transport as never, logger: silent, onEvent: async () => {},

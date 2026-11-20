@@ -180,23 +180,26 @@ export class FeishuTransport {
     return envelope.data
   }
 
-  /** Send one text message, optionally with native card buttons. */
-  async sendText(chatId: string, text: string, actions?: readonly OutgoingAction[]): Promise<SendResult> {
+  /** Post one message and map the envelope; the one place that builds the URL. */
+  async #postMessage(chatId: string, msgType: string, content: string, failedCode: string): Promise<SendResult> {
     try {
-      const useCard = actions !== undefined && actions.length > 0
-      const body = {
-        receive_id: chatId,
-        msg_type: useCard ? 'interactive' : 'text',
-        content: useCard ? cardContent(text, actions) : JSON.stringify({ text }),
-      }
       const envelope = await this.#request<{ message_id?: string }>(
         `${this.#domain}/open-apis/im/v1/messages?receive_id_type=chat_id`,
-        { method: 'POST', headers: await this.#auth({ 'content-type': 'application/json; charset=utf-8' }), body: JSON.stringify(body) },
+        {
+          method: 'POST',
+          headers: await this.#auth({ 'content-type': 'application/json; charset=utf-8' }),
+          body: JSON.stringify({ receive_id: chatId, msg_type: msgType, content }),
+        },
       )
-      return this.#toSendResult(envelope, 'send-failed')
+      return this.#toSendResult(envelope, failedCode)
     } catch (error) {
-      return { ok: false, code: 'send-failed', detail: String((error as Error)?.message ?? error) }
+      return { ok: false, code: failedCode, detail: String((error as Error)?.message ?? error) }
     }
+  }
+
+  /** Send one plain text message. */
+  sendText(chatId: string, text: string): Promise<SendResult> {
+    return this.#postMessage(chatId, 'text', JSON.stringify({ text }), 'send-failed')
   }
 
   /**
@@ -222,17 +225,8 @@ export class FeishuTransport {
   }
 
   /** Send a card message (text plus optional buttons); only cards are editable later. */
-  async sendCard(chatId: string, text: string, actions?: readonly OutgoingAction[]): Promise<SendResult> {
-    try {
-      const body = { receive_id: chatId, msg_type: 'interactive', content: cardContent(text, actions) }
-      const envelope = await this.#request<{ message_id?: string }>(
-        `${this.#domain}/open-apis/im/v1/messages?receive_id_type=chat_id`,
-        { method: 'POST', headers: await this.#auth({ 'content-type': 'application/json; charset=utf-8' }), body: JSON.stringify(body) },
-      )
-      return this.#toSendResult(envelope, 'send-failed')
-    } catch (error) {
-      return { ok: false, code: 'send-failed', detail: String((error as Error)?.message ?? error) }
-    }
+  sendCard(chatId: string, text: string, actions?: readonly OutgoingAction[]): Promise<SendResult> {
+    return this.#postMessage(chatId, 'interactive', cardContent(text, actions), 'send-failed')
   }
 
   /** Upload one local image and return its image_key. */
@@ -270,31 +264,13 @@ export class FeishuTransport {
 
   /** Send one already-uploaded resource as a chat message with an optional caption. */
   async sendResource(chatId: string, kind: 'image' | 'file' | 'video' | 'voice', key: string, caption: string): Promise<SendResult> {
-    try {
-      const msgType = kind === 'image' ? 'image' : kind === 'video' ? 'media' : kind === 'voice' ? 'audio' : 'file'
-      const content = kind === 'image'
-        ? JSON.stringify({ image_key: key })
-        : kind === 'video'
-          ? JSON.stringify({ file_key: key, image_key: '' })
-          : kind === 'voice'
-            ? JSON.stringify({ file_key: key })
-            : JSON.stringify({ file_key: key })
-      const envelope = await this.#request<{ message_id?: string }>(
-        `${this.#domain}/open-apis/im/v1/messages?receive_id_type=chat_id`,
-        {
-          method: 'POST',
-          headers: await this.#auth({ 'content-type': 'application/json; charset=utf-8' }),
-          body: JSON.stringify({ receive_id: chatId, msg_type: msgType, content }),
-        },
-      )
-      const result = this.#toSendResult(envelope, 'send-media-failed')
-      if (result.ok && caption !== '') {
-        await this.sendText(chatId, caption).catch(() => { /* The resource already landed; the caption is best effort. */ })
-      }
-      return result
-    } catch (error) {
-      return { ok: false, code: 'send-media-failed', detail: String((error as Error)?.message ?? error) }
+    const msgType = kind === 'image' ? 'image' : kind === 'video' ? 'media' : kind === 'voice' ? 'audio' : 'file'
+    const content = kind === 'image' ? JSON.stringify({ image_key: key }) : JSON.stringify({ file_key: key, ...(kind === 'video' ? { image_key: '' } : {}) })
+    const result = await this.#postMessage(chatId, msgType, content, 'send-media-failed')
+    if (result.ok && caption !== '') {
+      await this.sendText(chatId, caption).catch(() => { /* The resource already landed; the caption is best effort. */ })
     }
+    return result
   }
 
   /** Download an inbound resource (image, file, video or audio) with a hard byte cap. */

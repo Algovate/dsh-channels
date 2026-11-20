@@ -9,32 +9,12 @@ import { createAdapter } from '../packages/adapter-feishu/src/index.js'
 import { encodeFrame, FrameType } from '../packages/adapter-feishu/src/proto.js'
 import type { IngressSink } from '../packages/core/src/types.js'
 import type { FeishuEnvelope } from '../packages/adapter-feishu/src/normalize.js'
-import type { WebSocketLike } from '../packages/adapter-feishu/src/socket.js'
 import type { FetchLike } from '../packages/adapter-feishu/src/transport.js'
+import { MockWebSocket } from './feishu-mocks.js'
 
 const silent = { info: () => {}, warn: () => {} }
 const APP_ID = 'cli_0000000000000001'
 
-class MockWebSocket implements WebSocketLike {
-  static OPEN = 1
-  static instances: MockWebSocket[] = []
-  readonly readyState = 1
-  terminated = false
-  url: string
-  #listeners = new Map<string, Array<(data?: unknown) => void>>()
-  constructor(url: string) { this.url = url; MockWebSocket.instances.push(this) }
-  on(type: string, listener: (data?: unknown) => void): void {
-    const list = this.#listeners.get(type) ?? []
-    list.push(listener)
-    this.#listeners.set(type, list)
-  }
-  emit(type: string, data?: unknown): void { for (const listener of this.#listeners.get(type) ?? []) listener(data) }
-  open(): void { this.emit('open') }
-  message(data: Uint8Array): void { this.emit('message', data) }
-  send(): void {}
-  close(): void {}
-  terminate(): void { this.terminated = true }
-}
 
 function imageEnvelope(): FeishuEnvelope {
   return {
@@ -122,7 +102,7 @@ test('a target for a different app never uses the active credential', async () =
 test('an inbound image is downloaded before the durable handoff', { timeout: 5000 }, async (t) => {
   const stateRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'feishu-e2e-'))
   t.after(() => fs.rmSync(stateRoot, { recursive: true, force: true }))
-  MockWebSocket.instances.length = 0
+  MockWebSocket.reset()
   const delivered: Array<{ media: number; text: string }> = []
   const adapter = await createAdapter({
     runtime: { logger: silent, canReceive: () => true, canBypassInbound: () => false },
@@ -146,7 +126,7 @@ test('an inbound image is downloaded before the durable handoff', { timeout: 500
 })
 
 test('repeated start keeps the same socket; a new start after stop reconnects', { timeout: 5000 }, async () => {
-  MockWebSocket.instances.length = 0
+  MockWebSocket.reset()
   const adapter = await createAdapter({
     config: { appId: APP_ID, appSecret: 's', mediaEnabled: false, fetchImpl: wsFetch(), webSocketImpl: MockWebSocket as never },
   })

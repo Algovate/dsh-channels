@@ -1,7 +1,7 @@
 /**
  * Voice notes → text, through a long-lived Python bridge.
  *
- * `bin/asr-bridge.py` is the reference implementation's script (MIT): one JSON
+ * `@derekluo/dsh-channels/bin/asr-transcribe.py` (shared by both adapters): one JSON
  * request per line on stdin, one JSON answer per line on stdout, whisper behind
  * it (mlx-whisper on Apple silicon, faster-whisper elsewhere). Spawning it once
  * and keeping it alive matters: the first transcription warms a model, later
@@ -16,15 +16,32 @@
  */
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import fs from 'node:fs'
+import { createRequire } from 'node:module'
 import { StringDecoder } from 'node:string_decoder'
 import path from 'node:path'
 
 export type Transcription = { ok: true; text: string } | { ok: false; reason: string }
 
+/** The bridge ships with the core package so both adapters share one copy. */
+export function sharedAsrScript(): string | undefined {
+  try {
+    const require = createRequire(import.meta.url)
+    return path.join(path.dirname(require.resolve('@derekluo/dsh-channels/package.json')), 'bin', 'asr-transcribe.py')
+  } catch {
+    return undefined
+  }
+}
+
 export interface AsrOptions {
   command?: string
   scriptPath: string
   modelDir: string
+  /** Model size ("small") or an explicit checkpoint path. */
+  model?: string
+  /** Compute device for faster-whisper: "cpu" (default) or "mps". */
+  device?: string
+  /** ctranslate2 compute type; defaults to int8 on cpu and float16 on mps. */
+  computeType?: string
   language?: string
   timeoutMs?: number
   logger: { info: (line: string) => void; warn: (line: string) => void }
@@ -58,8 +75,11 @@ export class AsrBridge {
     const command = this.#options.command ?? 'python3'
     const env: NodeJS.ProcessEnv = {
       ...process.env,
-      DSH_WEIXIN_ASR_MODEL_DIR: this.#options.modelDir,
-      ...(this.#options.language === undefined ? {} : { DSH_WEIXIN_ASR_LANGUAGE: this.#options.language }),
+      DSH_ASR_MODEL_DIR: this.#options.modelDir,
+      ...(this.#options.model === undefined ? {} : { DSH_ASR_MODEL: this.#options.model }),
+      ...(this.#options.device === undefined ? {} : { DSH_ASR_DEVICE: this.#options.device }),
+      ...(this.#options.computeType === undefined ? {} : { DSH_ASR_COMPUTE_TYPE: this.#options.computeType }),
+      ...(this.#options.language === undefined ? {} : { DSH_ASR_LANGUAGE: this.#options.language }),
     }
     try {
       const child = (this.#options.spawnImpl ?? spawn)(command, [this.#options.scriptPath], { env, stdio: 'pipe' }) as ChildProcessWithoutNullStreams

@@ -18,7 +18,7 @@
 
 ## 2026-11-20 飞书语音转写（whisper）真机验证
 
-给飞书适配器接入可选语音转写：随包提供 `bin/asr-transcribe.py`（由微信桥接通用化，读取 `DSH_FEISHU_ASR_*`，也接受 `DSH_WEIXIN_ASR_*`），并新增 `AsrBridge` 保持进程常驻。转写在附件落盘后进行，文本写入 `InboundMedia.transcript`；转写失败只记原因，音频照常交付。新增配置 `asrEnabled`/`asrCommand`/`asrModel`/`asrModelDir`/`asrLanguage`/`asrTimeoutMs`/`asrScriptPath`。
+给飞书适配器接入可选语音转写：桥接脚本通用化后只随**核心包**发布一份（`bin/asr-transcribe.py`），微信与飞书共用，环境变量以 `DSH_ASR_*` 为准并兼容旧前缀；新增 `AsrBridge` 保持进程常驻。转写在附件落盘后进行，文本写入 `InboundMedia.transcript`；转写失败只记原因，音频照常交付。新增配置 `asrEnabled`/`asrCommand`/`asrModel`/`asrModelDir`/`asrLanguage`/`asrTimeoutMs`/`asrScriptPath`。
 
 真机过程中修复了一个两个适配器共有的解析缺陷：mlx-whisper 会把 `Detected language: …` 写到 stdout，旧解析器把它当成协议应答并以 `unexpected extra ASR answer` 失败。现在只把以 `{` 开头的行当作协议应答，其余作为诊断日志，微信与飞书共用该修复。
 

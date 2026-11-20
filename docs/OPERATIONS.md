@@ -211,15 +211,15 @@ state="${DSH_CHANNELS_STATE_DIR:-$HOME/.dsh/channels}"
 python3 -m venv "$HOME/.venvs/dsh-asr"
 "$HOME/.venvs/dsh-asr/bin/python" -m pip install mlx-whisper
 printf '{"wav":"/absolute/path/to/sample.wav"}\n' |
-  DSH_WEIXIN_ASR_MODEL_DIR="$state/asr-models" \
-  "$HOME/.venvs/dsh-asr/bin/python" packages/adapter-weixin/bin/asr-bridge.py
+  DSH_ASR_MODEL_DIR="$state/asr-models" \
+  "$HOME/.venvs/dsh-asr/bin/python" <profile>/node_modules/@derekluo/dsh-channels/bin/asr-transcribe.py
 ```
 
-成功时输出 `{"ok":true,"text":"…"}`。首次转写可能需要下载模型。若要离线运行，先把 MLX 的 small 模型放到模型根目录的 `mlx-community__whisper-small-mlx/`，或把 faster-whisper 的 small 模型放到 `Systran__faster-whisper-small/`。两种引擎需要不同权重；也可用环境变量 `DSH_WEIXIN_ASR_MODEL_PATH` 指定模型路径。
+成功时输出 `{"ok":true,"text":"…"}`。首次转写可能需要下载模型。若要离线运行，先把 MLX 的 small 模型放到模型根目录的 `mlx-community__whisper-small-mlx/`，或把 faster-whisper 的 small 模型放到 `Systran__faster-whisper-small/`。两种引擎需要不同权重；也可用环境变量 `DSH_ASR_MODEL_PATH` 指定模型路径。桥接脚本只随核心包发布一份，两个适配器共用；环境变量以 `DSH_ASR_*` 为准，旧版 `DSH_WEIXIN_ASR_*`、`DSH_FEISHU_ASR_*` 仍可读取。
 
 在微信的 `adapterConfig` 里把 `asrCommand` 设为上述 Python 的绝对路径。可选 `asrModelDir`（默认微信状态根目录下的 `asr-models/`）、`asrLanguage`（默认由引擎识别）及 `asrEnabled`（默认开启）。
 
-飞书用同一套参数，但读取 `DSH_FEISHU_ASR_*` 环境变量，桥接脚本随包提供为 `bin/asr-transcribe.py`（也接受 `DSH_WEIXIN_ASR_*`，便于复用同一模型目录）。可直接复用上面的虚拟环境与模型：
+飞书用同一套参数与同一个桥接脚本，也可直接复用上面的虚拟环境与模型：
 
 ```json
 {

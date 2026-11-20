@@ -49,7 +49,6 @@ interface FeishuEvent {
   token?: string
   operator?: { open_id?: string; union_id?: string; name?: string }
   action?: { value?: unknown; tag?: string; name?: string }
-  [key: string]: unknown
 }
 
 /** One attachment as Feishu named it, before the adapter downloads it. */
@@ -89,9 +88,9 @@ function postText(content: Record<string, unknown>, mentions: FeishuMention[] | 
     let line = ''
     for (const element of paragraph as Array<Record<string, unknown>>) {
       const tag = typeof element['tag'] === 'string' ? element['tag'] : ''
-      if (tag === 'text' || tag === 'a') line += String(element['text'] ?? '')
+      if (tag === 'text') line += String(element['text'] ?? '')
+      else if (tag === 'a') line += String(element['text'] ?? element['href'] ?? '')
       else if (tag === 'at') line += typeof element['user_name'] === 'string' ? `@${element['user_name']}` : '@all'
-      else if (tag === 'a' && typeof element['href'] === 'string') line += String(element['text'] ?? element['href'])
     }
     lines.push(line)
   }

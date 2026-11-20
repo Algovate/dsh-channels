@@ -61,14 +61,9 @@ export function resolveMediaType(bytes: Uint8Array, declaredMime: string | undef
     return sniffed
   }
   if (bytes.length > 0 && isProbablyText(bytes) && /\.(md|markdown|txt|json|csv|log|ya?ml|xml|html?|ts|js|py|sh|toml|ini|cfg)$/i.test(fileName ?? '')) {
-    return { mime: 'text/plain', extension: fallbackExtension || textExtension(fileName) }
+    return { mime: 'text/plain', extension: fallbackExtension }
   }
   return { mime: declaredMime ?? 'application/octet-stream', extension: fallbackExtension }
-}
-
-function textExtension(fileName: string | undefined): string {
-  const match = /\.([A-Za-z0-9]{1,8})$/.exec(fileName ?? '')
-  return match === null ? '.txt' : `.${match[1]!.toLowerCase()}`
 }
 
 /** A conservative text check: no NUL bytes and valid UTF-8-ish bytes. */

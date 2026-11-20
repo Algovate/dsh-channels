@@ -17,8 +17,7 @@
     "./package.json": "./package.json"
   },
   "files": [
-    "dist",
-    "bin"
+    "dist"
   ],
   "scripts": {
     "build": "tsc -b"

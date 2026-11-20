@@ -10,8 +10,8 @@ import { AsrBridge } from '../packages/adapter-feishu/src/asr.js'
 import { createAdapter } from '../packages/adapter-feishu/src/index.js'
 import { encodeFrame, FrameType } from '../packages/adapter-feishu/src/proto.js'
 import type { FeishuEnvelope } from '../packages/adapter-feishu/src/normalize.js'
-import type { WebSocketLike } from '../packages/adapter-feishu/src/socket.js'
 import type { FetchLike } from '../packages/adapter-feishu/src/transport.js'
+import { MockWebSocket } from './feishu-mocks.js'
 import type { IngressSink } from '../packages/core/src/types.js'
 
 const silent = { info: () => {}, warn: () => {} }
@@ -68,24 +68,6 @@ test('a transcription failure is a reason, never an exception', async () => {
   assert.match(result.ok === false ? result.reason : '', /model missing/)
 })
 
-class MockWebSocket implements WebSocketLike {
-  static OPEN = 1
-  static instances: MockWebSocket[] = []
-  readonly readyState = 1
-  #listeners = new Map<string, Array<(data?: unknown) => void>>()
-  constructor() { MockWebSocket.instances.push(this) }
-  on(type: string, listener: (data?: unknown) => void): void {
-    const list = this.#listeners.get(type) ?? []
-    list.push(listener)
-    this.#listeners.set(type, list)
-  }
-  emit(type: string, data?: unknown): void { for (const listener of this.#listeners.get(type) ?? []) listener(data) }
-  open(): void { this.emit('open') }
-  message(data: Uint8Array): void { this.emit('message', data) }
-  send(): void {}
-  close(): void {}
-  terminate(): void {}
-}
 
 function audioEnvelope(): FeishuEnvelope {
   return {
@@ -127,7 +109,7 @@ function wsFetch(): FetchLike {
 test('an inbound Feishu voice note carries its transcript to the sink', { timeout: 8000 }, async (t) => {
   const stateRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'feishu-asr-e2e-'))
   t.after(() => fs.rmSync(stateRoot, { recursive: true, force: true }))
-  MockWebSocket.instances.length = 0
+  MockWebSocket.reset()
   const delivered: Array<{ transcript: string | undefined; mime: string }> = []
   const adapter = await createAdapter({
     runtime: { logger: silent, canReceive: () => true, canBypassInbound: () => false },
@@ -158,7 +140,7 @@ test('an inbound Feishu voice note carries its transcript to the sink', { timeou
 test('a failed transcription still delivers the audio without a transcript', { timeout: 8000 }, async (t) => {
   const stateRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'feishu-asr-fail-'))
   t.after(() => fs.rmSync(stateRoot, { recursive: true, force: true }))
-  MockWebSocket.instances.length = 0
+  MockWebSocket.reset()
   const delivered: Array<{ transcript: string | undefined; media: number }> = []
   const adapter = await createAdapter({
     runtime: { logger: silent, canReceive: () => true, canBypassInbound: () => false },
@@ -207,7 +189,7 @@ test('the configured model is passed to the bridge environment', async () => {
   }) as unknown as typeof import('node:child_process').spawn
   const asr = bridge(spawnImpl, { model: 'large-v3-turbo' })
   await asr.transcribe(audioFile())
-  assert.equal(envs[0]?.['DSH_FEISHU_ASR_MODEL'], 'large-v3-turbo')
+  assert.equal(envs[0]?.['DSH_ASR_MODEL'], 'large-v3-turbo')
 })
 
 test('the configured device and compute type reach the bridge environment', async () => {
@@ -223,6 +205,6 @@ test('the configured device and compute type reach the bridge environment', asyn
   }) as unknown as typeof import('node:child_process').spawn
   const asr = bridge(spawnImpl, { device: 'mps', computeType: 'float16' })
   await asr.transcribe(audioFile())
-  assert.equal(envs[0]?.['DSH_FEISHU_ASR_DEVICE'], 'mps')
-  assert.equal(envs[0]?.['DSH_FEISHU_ASR_COMPUTE_TYPE'], 'float16')
+  assert.equal(envs[0]?.['DSH_ASR_DEVICE'], 'mps')
+  assert.equal(envs[0]?.['DSH_ASR_COMPUTE_TYPE'], 'float16')
 })
