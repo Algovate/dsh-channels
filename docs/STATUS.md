@@ -1,5 +1,14 @@
 # 验证状态
 
+## 2026-11-20 重构 Phase 3：拆分 runtime/turns、重建客户端、评估 SDK
+
+- **拆分**：入站策略、命令分发、会话池分别抽成 `inbound/policy.ts`、`commands-runner.ts`、`agent-pool.ts`；`runtime.ts` 940 → 837 行，`turns.ts` 667 → 466 行。
+- **客户端**：`client.js` 从 660 行单文件改为 `packages/core/client-src/` 模块（渠道表、Chat 行、状态卡、编辑器），由 esbuild 打包为宿主加载的单文件，React 由宿主注入；`npm run build` 会生成后再测试。
+- **SDK 评估**：官方 `@larksuiteoapi/node-sdk` 1.76.0 覆盖长连接/回调/REST，但带 84 个传递依赖、约 41MB；决定保留手写协议栈（ADR-13），`socket.ts`/`proto.ts` 保持可替换边界。
+- **顺带修复**：单写者锁的真实竞态——赢家 `mkdir` 后、写 `owner.json` 前，输家会误判陈旧并删除锁目录；现在拿不到 owner 时短暂重试，并发启动测试重复 5 次稳定通过。
+
+部署提交 `a5c524d`（宿主进程 `77386`，发布目录 `~/dsh-plugin-pkgs/dsh-channels/a5c524d/`）。安装后的 `client.js` 为构建产物；微信与飞书两个通道注册、飞书长连接建立；无新告警。完整 `npm test` **517 项通过**。
+
 ## 2026-11-20 重构 Phase 2：状态持久化换成 SQLite
 
 状态层从「整份 JSON 原子重写 + v1/v2 迁移 + legacy 镜像 + 双文件锁」换成 SQLite：`state.db` 的 `sections` 表按事务保存七个段，单写者锁改为原子 `mkdir` 的 `state.lock.d/owner.json`。首次打开在事务里导入旧 `state.json` 与六个旧段文件，校验后归档到 `legacy-state/*.bak`；归档中断会在下次打开补完，不重复导入。`doctor --state` 只读查询数据库，`--migrate` 执行同一导入。
