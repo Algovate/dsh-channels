@@ -52,7 +52,7 @@ Telegram 的 [polling.ts](../packages/adapter-telegram/src/polling.ts) 只负责
 
 - 核心通过宿主 `channels` 存储域或 状态库的 `counters` 段保存限流计数。会话线号写入 状态库的 `lines` 段，原子保存成功后才确认会话或项目切换，损坏状态拒绝新输入和切换；旧 counters 里的线号继续兼容读取。配额在单个运行实例内执行，每个发送者、每类配额只保存当前窗口一行；升级时保留旧文件或域中当前窗口的计数。状态根由 `state.lock.d` 单写者锁保护：原子 mkdir 领取，`owner.json` 记录 pid；持有者存活时拒绝其它实例，进程退出后可接管。记录形状由 [schema.ts](../packages/core/src/store/schema.ts) 声明，文件清单由 [layout.ts](../packages/core/src/store/layout.ts) 定义。
 - 出站调用前后各记一条流水；失败的普通文本回复可按原投递 ID 和原地址重试，每成功发送一条就保存剩余进度；平台的等待时间与本地退避取较大值，入队/删除失败不会报告成功，队列满时保留既有回复并拒绝新增项；同聊天的后续回复等待积压发完，其他聊天独立重试。手机 `/status` 展示当前聊天的任务执行与投递状态、排队数量及交互提示，不读取 journal；最近发送预览由桌面状态卡提供。
-- 浏览器按 [client.js](../packages/core/client.js) 的 `CHANNELS` 表渲染通道消息。状态卡片读取 `GET /channels/status`，通过 `POST /channels/allowlist`、`POST /channels/pairing` 和 `POST /channels/settings` 写入；四个路由都使用宿主 `connection.requestRejection()` 验证请求；缺少鉴权服务时返回 503。写入还校验 `Origin`，正文限制 4096 字节、10 秒，落盘成功后才更新运行值。状态只列出启动成功的适配器及其实际账号与账号级白名单数量。
+- 浏览器按生成的 [client.js](../packages/core/client.js)（源码在 [client-src](../packages/core/client-src)，`npm run build:client` 打包）中的 `CHANNELS` 表渲染通道消息。状态卡片读取 `GET /channels/status`，通过 `POST /channels/allowlist`、`POST /channels/pairing` 和 `POST /channels/settings` 写入；四个路由都使用宿主 `connection.requestRejection()` 验证请求；缺少鉴权服务时返回 503。写入还校验 `Origin`，正文限制 4096 字节、10 秒，落盘成功后才更新运行值。状态只列出启动成功的适配器及其实际账号与账号级白名单数量。
 
 ## 手机任务控制
 

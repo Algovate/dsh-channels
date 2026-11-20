@@ -54,7 +54,7 @@ try {
 
 1. 按[现有适配器](../packages/adapter-telegram)建立工作区包和 TypeScript 项目引用，不复制核心实现。
 2. 分开平台调用、消息归一化和适配器入口。对网络调用设置读取限制和取消机制。用可替换的网络调用测试游标推进、失败和关闭。
-3. 在 [client.js](../packages/core/client.js) 的 `CHANNELS` 添加 Chat 行定义。这个表在浏览器端是静态的；宿主加载新通道不会自动注册渲染器。
+3. 在 [client-src/channels.js](../packages/core/client-src/channels.js) 的 `CHANNELS` 添加 Chat 行定义，然后运行 `npm run build:client` 重新生成宿主加载的 `client.js`。这个表在浏览器端是静态的；宿主加载新通道不会自动注册渲染器。
 4. 运行 `npm test`，检查构建产物，再按[安装指南](OPERATIONS.md#安装)安装并启用。
 
 普通消息持久交接失败时，核心入站处理器抛出 `code: "DSH_INBOUND_RETRY"` 的错误。适配器须保留或回退轮询位置并退避重投，不能确认这条更新；其他单条处理错误仍按普通失败记录。需要私有回复上下文的平台可将它放在 `InboundMessage.raw`，并提供可选的 `restoreInbound(message)`，在核心恢复排队消息前重建路由；不要覆盖比恢复消息更新的上下文。

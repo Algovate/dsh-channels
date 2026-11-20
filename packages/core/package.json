@@ -25,7 +25,8 @@
     "dsh-channels-doctor": "bin/doctor.mjs"
   },
   "scripts": {
-    "build": "tsc -b"
+    "build": "tsc -b",
+    "build:client": "node ../../scripts/build-client.mjs"
   },
   "dependencies": {
     "@deepseek-ai/schemastery": "~3.18.4",

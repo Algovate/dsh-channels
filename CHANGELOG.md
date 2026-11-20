@@ -2,6 +2,7 @@
 
 ## 0.1.0 — 未发布
 
+- 重构 Phase 3（UI）：`client.js` 拆成 `packages/core/client-src/` 下的渠道表、Chat 行、状态卡与编辑器模块，用 esbuild 打包为单文件（React 由宿主注入、保持外部）；新增 `npm run build:client`，构建流程会先生成再测试。
 - 重构 Phase 2：状态持久化从自研 JSON 文档（原子写 + v1/v2 迁移 + legacy 镜像 + 双文件锁）换成 SQLite（`state.db` 的 `sections` 表）。多段提交用事务；首次打开一次性导入旧 `state.json` 与旧段文件并归档到 `legacy-state/`；单写者锁改为原子 mkdir 的 `state.lock.d/`。`doctor --migrate` 与 `--state` 同步更新。
 - 重构 Phase 1：历史计划/评审/部署日记归档到 `docs/notes/`，`STATUS.md` 只保留当前记录；新增 `@derekluo/dsh-channels/adapter-kit`（`safeFileSegment`/`extensionOfName`/`defaultExtensionFor`）供三个适配器共用，适配器对核心包改为必需运行时依赖。
 - 重构：ASR 桥接脚本从两个适配器各自一份收敛为核心包 `bin/asr-transcribe.py` 一份，微信与飞书共用；环境变量统一为 `DSH_ASR_*`（兼容旧 `DSH_WEIXIN_ASR_*`/`DSH_FEISHU_ASR_*`），两个适配器都支持 `asrModel`/`asrDevice`/`asrComputeType`。飞书 transport 的发送路径合并为单入口，事件归一化删除不可达分支，重连预算改为降速重试，测试共享 `test/feishu-mocks.ts`。

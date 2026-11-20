@@ -20,7 +20,7 @@
 | 三套配置来源 | loader patch + `config.json` overlay + live settings，25 个字段手写校验 | 一个文件、一个 schema、启动校验；仅安全字段热更新 |
 | outbox 与 journal 双写 | 投递状态机写两遍 | outbox 是唯一状态，诊断走普通日志 |
 | 上帝模块 | `runtime.ts` 940 行、`turns.ts` 667 行 | `ingest` / `turn-runner` / `outbox-worker` 三块 |
-| 手写 UI 运行时 | `client.js` 660 行自建加载器 | 服务端页面或构建产物 |
+| 手写 UI 运行时 | `client.js` 660 行单文件 | 已拆成 `client-src/` 模块，用 esbuild 打包成宿主加载的 `client.js` |
 | 适配器重复 | `safeName`/扩展名/落盘三份 | 核心 `adapter-kit` 纯函数（本阶段已完成） |
 | 飞书手写协议栈 | `socket.ts`+`proto.ts` 约 570 行 | 评估官方 SDK，与零依赖取舍 |
 
