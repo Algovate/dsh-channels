@@ -202,7 +202,7 @@ printf '%s\n' "$package_dir"
 
 ## 语音转写
 
-微信可用可选的 `silk-wasm` 将 SILK 转成 WAV。转写另需 Python 和模型；转写不可用时保留已保存的音频，模型会收到无法读取音频的说明。
+微信可用可选的 `silk-wasm` 将 SILK 转成 WAV；飞书语音本身就是 Ogg/Opus，whisper 可直接解码，无需转码。转写另需 Python 和模型；转写不可用时保留已保存的音频，模型会收到无法读取音频的说明。两个适配器可共用同一个 Python 环境与模型目录。
 
 在独立虚拟环境安装所用引擎。下例给出 Apple silicon 的 MLX 方案；CPU 方案将 `mlx-whisper` 换成 `faster-whisper`。检查时使用一个已存在的 WAV 文件：
 
@@ -218,6 +218,23 @@ printf '{"wav":"/absolute/path/to/sample.wav"}\n' |
 成功时输出 `{"ok":true,"text":"…"}`。首次转写可能需要下载模型。若要离线运行，先把 MLX 的 small 模型放到模型根目录的 `mlx-community__whisper-small-mlx/`，或把 faster-whisper 的 small 模型放到 `Systran__faster-whisper-small/`。两种引擎需要不同权重；也可用环境变量 `DSH_WEIXIN_ASR_MODEL_PATH` 指定模型路径。
 
 在微信的 `adapterConfig` 里把 `asrCommand` 设为上述 Python 的绝对路径。可选 `asrModelDir`（默认微信状态根目录下的 `asr-models/`）、`asrLanguage`（默认由引擎识别）及 `asrEnabled`（默认开启）。
+
+飞书用同一套参数，但读取 `DSH_FEISHU_ASR_*` 环境变量，桥接脚本随包提供为 `bin/asr-transcribe.py`（也接受 `DSH_WEIXIN_ASR_*`，便于复用同一模型目录）。可直接复用上面的虚拟环境与模型：
+
+```json
+{
+  "adapterConfig": {
+    "@derekluo/dsh-channels-feishu": {
+      "appId": "cli_…",
+      "appSecret": "…",
+      "asrCommand": "/Users/example/.venvs/dsh-asr/bin/python",
+      "asrModelDir": "/Users/example/.dsh/channels/asr-models"
+    }
+  }
+}
+```
+
+可选 `asrLanguage`、`asrTimeoutMs`（默认 60000）、`asrEnabled`（默认开启）和 `asrScriptPath`（换成自定义桥接脚本）。
 
 ## 手机任务控制
 

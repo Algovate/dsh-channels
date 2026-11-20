@@ -1,6 +1,6 @@
 # dsh-channels · 通道
 
-在个人微信或 Telegram 里使用 DeepSeek Harness（DSH）agent。这是一个装进 DSH profile 的插件包（bundle）：发来的消息会进入 DSH 会话，回复、提问、审批和附件会回到原聊天。微信可选配语音转写。
+在个人微信或 Telegram 里使用 DeepSeek Harness（DSH）agent。这是一个装进 DSH profile 的插件包（bundle）：发来的消息会进入 DSH 会话，回复、提问、审批和附件会回到原聊天。微信和飞书可选配语音转写。
 
 ![模拟演示：从微信发消息，DSH 处理回合并回复到原聊天](docs/demo.gif)
 

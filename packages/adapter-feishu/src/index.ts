@@ -18,8 +18,10 @@
  */
 import fs from 'node:fs'
 import path from 'node:path'
+import { fileURLToPath } from 'node:url'
 
 import type { AccountInfo, AdapterRuntime, ChannelAdapter, InboundMedia, IngressSink, Outgoing, SendResult, Target } from '@derekluo/dsh-channels'
+import { AsrBridge } from './asr.js'
 import { createDispatcher } from './polling.js'
 import { FeishuSocket } from './socket.js'
 import { FeishuTransport, MAX_TEXT_CHARS, type FetchLike } from './transport.js'
@@ -42,10 +44,22 @@ export interface FeishuAdapterOptions {
     botId?: string
     mediaEnabled?: boolean
     maxInboundBytes?: number
+    /** Transcribe inbound voice notes with the shipped Python bridge (default on). */
+    asrEnabled?: boolean
+    /** Python interpreter for the bridge; defaults to python3. */
+    asrCommand?: string
+    /** Where whisper checkpoints live; defaults to <state>/asr-models. */
+    asrModelDir?: string
+    asrLanguage?: string
+    asrTimeoutMs?: number
+    /** Override the shipped bridge script (e.g. a custom transcriber). */
+    asrScriptPath?: string
     /** Injected in tests: the real fetch, so a request can be stepped. */
     fetchImpl?: FetchLike
     /** Injected in tests: a fake WebSocket constructor. */
     webSocketImpl?: ConstructorParameters<typeof FeishuSocket>[0]['webSocketImpl']
+    /** Injected in tests: a fake spawn for the ASR bridge. */
+    asrSpawnImpl?: ConstructorParameters<typeof AsrBridge>[0]['spawnImpl']
   }
 }
 
@@ -66,6 +80,22 @@ function extensionFor(item: RawMedia): string {
   return '.bin'
 }
 
+/** Walk up to the package manifest: `dist/src` in the published package, `src` in a checkout. */
+export function packageRoot(from: string): string {
+  let dir = path.resolve(from)
+  for (let depth = 0; depth < 6; depth += 1) {
+    try {
+      if (fs.existsSync(path.join(dir, 'package.json'))) return dir
+    } catch {
+      // Keep walking.
+    }
+    const parent = path.dirname(dir)
+    if (parent === dir) break
+    dir = parent
+  }
+  return path.resolve(from)
+}
+
 export async function createAdapter({ runtime, config = {}, stateRoot = '' }: FeishuAdapterOptions): Promise<ChannelAdapter> {
   const logger = runtime?.logger ?? { info: () => {}, warn: () => {} }
   const appId = (config.appId ?? '').trim()
@@ -80,6 +110,21 @@ export async function createAdapter({ runtime, config = {}, stateRoot = '' }: Fe
   const maxInboundBytes = Number.isFinite(config.maxInboundBytes) ? Math.max(0, Number(config.maxInboundBytes)) : DEFAULT_MAX_INBOUND_BYTES
   const mediaEnabled = config.mediaEnabled !== false && mediaRoot !== ''
   if (config.mediaEnabled !== false && mediaRoot === '') logger.warn('no state root: Feishu media will not be saved')
+
+  // Voice notes become text when python + whisper are available; otherwise the
+  // audio path travels and the model is told it could not be transcribed. The
+  // bridge is optional on purpose: a channel plugin may not require python.
+  const asr = (config.asrEnabled ?? true) && stateRoot !== ''
+    ? new AsrBridge({
+        scriptPath: config.asrScriptPath ?? path.join(packageRoot(path.dirname(fileURLToPath(import.meta.url))), 'bin', 'asr-transcribe.py'),
+        modelDir: config.asrModelDir ?? path.join(stateRoot, 'asr-models'),
+        ...(config.asrCommand === undefined ? {} : { command: config.asrCommand }),
+        ...(config.asrLanguage === undefined ? {} : { language: config.asrLanguage }),
+        ...(config.asrTimeoutMs === undefined ? {} : { timeoutMs: config.asrTimeoutMs }),
+        ...(config.asrSpawnImpl === undefined ? {} : { spawnImpl: config.asrSpawnImpl }),
+        logger,
+      })
+    : undefined
 
   const transport = new FeishuTransport({
     appId,
@@ -133,8 +178,20 @@ export async function createAdapter({ runtime, config = {}, stateRoot = '' }: Fe
         for (const item of items) {
           const saved = await saveMedia(item)
           if (transport.signal.aborted) return
-          if (saved !== undefined) message.media.push(saved)
-          else message.attachmentErrors.push(`${item.kind} 附件未能下载或超过大小上限，请重新发送。`)
+          if (saved !== undefined) {
+            // Only voice notes are worth transcribing, and only when the bridge
+            // is actually usable; a failed transcription must not drop the audio.
+            if (saved.kind === 'voice' && asr !== undefined && asr.available()) {
+              const transcription = await asr.transcribe(saved.path)
+              if (transcription.ok) {
+                saved.transcript = transcription.text
+                logger.info(`transcribed voice note (${transcription.text.length} chars)`)
+              } else {
+                logger.warn(`voice note not transcribed: ${transcription.reason}`)
+              }
+            }
+            message.media.push(saved)
+          } else message.attachmentErrors.push(`${item.kind} 附件未能下载或超过大小上限，请重新发送。`)
         }
       }
       await sink.offer(message, { priority: items.length === 0 && runtime?.canBypassInbound?.(message) === true })
@@ -185,6 +242,7 @@ export async function createAdapter({ runtime, config = {}, stateRoot = '' }: Fe
       socket = undefined
       if (current !== undefined) await current.stop()
       transport.stop()
+      await asr?.dispose().catch((error: unknown) => logger.warn(`asr bridge did not stop cleanly: ${String(error)}`))
     },
     async send(target: Target, outgoing: Outgoing): Promise<SendResult> {
       if (target.channel !== CHANNEL_ID || target.accountId !== accountId) return { ok: false, code: 'account-mismatch' }
