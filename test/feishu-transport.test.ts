@@ -42,6 +42,24 @@ test('a failed token exchange throws rather than sending unauthenticated', async
   await assert.rejects(transport.tenantToken(), /app secret invalid/)
 })
 
+test('the token endpoint is read as a flat response without a data wrapper', async () => {
+  const calls: Array<{ url: string; init?: Record<string, unknown> }> = []
+  const transport = new FeishuTransport({
+    appId: APP_ID, appSecret: SECRET, logger: silent,
+    // The real tenant token endpoint answers with the fields at top level.
+    fetchImpl: recorded(calls, (url) =>
+      url.endsWith('/tenant_access_token/internal')
+        ? { code: 0, msg: 'ok', tenant_access_token: 'flat-token', expire: 7200 }
+        : { code: 0, data: { message_id: 'om_1' } }),
+  })
+  const token = await transport.tenantToken()
+  assert.equal(token, 'flat-token')
+  const result = await transport.sendText('oc_1', 'hi')
+  assert.equal(result.ok, true)
+  const send = calls.find((call) => call.url.includes('/im/v1/messages'))
+  assert.equal((send?.init?.['headers'] as Record<string, string>)['authorization'], 'Bearer flat-token')
+})
+
 test('a plain send posts a text message and reports its id', async () => {
   const calls: Array<{ url: string; init: Record<string, unknown> }> = []
   const transport = new FeishuTransport({
@@ -70,7 +88,7 @@ test('actions are sent as an interactive card whose value round-trips on tap', a
         ? { code: 0, data: { tenant_access_token: 't', expire: 7200 } }
         : { code: 0, data: { message_id: 'om_card' } }),
   })
-  const result = await transport.sendText('oc_1', '需要批准', [{ label: '允许一次', value: 'a1b2c3 1' }])
+  const result = await transport.sendCard('oc_1', '需要批准', [{ label: '允许一次', value: 'a1b2c3 1' }])
   assert.equal(result.ok, true)
   const body = JSON.parse(String(calls.find((call) => call.url.includes('/im/v1/messages'))!.init['body']))
   assert.equal(body['msg_type'], 'interactive')
@@ -108,6 +126,9 @@ test('edit patches the same message id in place', async () => {
   assert.deepEqual(result, { ok: true, messageId: 'om_12' })
   const patch = calls.find((call) => call.url.endsWith('/im/v1/messages/om_12'))!
   assert.equal(patch.init['method'], 'PATCH')
+  // Feishu only allows editing interactive messages, so edit always writes a card.
+  const patchedBody = JSON.parse(String(patch.init['body']))
+  assert.equal(patchedBody['msg_type'], 'interactive')
 })
 
 test('an image upload returns its image_key and then sends as an image message', async (t) => {

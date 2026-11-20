@@ -1,8 +1,22 @@
 # 验证状态
 
+## 2026-11-20 飞书真实应用端到端验证
+
+用真实自建应用（`open.feishu.cn`，长连接网关 `msg-frontier.feishu.cn`，`service_id=33554678`，服务端 `PingInterval=90s`）做了真机端到端验证，凭证只经环境变量传入仓库外的临时探针，未写入任何 git 跟踪文件。
+
+真机过程暴露并修复了三个模拟测试未覆盖的问题：
+
+1. **WebSocket 帧类型（静默丢帧）**：Node 内置全局 `WebSocket` 的二进制帧默认以 Blob 交付，原代码 `new Uint8Array(blob)` 不报错却返回空数组，导致事件被静默丢弃、无日志。改为使用 `ws` 库（飞书官方 node-sdk 同款），其 message 事件直接给 Node Buffer；并在 `toBytes()` 对 Blob 显式报错，新增回归测试。
+2. **tenant token 响应结构**：`auth/v3/tenant_access_token/internal` 是扁平响应（`tenant_access_token` 在顶层，无 `data` 包装），与其他 OpenAPI 不同。改为同时兼容扁平与 `data` 两种形态，新增扁平响应回归测试。
+3. **消息编辑约束**：飞书 `PATCH /im/v1/messages` 只能编辑 `interactive` 卡片消息，编辑普通 text 消息返回 `This message is NOT a card.`。因此任务卡（接收回执）改为始终以卡片发送（新增 `sendCard()`），`editMessage()` 固定写卡片内容；普通模型回复仍走 text。
+
+真机验证通过的链路：tenant token 换取、长连接票据与建连、入站文字（正确归一化出 open_id/chat_id/`platformMessageId`）、200 确认帧、原生按钮卡片发送、点按钮触发 `card.action.trigger` 并归一化为按钮 value 文本、卡片原地 PATCH 两次（执行中→完成）、连接断开后按服务端节奏自动重连并重收事件。媒体双向（图片/文件上传下载）已由模拟测试覆盖，本轮真机未发素材。
+
+本地完整 `npm test` **499 项通过**（新增扁平 token、Buffer/Blob 帧两个回归测试）。未发布 npm、未部署到 mini 宿主；真机用的是独立探针进程，验证后已停止并清理含凭证的临时文件。
+
 ## 2026-11-19 新增飞书（Feishu/Lark）适配器
 
-新增第三个内置通道 `@derekluo/dsh-channels-feishu`，通过开放平台长连接 WebSocket 接收事件，REST 只负责收发消息和素材，不需要公网 webhook。网关帧是固定的 protobuf `Frame`，包内自带零依赖 varint 编解码，运行时只用 Node 22 内置的 `WebSocket` 和 `fetch`，无第三方依赖。
+新增第三个内置通道 `@derekluo/dsh-channels-feishu`，通过开放平台长连接 WebSocket 接收事件，REST 只负责收发消息和素材，不需要公网 webhook。WebSocket 传输使用 `ws` 库（飞书官方 node-sdk 同款，message 直接给 Node Buffer），REST 用内置 `fetch`；网关帧是固定的 protobuf `Frame`，包内自带零依赖 varint 编解码，除 `ws` 外无第三方运行时依赖。
 
 覆盖能力：文本与 `post` 富文本、图片/文件/语音/视频双向、@ 提及还原、原生卡片按钮（`card.action.trigger` 等价文本回复）、消息编辑任务卡、`sum`/`seq` 分片重组、`code:200/500` 确认与重投、按服务端节奏自动重连、按聊天串行与 `DSH_INBOUND_RETRY` 退避。账号键固定为 `app:<App ID>`，轮换 secret 不改身份。
 

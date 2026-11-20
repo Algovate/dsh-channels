@@ -16,23 +16,38 @@
  * @module @derekluo/dsh-channels-feishu/socket
  */
 import { setTimeout as delay } from 'node:timers/promises'
+import WebSocket from 'ws'
 
 import { decodeFrame, encodeFrame, FrameType, type Frame } from './proto.js'
 import type { FeishuEnvelope } from './normalize.js'
 import type { FeishuTransport, TransportLogger } from './transport.js'
 
-/** The browser/undici surface this client uses, narrowed so a test can fake it. */
+/**
+ * The narrow surface the socket drives. `ws` satisfies it directly (its
+ * `message` event delivers a Node Buffer), and a test can inject a fake
+ * constructor of the same EventEmitter shape.
+ */
 export interface WebSocketLike {
   readonly readyState: number
   send(data: Uint8Array): void
   close(): void
-  terminate?(): void
-  addEventListener(type: 'open' | 'message' | 'error' | 'close', listener: (event: { data?: unknown }) => void): void
+  terminate(): void
+  // One general signature keeps a fake EventEmitter assignable; `ws` matches it.
+  on(event: string, listener: (...args: unknown[]) => void): unknown
 }
 
 export interface WebSocketConstructor {
   new (url: string): WebSocketLike
   readonly OPEN: number
+}
+
+/** Normalize whatever the platform hands `message` into bytes; ws gives a Buffer. */
+export function toBytes(data: unknown): Uint8Array {
+  if (data instanceof Uint8Array) return data
+  if (data instanceof ArrayBuffer) return new Uint8Array(data)
+  if (Array.isArray(data)) return new Uint8Array(data as number[])
+  if (data instanceof Blob) throw new Error('Blob frames are not supported; the ws transport delivers Buffers')
+  return new Uint8Array(data as ArrayLike<number>)
 }
 
 interface FragmentEntry {
@@ -75,7 +90,7 @@ export class FeishuSocket {
     this.#transport = options.transport
     this.#logger = options.logger
     this.#onEvent = options.onEvent
-    this.#WebSocketImpl = options.webSocketImpl ?? (globalThis.WebSocket as unknown as WebSocketConstructor)
+    this.#WebSocketImpl = options.webSocketImpl ?? (WebSocket as unknown as WebSocketConstructor)
   }
 
   /** Repeated start keeps the existing loop; stop() is what allows a fresh one. */
@@ -97,7 +112,7 @@ export class FeishuSocket {
     if (this.#sweepTimer !== undefined) { clearInterval(this.#sweepTimer); this.#sweepTimer = undefined }
     const socket = this.#ws
     if (socket !== undefined) {
-      try { socket.terminate?.() ?? socket.close() } catch { /* Best effort. */ }
+      try { socket.terminate() } catch { /* Best effort. */ }
     }
     this.#fragments.clear()
     await this.#run?.catch(() => {})
@@ -154,24 +169,24 @@ export class FeishuSocket {
         if (settled) return
         settled = true
         cleanup()
-        try { socket.terminate?.() ?? socket.close() } catch { /* Best effort. */ }
+        try { socket.terminate() } catch { /* Best effort. */ }
         resolve()
       }
       this.#abort.signal.addEventListener('abort', onAbort, { once: true })
-      socket.addEventListener('open', () => {
+      socket.on('open', () => {
         opened = true
         this.#serviceId = Number.isFinite(serviceId) ? serviceId : 0
         this.#armPing()
         this.#logger.info('feishu persistent connection established')
       })
-      socket.addEventListener('message', (event) => {
-        void this.#onRaw(event.data).catch((error: unknown) =>
+      socket.on('message', (data) => {
+        void this.#onRaw(toBytes(data)).catch((error: unknown) =>
           this.#logger.warn(`feishu frame handling failed: ${String((error as Error)?.message ?? error)}`))
       })
-      socket.addEventListener('error', () => {
+      socket.on('error', () => {
         if (!opened && !settled) { settled = true; cleanup(); reject(new Error('websocket error before open')) }
       })
-      socket.addEventListener('close', () => {
+      socket.on('close', () => {
         if (this.#pingTimer !== undefined) { clearInterval(this.#pingTimer); this.#pingTimer = undefined }
         if (settled) return
         settled = true
@@ -218,8 +233,7 @@ export class FeishuSocket {
     }
   }
 
-  async #onRaw(data: unknown): Promise<void> {
-    const bytes = data instanceof Uint8Array ? data : data instanceof ArrayBuffer ? new Uint8Array(data) : new Uint8Array(data as ArrayLike<number>)
+  async #onRaw(bytes: Uint8Array): Promise<void> {
     let frame: Frame
     try {
       frame = decodeFrame(bytes)

@@ -21,14 +21,14 @@ class MockWebSocket implements WebSocketLike {
   readonly readyState = 1
   terminated = false
   url: string
-  #listeners = new Map<string, Array<(event: { data?: unknown }) => void>>()
+  #listeners = new Map<string, Array<(data?: unknown) => void>>()
   constructor(url: string) { this.url = url; MockWebSocket.instances.push(this) }
-  addEventListener(type: string, listener: (event: { data?: unknown }) => void): void {
+  on(type: string, listener: (data?: unknown) => void): void {
     const list = this.#listeners.get(type) ?? []
     list.push(listener)
     this.#listeners.set(type, list)
   }
-  emit(type: string, data?: unknown): void { for (const listener of this.#listeners.get(type) ?? []) listener({ data }) }
+  emit(type: string, data?: unknown): void { for (const listener of this.#listeners.get(type) ?? []) listener(data) }
   open(): void { this.emit('open') }
   message(data: Uint8Array): void { this.emit('message', data) }
   send(): void {}

@@ -9,8 +9,10 @@
  * because it shares no line of WeChat or Telegram code.
  *
  * Events arrive over a long-lived connection (no public webhook), and REST only
- * moves messages and files. Both use Node's built-in WebSocket and fetch, so the
- * package has no runtime dependency beyond the core's type contract.
+ * moves messages and files. The WebSocket uses the `ws` package — the same
+ * transport the official Feishu SDK uses, delivering Node Buffers rather than
+ * the global WebSocket's Blob frames — while REST uses the built-in fetch. The
+ * only runtime dependency is `ws`; the protobuf frame codec is hand-written.
  *
  * @module @derekluo/dsh-channels-feishu
  */
@@ -200,7 +202,12 @@ export async function createAdapter({ runtime, config = {}, stateRoot = '' }: Fe
       }
       const text = outgoing.text ?? ''
       if (text === '') return { ok: false, code: 'empty' }
-      return transport.sendText(target.conversationId, text, outgoing.actions)
+      // A notice is the receipt the core later PATCHes into the task card, and
+      // Feishu only lets an interactive message be edited; actions also need a
+      // card. Plain model replies stay text messages.
+      const needsCard = outgoing.kind === 'notice' || (outgoing.actions?.length ?? 0) > 0
+      if (needsCard) return transport.sendCard(target.conversationId, text, outgoing.actions)
+      return transport.sendText(target.conversationId, text)
     },
     async edit(target: Target, messageId: string, outgoing: Outgoing): Promise<SendResult> {
       if (target.channel !== CHANNEL_ID || target.accountId !== accountId) return { ok: false, code: 'account-mismatch' }

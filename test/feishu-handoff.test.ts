@@ -3,7 +3,7 @@ import test from 'node:test'
 import { setTimeout as delay } from 'node:timers/promises'
 
 import { decodeFrame, encodeFrame, FrameType } from '../packages/adapter-feishu/src/proto.js'
-import { FeishuSocket, type WebSocketLike } from '../packages/adapter-feishu/src/socket.js'
+import { FeishuSocket, toBytes, type WebSocketLike } from '../packages/adapter-feishu/src/socket.js'
 import { createDispatcher } from '../packages/adapter-feishu/src/polling.js'
 import { normalizeInbound, type FeishuEnvelope, type NormalizedInbound } from '../packages/adapter-feishu/src/normalize.js'
 
@@ -16,16 +16,16 @@ class MockWebSocket implements WebSocketLike {
   readonly readyState = 1
   sent: Uint8Array[] = []
   url: string
-  #listeners = new Map<string, Array<(event: { data?: unknown }) => void>>()
+  #listeners = new Map<string, Array<(data?: unknown) => void>>()
   constructor(url: string) { this.url = url; MockWebSocket.instances.push(this) }
 
-  addEventListener(type: string, listener: (event: { data?: unknown }) => void): void {
+  on(type: string, listener: (data?: unknown) => void): void {
     const list = this.#listeners.get(type) ?? []
     list.push(listener)
     this.#listeners.set(type, list)
   }
   emit(type: string, data?: unknown): void {
-    for (const listener of this.#listeners.get(type) ?? []) listener({ data })
+    for (const listener of this.#listeners.get(type) ?? []) listener(data)
   }
   open(): void { this.emit('open') }
   message(data: Uint8Array): void { this.emit('message', data) }
@@ -92,7 +92,8 @@ test('an event is delivered and its frame acknowledged with code 200', async () 
   const ws = MockWebSocket.instances[0]!
   ws.open()
   await flush()
-  ws.message(eventFrame(textEvent, 'om_ws_1'))
+  // ws delivers a Node Buffer (a Uint8Array subclass), not an ArrayBuffer/Blob.
+  ws.message(Buffer.from(eventFrame(textEvent, 'om_ws_1')))
   await flush()
   try {
     assert.equal(received.length, 1)
@@ -217,4 +218,13 @@ test('the dispatcher keeps ordinary messages from one chat in order', async () =
   }
   await Promise.all([dispatcher.onEvent(textEvent), dispatcher.onEvent(second)])
   assert.deepEqual(order, ['你好', '第二'])
+})
+
+test('toBytes accepts a Node Buffer but rejects a Blob instead of silently dropping it', () => {
+  const frame = new Uint8Array([8, 1])
+  // ws gives a Buffer, which is a Uint8Array and must pass through unchanged.
+  assert.deepEqual(Array.from(toBytes(Buffer.from(frame))), [8, 1])
+  assert.deepEqual(Array.from(toBytes(frame.buffer)), [8, 1])
+  // A Blob (the global WebSocket default) must fail loudly, not decode as empty.
+  assert.throws(() => toBytes(new Blob([frame])), /Blob frames are not supported/)
 })

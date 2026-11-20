@@ -48,5 +48,8 @@
     "chatbot",
     "channel",
     "adapter"
-  ]
+  ],
+  "dependencies": {
+    "ws": "^8.23.0"
+  }
 }

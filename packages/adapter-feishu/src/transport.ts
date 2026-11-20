@@ -134,11 +134,17 @@ export class FeishuTransport {
         body: JSON.stringify({ app_id: this.#options.appId, app_secret: this.#options.appSecret }),
       },
     )
-    const token = envelope.data?.tenant_access_token
+    // The token endpoint answers with the fields at the top level (no `data`
+    // wrapper), unlike the rest of the OpenAPI, so accept both shapes.
+    const flat = envelope as ApiEnvelope<{ tenant_access_token?: string; expire?: number }> & {
+      tenant_access_token?: string
+      expire?: number
+    }
+    const token = flat.tenant_access_token ?? envelope.data?.tenant_access_token
     if (envelope.code !== 0 || typeof token !== 'string' || token === '') {
       throw new Error(`tenant token exchange failed: ${envelope.msg ?? envelope.code ?? 'unknown error'}`)
     }
-    const expireSeconds = typeof envelope.data?.expire === 'number' ? envelope.data.expire : 7200
+    const expireSeconds = flat.expire ?? envelope.data?.expire ?? 7200
     this.#token = { token, expiresAt: now + expireSeconds * 1000 }
     return token
   }
@@ -187,14 +193,17 @@ export class FeishuTransport {
     }
   }
 
-  /** Replace a previously sent text/card message in place. */
+  /**
+   * Replace a previously sent card message in place.
+   *
+   * Feishu's PATCH endpoint only accepts `interactive` messages — patching a
+   * plain text message fails with "This message is NOT a card." The core's
+   * task card is therefore always sent as a card (see {@link sendCard}), and
+   * edit always writes card content, with or without buttons.
+   */
   async editMessage(chatId: string, messageId: string, text: string, actions?: readonly OutgoingAction[]): Promise<SendResult> {
     try {
-      const useCard = actions !== undefined && actions.length > 0
-      const body = {
-        msg_type: useCard ? 'interactive' : 'text',
-        content: useCard ? cardContent(text, actions) : JSON.stringify({ text }),
-      }
+      const body = { msg_type: 'interactive', content: cardContent(text, actions) }
       const envelope = await this.#request<{ message_id?: string }>(
         `${this.#domain}/open-apis/im/v1/messages/${encodeURIComponent(messageId)}`,
         { method: 'PATCH', headers: await this.#auth({ 'content-type': 'application/json; charset=utf-8' }), body: JSON.stringify(body) },
@@ -203,6 +212,20 @@ export class FeishuTransport {
       return { ok: true, messageId }
     } catch (error) {
       return { ok: false, code: 'edit-failed', detail: String((error as Error)?.message ?? error) }
+    }
+  }
+
+  /** Send a card message (text plus optional buttons); only cards are editable later. */
+  async sendCard(chatId: string, text: string, actions?: readonly OutgoingAction[]): Promise<SendResult> {
+    try {
+      const body = { receive_id: chatId, msg_type: 'interactive', content: cardContent(text, actions) }
+      const envelope = await this.#request<{ message_id?: string }>(
+        `${this.#domain}/open-apis/im/v1/messages?receive_id_type=chat_id`,
+        { method: 'POST', headers: await this.#auth({ 'content-type': 'application/json; charset=utf-8' }), body: JSON.stringify(body) },
+      )
+      return this.#toSendResult(envelope, 'send-failed')
+    } catch (error) {
+      return { ok: false, code: 'send-failed', detail: String((error as Error)?.message ?? error) }
     }
   }
 

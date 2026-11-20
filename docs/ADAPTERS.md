@@ -6,7 +6,7 @@
 
 | 能力 | 微信 | Telegram | 飞书 |
 |---|---|---|---|
-| 传输 | iLink 长轮询，使用内置传输代码 | Bot API 长轮询，使用 `fetch` | 长连接 WebSocket，使用内置 `WebSocket`；REST 收发用 `fetch` |
+| 传输 | iLink 长轮询，使用内置传输代码 | Bot API 长轮询，使用 `fetch` | 长连接 WebSocket（`ws` 库，飞书官方 SDK 同款）；REST 收发用内置 `fetch` |
 | 凭证 | 按账号保存的 iLink 登录文件 | Bot token | 应用 `App ID` / `App Secret`（自建应用） |
 | 文字 | 每条最多 600 字符 | 每条最多 4000 字符 | 每条最多 4000 字符 |
 | 图片、文件、视频 | 双向 | 双向 | 双向 |
