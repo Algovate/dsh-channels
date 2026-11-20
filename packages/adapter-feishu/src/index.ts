@@ -16,16 +16,15 @@
  *
  * @module @derekluo/dsh-channels-feishu
  */
-import fs from 'node:fs'
 import path from 'node:path'
 
 import type { AccountInfo, AdapterRuntime, ChannelAdapter, InboundMedia, IngressSink, Outgoing, SendResult, Target } from '@derekluo/dsh-channels'
 import { AsrBridge, sharedAsrScript } from './asr.js'
+import { saveInboundAttachment } from './attachments.js'
 import { createDispatcher } from './polling.js'
 import { FeishuSocket } from './socket.js'
 import { FeishuTransport, MAX_TEXT_CHARS, type FetchLike } from './transport.js'
-import { resolveMediaType } from './media.js'
-import { CHANNEL_ID, normalizeInbound, type NormalizedInbound, type RawMedia } from './normalize.js'
+import { CHANNEL_ID, normalizeInbound, type NormalizedInbound } from './normalize.js'
 
 export { CHANNEL_ID, normalizeInbound } from './normalize.js'
 export { decodeFrame, encodeFrame } from './proto.js'
@@ -71,20 +70,6 @@ export interface FeishuAdapterOptions {
 const MAX_INBOUND_MEDIA = 8
 const DEFAULT_MAX_INBOUND_BYTES = 20 * 1024 * 1024
 
-/** A file name that is safe to write and keeps the extension Feishu implied. */
-function safeName(name: string, fallback: string): string {
-  const base = name.replace(/[^A-Za-z0-9._-]/g, '_').slice(0, 80)
-  return base === '' ? fallback : base
-}
-
-function extensionFor(item: RawMedia): string {
-  if (item.fileName !== undefined && path.extname(item.fileName) !== '') return path.extname(item.fileName)
-  if (item.kind === 'image') return '.jpg'
-  if (item.kind === 'video') return '.mp4'
-  if (item.kind === 'voice') return '.ogg'
-  return '.bin'
-}
-
 export async function createAdapter({ runtime, config = {}, stateRoot = '' }: FeishuAdapterOptions): Promise<ChannelAdapter> {
   const logger = runtime?.logger ?? { info: () => {}, warn: () => {} }
   const appId = (config.appId ?? '').trim()
@@ -124,40 +109,9 @@ export async function createAdapter({ runtime, config = {}, stateRoot = '' }: Fe
     appId,
     appSecret,
     ...(config.domain === undefined ? {} : { domain: config.domain }),
-    logger,
     ...(config.fetchImpl === undefined ? {} : { fetchImpl: config.fetchImpl }),
   })
   let socket: FeishuSocket | undefined
-
-  /** One attachment: download it through the resources endpoint and save it. */
-  const saveMedia = async (item: RawMedia): Promise<InboundMedia | undefined> => {
-    const downloaded = await transport.downloadResource(item.messageId, item.fileKey, item.type, maxInboundBytes)
-    if ('error' in downloaded) {
-      logger.warn(`feishu ${item.kind} not downloaded: ${downloaded.error}`)
-      return undefined
-    }
-    try {
-      // Feishu can deliver a JPEG as a `.webp` file; trust the bytes so the
-      // host's readers get a mime and extension they accept.
-      const resolved = resolveMediaType(downloaded.bytes, item.mime, item.fileName, extensionFor(item))
-      const directory = path.join(mediaRoot, safeName(accountId, 'feishu'))
-      fs.mkdirSync(directory, { recursive: true })
-      const file = path.join(directory, `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}-${item.kind}${resolved.extension}`)
-      fs.writeFileSync(file, downloaded.bytes, { mode: 0o600 })
-      logger.info(`saved inbound ${item.kind} to ${file} (${downloaded.bytes.length} bytes, ${resolved.mime})`)
-      const media: InboundMedia = {
-        kind: item.kind,
-        path: file,
-        mime: resolved.mime,
-        bytes: downloaded.bytes.length,
-        ...(item.fileName === undefined ? {} : { name: safeName(item.fileName, 'file') }),
-      }
-      return media
-    } catch (error) {
-      logger.warn(`feishu attachment could not be saved: ${String(error)}`)
-      return undefined
-    }
-  }
 
   const handleMessage = async (message: NormalizedInbound): Promise<void> => {
     const descriptors = message.mediaItems ?? []
@@ -170,7 +124,7 @@ export async function createAdapter({ runtime, config = {}, stateRoot = '' }: Fe
       delete message.mediaItems
       if (items.length > 0 && mediaEnabled) {
         for (const item of items) {
-          const saved = await saveMedia(item)
+          const saved = await saveInboundAttachment(item, { transport, accountId, mediaRoot, maxInboundBytes, logger })
           if (transport.signal.aborted) return
           if (saved !== undefined) {
             // Only voice notes are worth transcribing, and only when the bridge

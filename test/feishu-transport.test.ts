@@ -4,9 +4,9 @@ import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 
+import { FeishuApi } from '../packages/adapter-feishu/src/api.js'
 import { FeishuTransport } from '../packages/adapter-feishu/src/transport.js'
 
-const silent = { info: () => {}, warn: () => {} }
 const APP_ID = 'cli_0000000000000001'
 const SECRET = 'secret'
 
@@ -21,7 +21,7 @@ function recorded(calls: Array<{ url: string; init?: Record<string, unknown> }>,
 test('the tenant token is fetched once and reused while valid', async () => {
   const calls: Array<{ url: string; init?: Record<string, unknown> }> = []
   const transport = new FeishuTransport({
-    appId: APP_ID, appSecret: SECRET, logger: silent,
+    appId: APP_ID, appSecret: SECRET,
     fetchImpl: recorded(calls, (url) =>
       url.endsWith('/tenant_access_token/internal')
         ? { code: 0, data: { tenant_access_token: 't-1', expire: 7200 } }
@@ -35,27 +35,25 @@ test('the tenant token is fetched once and reused while valid', async () => {
 })
 
 test('a failed token exchange throws rather than sending unauthenticated', async () => {
-  const transport = new FeishuTransport({
-    appId: APP_ID, appSecret: SECRET, logger: silent,
+  const api = new FeishuApi({
+    appId: APP_ID, appSecret: SECRET,
     fetchImpl: async () => ({ ok: true, status: 200, json: async () => ({ code: 99991663, msg: 'app secret invalid' }), body: null }),
   })
-  await assert.rejects(transport.tenantToken(), /app secret invalid/)
+  await assert.rejects(api.tenantToken(), /app secret invalid/)
 })
 
 test('the token endpoint is read as a flat response without a data wrapper', async () => {
   const calls: Array<{ url: string; init?: Record<string, unknown> }> = []
-  const transport = new FeishuTransport({
-    appId: APP_ID, appSecret: SECRET, logger: silent,
-    // The real tenant token endpoint answers with the fields at top level.
-    fetchImpl: recorded(calls, (url) =>
-      url.endsWith('/tenant_access_token/internal')
-        ? { code: 0, msg: 'ok', tenant_access_token: 'flat-token', expire: 7200 }
-        : { code: 0, data: { message_id: 'om_1' } }),
-  })
-  const token = await transport.tenantToken()
-  assert.equal(token, 'flat-token')
-  const result = await transport.sendText('oc_1', 'hi')
-  assert.equal(result.ok, true)
+  // The real tenant token endpoint answers with the fields at top level.
+  const fetchImpl = recorded(calls, (url) =>
+    url.endsWith('/tenant_access_token/internal')
+      ? { code: 0, msg: 'ok', tenant_access_token: 'flat-token', expire: 7200 }
+      : { code: 0, data: { message_id: 'om_1' } })
+  const api = new FeishuApi({ appId: APP_ID, appSecret: SECRET, fetchImpl })
+  assert.equal(await api.tenantToken(), 'flat-token')
+
+  const transport = new FeishuTransport({ appId: APP_ID, appSecret: SECRET, fetchImpl })
+  assert.equal((await transport.sendText('oc_1', 'hi')).ok, true)
   const send = calls.find((call) => call.url.includes('/im/v1/messages'))
   assert.equal((send?.init?.['headers'] as Record<string, string>)['authorization'], 'Bearer flat-token')
 })
@@ -63,7 +61,7 @@ test('the token endpoint is read as a flat response without a data wrapper', asy
 test('a plain send posts a text message and reports its id', async () => {
   const calls: Array<{ url: string; init: Record<string, unknown> }> = []
   const transport = new FeishuTransport({
-    appId: APP_ID, appSecret: SECRET, logger: silent,
+    appId: APP_ID, appSecret: SECRET,
     fetchImpl: recorded(calls, (url) =>
       url.endsWith('/tenant_access_token/internal')
         ? { code: 0, data: { tenant_access_token: 't', expire: 7200 } }
@@ -82,7 +80,7 @@ test('a plain send posts a text message and reports its id', async () => {
 test('actions are sent as an interactive card whose value round-trips on tap', async () => {
   const calls: Array<{ url: string; init: Record<string, unknown> }> = []
   const transport = new FeishuTransport({
-    appId: APP_ID, appSecret: SECRET, logger: silent,
+    appId: APP_ID, appSecret: SECRET,
     fetchImpl: recorded(calls, (url) =>
       url.endsWith('/tenant_access_token/internal')
         ? { code: 0, data: { tenant_access_token: 't', expire: 7200 } }
@@ -100,7 +98,7 @@ test('actions are sent as an interactive card whose value round-trips on tap', a
 
 test('a rate limit envelope becomes a retryable send result', async () => {
   const transport = new FeishuTransport({
-    appId: APP_ID, appSecret: SECRET, logger: silent,
+    appId: APP_ID, appSecret: SECRET,
     fetchImpl: async (url) => ({
       ok: true, status: 200, body: null,
       json: async () => url.endsWith('/tenant_access_token/internal')
@@ -116,7 +114,7 @@ test('a rate limit envelope becomes a retryable send result', async () => {
 test('edit patches the same message id in place', async () => {
   const calls: Array<{ url: string; init: Record<string, unknown> }> = []
   const transport = new FeishuTransport({
-    appId: APP_ID, appSecret: SECRET, logger: silent,
+    appId: APP_ID, appSecret: SECRET,
     fetchImpl: recorded(calls, (url) =>
       url.endsWith('/tenant_access_token/internal')
         ? { code: 0, data: { tenant_access_token: 't', expire: 7200 } }
@@ -138,7 +136,7 @@ test('an image upload returns its image_key and then sends as an image message',
   fs.writeFileSync(file, 'png-bytes')
   const calls: Array<{ url: string; init: Record<string, unknown> }> = []
   const transport = new FeishuTransport({
-    appId: APP_ID, appSecret: SECRET, logger: silent,
+    appId: APP_ID, appSecret: SECRET,
     fetchImpl: recorded(calls, (url) => {
       if (url.endsWith('/tenant_access_token/internal')) return { code: 0, data: { tenant_access_token: 't', expire: 7200 } }
       if (url.endsWith('/im/v1/images')) return { code: 0, data: { image_key: 'img_k' } }
@@ -161,7 +159,7 @@ test('a download aborts as soon as the stream exceeds the byte cap', async (t) =
   let cancelled = false
   let stream: ReadableStreamDefaultController<Uint8Array> | undefined
   const transport = new FeishuTransport({
-    appId: APP_ID, appSecret: SECRET, logger: silent,
+    appId: APP_ID, appSecret: SECRET,
     fetchImpl: async (url) => {
       if (url.endsWith('/tenant_access_token/internal')) {
         return { ok: true, status: 200, body: null, json: async () => ({ code: 0, data: { tenant_access_token: 't', expire: 7200 } }) }
@@ -195,7 +193,7 @@ test('file upload maps extensions to the allowed file_type enum', async (t) => {
   fs.writeFileSync(pdf, '%PDF-1.4')
   const types: string[] = []
   const transport = new FeishuTransport({
-    appId: APP_ID, appSecret: SECRET, logger: silent,
+    appId: APP_ID, appSecret: SECRET,
     fetchImpl: async (url, init) => {
       if (url.endsWith('/tenant_access_token/internal')) {
         return { ok: true, status: 200, body: null, json: async () => ({ code: 0, tenant_access_token: 't', expire: 7200 }) }

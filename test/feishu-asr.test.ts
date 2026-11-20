@@ -2,12 +2,13 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { PassThrough } from 'node:stream'
 import test from 'node:test'
 import { setTimeout as delay } from 'node:timers/promises'
 
 import { AsrBridge } from '../packages/adapter-feishu/src/asr.js'
 import { createAdapter } from '../packages/adapter-feishu/src/index.js'
+import { fakeSpawn } from './asr-fixtures.js'
+import { wsFetch } from './feishu-fixtures.js'
 import { encodeFrame, FrameType } from '../packages/adapter-feishu/src/proto.js'
 import type { FeishuEnvelope } from '../packages/adapter-feishu/src/normalize.js'
 import type { FetchLike } from '../packages/adapter-feishu/src/transport.js'
@@ -23,26 +24,9 @@ function audioFile(): string {
   return file
 }
 
-/** A fake bridge process: answers each request line with whatever `answer` says. */
-function fakeSpawn(answer: (request: { wav: string }) => string | undefined) {
-  const spawnImpl = (() => {
-    const stdin = new PassThrough()
-    const stdout = new PassThrough()
-    const stderr = new PassThrough()
-    const child = { stdin, stdout, stderr, exitCode: null as number | null, kill: () => { child.exitCode = 0 }, on: () => child, once: () => child, off: () => child }
-    let buffer = ''
-    stdin.on('data', (chunk: Buffer) => {
-      buffer += String(chunk)
-      for (const line of buffer.split('\n')) {
-        if (line.trim() === '') continue
-        const reply = answer(JSON.parse(line) as { wav: string })
-        if (reply !== undefined) stdout.write(reply)
-      }
-      buffer = ''
-    })
-    return child
-  }) as unknown as typeof import('node:child_process').spawn
-  return spawnImpl
+/** The bridge's spawn function only; this test never inspects children. */
+function fake(answer: (request: { wav: string }) => string | undefined, onSpawn?: (env: Record<string, string | undefined>) => void) {
+  return fakeSpawn(answer, onSpawn).spawnImpl
 }
 
 function bridge(spawnImpl: typeof import('node:child_process').spawn, overrides: Record<string, unknown> = {}) {
@@ -57,12 +41,12 @@ function bridge(spawnImpl: typeof import('node:child_process').spawn, overrides:
 }
 
 test('a Feishu voice note transcribes to text', async () => {
-  const asr = bridge(fakeSpawn(() => `${JSON.stringify({ ok: true, text: '明天下午三点' })}\n`))
+  const asr = bridge(fake(() => `${JSON.stringify({ ok: true, text: '明天下午三点' })}\n`))
   assert.deepEqual(await asr.transcribe(audioFile()), { ok: true, text: '明天下午三点' })
 })
 
 test('a transcription failure is a reason, never an exception', async () => {
-  const asr = bridge(fakeSpawn(() => `${JSON.stringify({ ok: false, error: 'model missing' })}\n`))
+  const asr = bridge(fake(() => `${JSON.stringify({ ok: false, error: 'model missing' })}\n`))
   const result = await asr.transcribe(audioFile())
   assert.equal(result.ok, false)
   assert.match(result.ok === false ? result.reason : '', /model missing/)
@@ -88,24 +72,6 @@ function audioFrame(): Uint8Array {
   })
 }
 
-function wsFetch(): FetchLike {
-  return (async (url: string) => {
-    if (url.endsWith('/callback/ws/endpoint')) {
-      return { ok: true, status: 200, body: null, json: async () => ({
-        code: 0,
-        data: { URL: 'wss://gateway/ws?service_id=7', ClientConfig: { PingInterval: 120, ReconnectCount: -1, ReconnectInterval: 0, ReconnectNonce: 0 } },
-      }) }
-    }
-    if (url.endsWith('/tenant_access_token/internal')) {
-      return { ok: true, status: 200, body: null, json: async () => ({ code: 0, tenant_access_token: 't', expire: 7200 }) }
-    }
-    return {
-      ok: true, status: 200, json: async () => ({}),
-      body: new ReadableStream<Uint8Array>({ start(controller) { controller.enqueue(new TextEncoder().encode('OggS-audio-bytes')); controller.close() } }),
-    }
-  }) as FetchLike
-}
-
 test('an inbound Feishu voice note carries its transcript to the sink', { timeout: 8000 }, async (t) => {
   const stateRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'feishu-asr-e2e-'))
   t.after(() => fs.rmSync(stateRoot, { recursive: true, force: true }))
@@ -116,10 +82,10 @@ test('an inbound Feishu voice note carries its transcript to the sink', { timeou
     stateRoot,
     config: {
       appId: APP_ID, appSecret: 's',
-      fetchImpl: wsFetch(),
+      fetchImpl: wsFetch('OggS-audio-bytes'),
       webSocketImpl: MockWebSocket as never,
       asrScriptPath: process.argv[1] ?? 'x',
-      asrSpawnImpl: fakeSpawn(() => `${JSON.stringify({ ok: true, text: '这是一段测试语音' })}\n`),
+      asrSpawnImpl: fake(() => `${JSON.stringify({ ok: true, text: '这是一段测试语音' })}\n`),
     },
   })
   const sink: IngressSink = { async offer(message) { delivered.push({ transcript: message.media[0]?.transcript, mime: message.media[0]?.mime ?? '' }) } }
@@ -147,10 +113,10 @@ test('a failed transcription still delivers the audio without a transcript', { t
     stateRoot,
     config: {
       appId: APP_ID, appSecret: 's',
-      fetchImpl: wsFetch(),
+      fetchImpl: wsFetch('OggS-audio-bytes'),
       webSocketImpl: MockWebSocket as never,
       asrScriptPath: process.argv[1] ?? 'x',
-      asrSpawnImpl: fakeSpawn(() => `${JSON.stringify({ ok: false, error: 'no model' })}\n`),
+      asrSpawnImpl: fake(() => `${JSON.stringify({ ok: false, error: 'no model' })}\n`),
     },
   })
   const sink: IngressSink = { async offer(message) { delivered.push({ transcript: message.media[0]?.transcript, media: message.media.length }) } }
@@ -171,40 +137,21 @@ test('a failed transcription still delivers the audio without a transcript', { t
 
 test('engine diagnostics on stdout do not break the protocol answer', async () => {
   // mlx-whisper prints "Detected language: …" to stdout before the JSON line.
-  const asr = bridge(fakeSpawn(() => `Detected language: Chinese\n${JSON.stringify({ ok: true, text: '请把这句话重复一遍。' })}\n`))
+  const asr = bridge(fake(() => `Detected language: Chinese\n${JSON.stringify({ ok: true, text: '请把这句话重复一遍。' })}\n`))
   assert.deepEqual(await asr.transcribe(audioFile()), { ok: true, text: '请把这句话重复一遍。' })
 })
 
 test('the configured model is passed to the bridge environment', async () => {
-  const envs: Array<Record<string, string | undefined>> = []
-  const spawnImpl = ((command: string, args: string[], options: { env: Record<string, string | undefined> }) => {
-    envs.push(options.env)
-    const stdin = new PassThrough()
-    const stdout = new PassThrough()
-    const stderr = new PassThrough()
-    const child = { stdin, stdout, stderr, exitCode: null as number | null, kill: () => { child.exitCode = 0 }, on: () => child, once: () => child, off: () => child }
-    stdin.on('data', () => stdout.write(`${JSON.stringify({ ok: true, text: 'ok' })}\n`))
-    void command; void args
-    return child
-  }) as unknown as typeof import('node:child_process').spawn
-  const asr = bridge(spawnImpl, { model: 'large-v3-turbo' })
+  let env: Record<string, string | undefined> = {}
+  const asr = bridge(fake(() => `${JSON.stringify({ ok: true, text: 'ok' })}\n`, (captured) => { env = captured }), { model: 'large-v3-turbo' })
   await asr.transcribe(audioFile())
-  assert.equal(envs[0]?.['DSH_ASR_MODEL'], 'large-v3-turbo')
+  assert.equal(env['DSH_ASR_MODEL'], 'large-v3-turbo')
 })
 
 test('the configured device and compute type reach the bridge environment', async () => {
-  const envs: Array<Record<string, string | undefined>> = []
-  const spawnImpl = ((_command: string, _args: string[], options: { env: Record<string, string | undefined> }) => {
-    envs.push(options.env)
-    const stdin = new PassThrough()
-    const stdout = new PassThrough()
-    const stderr = new PassThrough()
-    const child = { stdin, stdout, stderr, exitCode: null as number | null, kill: () => { child.exitCode = 0 }, on: () => child, once: () => child, off: () => child }
-    stdin.on('data', () => stdout.write(`${JSON.stringify({ ok: true, text: 'ok' })}\n`))
-    return child
-  }) as unknown as typeof import('node:child_process').spawn
-  const asr = bridge(spawnImpl, { device: 'mps', computeType: 'float16' })
+  let env: Record<string, string | undefined> = {}
+  const asr = bridge(fake(() => `${JSON.stringify({ ok: true, text: 'ok' })}\n`, (captured) => { env = captured }), { device: 'mps', computeType: 'float16' })
   await asr.transcribe(audioFile())
-  assert.equal(envs[0]?.['DSH_ASR_DEVICE'], 'mps')
-  assert.equal(envs[0]?.['DSH_ASR_COMPUTE_TYPE'], 'float16')
+  assert.equal(env['DSH_ASR_DEVICE'], 'mps')
+  assert.equal(env['DSH_ASR_COMPUTE_TYPE'], 'float16')
 })

@@ -1,11 +1,11 @@
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
-import { PassThrough } from 'node:stream'
 import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 
 import { AsrBridge } from '../packages/adapter-weixin/src/asr.js'
+import { fakeSpawn } from './asr-fixtures.js'
 
 const silent = { info: () => {}, warn: () => {} }
 
@@ -13,30 +13,6 @@ function wavFile(): string {
   const file = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'channels-asr-')), 'v.wav')
   fs.writeFileSync(file, 'RIFF....WAVE')
   return file
-}
-
-/** A fake bridge process: answers each request line with whatever `answer` says. */
-function fakeSpawn(answer: (request: { wav: string }) => string | undefined) {
-  const children: Array<{ stdin: PassThrough; stdout: PassThrough; stderr: PassThrough; kill: () => void }> = []
-  const spawnImpl = (() => {
-    const stdin = new PassThrough()
-    const stdout = new PassThrough()
-    const stderr = new PassThrough()
-    const child = { stdin, stdout, stderr, exitCode: null as number | null, kill: () => { child.exitCode = 0 }, on: () => child, once: () => child, off: () => child }
-    let buffer = ''
-    stdin.on('data', (chunk: Buffer) => {
-      buffer += String(chunk)
-      for (const line of buffer.split('\n')) {
-        if (line.trim() === '') continue
-        const reply = answer(JSON.parse(line) as { wav: string })
-        if (reply !== undefined) stdout.write(reply)
-      }
-      buffer = ''
-    })
-    children.push(child)
-    return child
-  }) as unknown as typeof import('node:child_process').spawn
-  return { spawnImpl, children }
 }
 
 function bridge(spawnImpl: typeof import('node:child_process').spawn, overrides: Record<string, unknown> = {}) {

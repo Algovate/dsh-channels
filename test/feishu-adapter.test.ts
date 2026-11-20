@@ -10,6 +10,7 @@ import { encodeFrame, FrameType } from '../packages/adapter-feishu/src/proto.js'
 import type { IngressSink } from '../packages/core/src/types.js'
 import type { FeishuEnvelope } from '../packages/adapter-feishu/src/normalize.js'
 import type { FetchLike } from '../packages/adapter-feishu/src/transport.js'
+import { wsFetch } from './feishu-fixtures.js'
 import { MockWebSocket } from './feishu-mocks.js'
 
 const silent = { info: () => {}, warn: () => {} }
@@ -38,24 +39,6 @@ function imageFrame(): Uint8Array {
     ],
     payload: new TextEncoder().encode(JSON.stringify(imageEnvelope())),
   })
-}
-
-function wsFetch(): FetchLike {
-  return (async (url: string) => {
-    if (url.endsWith('/callback/ws/endpoint')) {
-      return { ok: true, status: 200, body: null, json: async () => ({
-        code: 0,
-        data: { URL: 'wss://gateway/ws?service_id=7', ClientConfig: { PingInterval: 120, ReconnectCount: -1, ReconnectInterval: 0, ReconnectNonce: 0 } },
-      }) }
-    }
-    if (url.endsWith('/tenant_access_token/internal')) {
-      return { ok: true, status: 200, body: null, json: async () => ({ code: 0, data: { tenant_access_token: 't', expire: 7200 } }) }
-    }
-    if (url.includes('/resources/')) {
-      return { ok: true, status: 200, json: async () => ({}), body: new ReadableStream<Uint8Array>({ start(controller) { controller.enqueue(new TextEncoder().encode('image-bytes')); controller.close() } }) }
-    }
-    return { ok: true, status: 200, body: null, json: async () => ({ code: 0 }) }
-  }) as FetchLike
 }
 
 test('the Feishu adapter satisfies the channel contract', async () => {
