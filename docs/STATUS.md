@@ -1,5 +1,11 @@
 # 验证状态
 
+## 2026-11-20 重构 Phase 1：历史归档与共享适配器 kit
+
+按 [设计评审](DESIGN-REVIEW.md) 执行第一阶段：历史计划、审查与部署日记移入 `docs/notes/`，`STATUS.md` 只保留当前记录；新增核心子路径 `@derekluo/dsh-channels/adapter-kit`（`safeFileSegment`、`extensionOfName`、`defaultExtensionFor`），三个适配器共用文件名与扩展名规则，微信通过参数保留 SILK 默认扩展名；适配器对核心包改为必需运行时依赖。
+
+部署提交 `02f0126`（宿主进程 `76619`，发布目录 `~/dsh-plugin-pkgs/dsh-channels/02f0126/`），三个包逐文件校验一致（core 152 / 微信 123 / 飞书 33）。安装后从 profile 目录解析 `@derekluo/dsh-channels/adapter-kit` 成功，两个通道注册且飞书长连接建立，无加载错误。完整 `npm test` **513 项通过**（新增 3 项 kit 测试）。
+
 ## 2026-11-20 拆分飞书适配器职责并部署
 
 把飞书适配器的 REST 层拆成 [api.ts](../packages/adapter-feishu/src/api.ts)（域名、`fetch` 注入、请求时限、生命周期、tenant token、网关票据）与 [transport.ts](../packages/adapter-feishu/src/transport.ts)（消息、卡片、上传下载）；附件下载与落盘从入口抽到 [attachments.ts](../packages/adapter-feishu/src/attachments.ts)。`index.ts` 只保留配置解析与装配。测试夹具合并：`test/asr-fixtures.ts`（两个适配器共用）与 `test/feishu-fixtures.ts`，并删掉 API/transport 中未使用的 `logger` 选项。
