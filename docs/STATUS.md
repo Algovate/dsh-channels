@@ -16,6 +16,20 @@
 
 新增媒体嗅探与上传类型回归测试，完整 `npm test` **501 项通过**。
 
+## 2026-11-20 收敛 ASR 桥接并清理重复代码
+
+把两个适配器各自一份的 whisper 桥接脚本收敛为**核心包唯一一份** `bin/asr-transcribe.py`；微信与飞书都通过 `require.resolve('@derekluo/dsh-channels/package.json')` 定位它，配置环境变量统一为 `DSH_ASR_*`（旧 `DSH_WEIXIN_ASR_*`/`DSH_FEISHU_ASR_*` 继续可读）。顺带清理：飞书 transport 的发送路径合并为单一 `#postMessage`，`sendText` 只发文本、卡片归 `sendCard`；socket 的有限重连预算改为降速重试而非无效果计数；normalize/media 删除不可达分支；测试里三份 `MockWebSocket` 抽到 `test/feishu-mocks.ts`。
+
+部署提交 `6ac8c42`（宿主进程 `76021`，发布目录 `~/dsh-plugin-pkgs/dsh-channels/6ac8c42/`）。安装后确认两个适配器解析到同一个脚本：
+
+```
+weixin bridge: …/node_modules/@derekluo/dsh-channels/bin/asr-transcribe.py
+feishu bridge: …/node_modules/@derekluo/dsh-channels/bin/asr-transcribe.py
+same file: true
+```
+
+真机回归：飞书语音入站 → `transcribed voice note (9 chars)`（MPS，faster-whisper medium）→ 回合 11.8 秒完成；微信轮询正常启动。完整 `npm test` **510 项通过**。
+
 ## 2026-11-20 飞书语音转写（whisper）真机验证
 
 给飞书适配器接入可选语音转写：桥接脚本通用化后只随**核心包**发布一份（`bin/asr-transcribe.py`），微信与飞书共用，环境变量以 `DSH_ASR_*` 为准并兼容旧前缀；新增 `AsrBridge` 保持进程常驻。转写在附件落盘后进行，文本写入 `InboundMedia.transcript`；转写失败只记原因，音频照常交付。新增配置 `asrEnabled`/`asrCommand`/`asrModel`/`asrModelDir`/`asrLanguage`/`asrTimeoutMs`/`asrScriptPath`。
