@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 
 import { decodeFrame, encodeFrame, FrameType } from '../packages/adapter-feishu/src/proto.js'
+import { resolveMediaType, sniffMedia } from '../packages/adapter-feishu/src/media.js'
 import { normalizeInbound } from '../packages/adapter-feishu/src/normalize.js'
 import type { FeishuEnvelope } from '../packages/adapter-feishu/src/normalize.js'
 
@@ -128,4 +129,25 @@ test('a malformed card action without chat or operator is refused', () => {
     event: { operator: { open_id: 'ou' }, action: { value: { value: 'x' } } },
   }
   assert.equal(normalizeInbound(envelope, ACCOUNT), null)
+})
+
+test('media type follows the bytes, not a misleading file name', () => {
+  // A JPEG delivered as a file named .webp (seen on a real device).
+  const jpeg = new Uint8Array([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46, 0x49, 0x46])
+  assert.deepEqual(sniffMedia(jpeg), { mime: 'image/jpeg', extension: '.jpg' })
+  assert.deepEqual(resolveMediaType(jpeg, 'application/octet-stream', 'pic.webp', '.webp'), { mime: 'image/jpeg', extension: '.jpg' })
+  const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00])
+  assert.equal(sniffMedia(png)?.extension, '.png')
+  const pdf = new Uint8Array([0x25, 0x50, 0x44, 0x46, 0x2d])
+  assert.deepEqual(sniffMedia(pdf), { mime: 'application/pdf', extension: '.pdf' })
+  const mp4 = new Uint8Array([0, 0, 0, 0x18, 0x66, 0x74, 0x79, 0x70, 0x69, 0x73, 0x6f, 0x6d])
+  assert.deepEqual(sniffMedia(mp4), { mime: 'video/mp4', extension: '.mp4' })
+})
+
+test('a text file keeps its own extension and becomes text/plain', () => {
+  const markdown = new TextEncoder().encode('# 标题\n\n正文')
+  assert.deepEqual(resolveMediaType(markdown, 'application/octet-stream', 'note.md', '.md'), { mime: 'text/plain', extension: '.md' })
+  // Unknown binary keeps the declared mime.
+  const blob = new Uint8Array([1, 2, 3, 4])
+  assert.deepEqual(resolveMediaType(blob, undefined, 'x.bin', '.bin'), { mime: 'application/octet-stream', extension: '.bin' })
 })
