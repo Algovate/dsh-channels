@@ -27,6 +27,8 @@ export interface AsrOptions {
   command?: string
   scriptPath: string
   modelDir: string
+  /** Model size ("large-v3-turbo") or an explicit checkpoint path. */
+  model?: string
   language?: string
   timeoutMs?: number
   logger: { info: (line: string) => void; warn: (line: string) => void }
@@ -61,6 +63,7 @@ export class AsrBridge {
     const env: NodeJS.ProcessEnv = {
       ...process.env,
       DSH_FEISHU_ASR_MODEL_DIR: this.#options.modelDir,
+      ...(this.#options.model === undefined ? {} : { DSH_FEISHU_ASR_MODEL: this.#options.model }),
       ...(this.#options.language === undefined ? {} : { DSH_FEISHU_ASR_LANGUAGE: this.#options.language }),
     }
     try {

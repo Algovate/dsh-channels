@@ -234,7 +234,7 @@ printf '{"wav":"/absolute/path/to/sample.wav"}\n' |
 }
 ```
 
-可选 `asrLanguage`、`asrTimeoutMs`（默认 60000）、`asrEnabled`（默认开启）和 `asrScriptPath`（换成自定义桥接脚本）。
+可选 `asrModel`（模型名如 `large-v3-turbo`，或显式 checkpoint 目录；默认 `small`）、`asrLanguage`、`asrTimeoutMs`（默认 60000）、`asrEnabled`（默认开启）和 `asrScriptPath`（换成自定义桥接脚本）。模型名对应模型根目录下的 `mlx-community__whisper-<名字>-mlx/`（MLX）或 `<名字>/`、`Systran__faster-whisper-<名字>/`（CPU）。
 
 ## 手机任务控制
 

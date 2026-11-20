@@ -51,6 +51,8 @@ export interface FeishuAdapterOptions {
     /** Where whisper checkpoints live; defaults to <state>/asr-models. */
     asrModelDir?: string
     asrLanguage?: string
+    /** Whisper size ("large-v3-turbo") or an explicit checkpoint path; default small. */
+    asrModel?: string
     asrTimeoutMs?: number
     /** Override the shipped bridge script (e.g. a custom transcriber). */
     asrScriptPath?: string
@@ -119,6 +121,7 @@ export async function createAdapter({ runtime, config = {}, stateRoot = '' }: Fe
         scriptPath: config.asrScriptPath ?? path.join(packageRoot(path.dirname(fileURLToPath(import.meta.url))), 'bin', 'asr-transcribe.py'),
         modelDir: config.asrModelDir ?? path.join(stateRoot, 'asr-models'),
         ...(config.asrCommand === undefined ? {} : { command: config.asrCommand }),
+        ...(config.asrModel === undefined ? {} : { model: config.asrModel }),
         ...(config.asrLanguage === undefined ? {} : { language: config.asrLanguage }),
         ...(config.asrTimeoutMs === undefined ? {} : { timeoutMs: config.asrTimeoutMs }),
         ...(config.asrSpawnImpl === undefined ? {} : { spawnImpl: config.asrSpawnImpl }),

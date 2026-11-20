@@ -192,3 +192,20 @@ test('engine diagnostics on stdout do not break the protocol answer', async () =
   const asr = bridge(fakeSpawn(() => `Detected language: Chinese\n${JSON.stringify({ ok: true, text: '请把这句话重复一遍。' })}\n`))
   assert.deepEqual(await asr.transcribe(audioFile()), { ok: true, text: '请把这句话重复一遍。' })
 })
+
+test('the configured model is passed to the bridge environment', async () => {
+  const envs: Array<Record<string, string | undefined>> = []
+  const spawnImpl = ((command: string, args: string[], options: { env: Record<string, string | undefined> }) => {
+    envs.push(options.env)
+    const stdin = new PassThrough()
+    const stdout = new PassThrough()
+    const stderr = new PassThrough()
+    const child = { stdin, stdout, stderr, exitCode: null as number | null, kill: () => { child.exitCode = 0 }, on: () => child, once: () => child, off: () => child }
+    stdin.on('data', () => stdout.write(`${JSON.stringify({ ok: true, text: 'ok' })}\n`))
+    void command; void args
+    return child
+  }) as unknown as typeof import('node:child_process').spawn
+  const asr = bridge(spawnImpl, { model: 'large-v3-turbo' })
+  await asr.transcribe(audioFile())
+  assert.equal(envs[0]?.['DSH_FEISHU_ASR_MODEL'], 'large-v3-turbo')
+})
