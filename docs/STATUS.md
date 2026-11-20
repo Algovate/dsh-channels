@@ -16,6 +16,24 @@
 
 新增媒体嗅探与上传类型回归测试，完整 `npm test` **501 项通过**。
 
+## 2026-11-20 飞书语音转写（whisper）真机验证
+
+给飞书适配器接入可选语音转写：随包提供 `bin/asr-transcribe.py`（由微信桥接通用化，读取 `DSH_FEISHU_ASR_*`，也接受 `DSH_WEIXIN_ASR_*`），并新增 `AsrBridge` 保持进程常驻。转写在附件落盘后进行，文本写入 `InboundMedia.transcript`；转写失败只记原因，音频照常交付。新增配置 `asrEnabled`/`asrCommand`/`asrModel`/`asrModelDir`/`asrLanguage`/`asrTimeoutMs`/`asrScriptPath`。
+
+真机过程中修复了一个两个适配器共有的解析缺陷：mlx-whisper 会把 `Detected language: …` 写到 stdout，旧解析器把它当成协议应答并以 `unexpected extra ASR answer` 失败。现在只把以 `{` 开头的行当作协议应答，其余作为诊断日志，微信与飞书共用该修复。
+
+模型选型在 mini 上用真实语音对比（同一桥接脚本、三条真实语音）：
+
+| 引擎 | 热态耗时（约 4 秒语音） | 结果 |
+|---|---|---|
+| mlx small | 约 0.3 秒 | 2/3 正确，「也好吧」正确 |
+| mlx large-v3-turbo（1.5G） | 约 0.9 秒 | 3 条中 2 条出错，短句更差 |
+| faster-whisper medium（CPU int8，1.4G） | 约 5 秒 | 3/3 正确，「转写测速成功」完全正确 |
+
+最终默认选用 **faster-whisper medium**（独立 venv `~/dsh-plugin-pkgs/asr-venv-fw`，模型 `~/dsh/channels/asr-models/Systran__faster-whisper-medium`），部署提交 `d2ab828`（宿主进程 `75572`，发布目录 `~/dsh-plugin-pkgs/dsh-channels/d2ab828/`）。宿主层真机确认：语音入站 → 转写 `transcribed voice note (15 chars)` → 模型按内容正确回答。
+
+完整 `npm test` **509 项通过**。ctranslate2 日志提示 Apple Silicon 可用 MPS 后端（约 2 倍提速）；桥接目前固定 CPU int8，后续可作为可选项。
+
 ## 2026-11-20 语音/视频真机验证
 
 继续验证语音与视频，暴露并修复了资源下载类型错误：`GET /im/v1/messages/:id/resources/:key` 的 `type` 只接受 `image` 或 `file`，音频和视频必须用 `file`；此前传 `audio`/`video` 会返回 HTTP 400。修复后部署提交 `4c0bb12`（发布目录 `~/dsh-plugin-pkgs/dsh-channels/4c0bb12/`，飞书归档 SHA-256 `fb62992b24c5c3d9c6c94bf70381c256ede5952bbf4aa99f02da1df1f1b474df`，宿主进程 `74717`）。
