@@ -30,6 +30,8 @@
 | mlx large-v3-turbo（1.5G，对比后已删除） | 约 0.9 秒 | 3 条中 2 条出错，短句更差 |
 | faster-whisper medium（CPU int8，1.4G） | 约 5 秒 | 3/3 正确，「转写测速成功」完全正确 |
 
+随后在 mini 上验证了 ctranslate2 的 MPS 后端（Apple Silicon GPU）：同一桥接脚本、同一模型，热态每条从约 5.2 秒降到约 1.2 秒，宿主日志里「模型加载 → 转写完成」从 5.1 秒降到 1.05 秒，转写结果不变。新增 `asrDevice`（`cpu` 默认 / `mps`）与 `asrComputeType`（默认 cpu 用 `int8`、mps 用 `float16`），部署提交 `6dd8d98`（宿主进程 `75857`）并设为 `mps`；真机语音回合正常，转写与回复均成功。
+
 最终默认选用 **faster-whisper medium**（独立 venv `~/dsh-plugin-pkgs/asr-venv-fw`，模型 `~/dsh/channels/asr-models/Systran__faster-whisper-medium`），部署提交 `d2ab828`（宿主进程 `75572`，发布目录 `~/dsh-plugin-pkgs/dsh-channels/d2ab828/`）。宿主层真机确认：语音入站 → 转写 `transcribed voice note (15 chars)` → 模型按内容正确回答。
 
 完整 `npm test` **509 项通过**。ctranslate2 日志提示 Apple Silicon 可用 MPS 后端（约 2 倍提速）；桥接目前固定 CPU int8，后续可作为可选项。
