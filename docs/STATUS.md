@@ -9,6 +9,8 @@
 
 部署提交 `a5c524d`（宿主进程 `77386`，发布目录 `~/dsh-plugin-pkgs/dsh-channels/a5c524d/`）。安装后的 `client.js` 为构建产物；微信与飞书两个通道注册、飞书长连接建立；无新告警。完整 `npm test` **517 项通过**。
 
+补充（`f7f9700`）：同时用 CI 矩阵的 Node 22/24 复跑测试，发现 `AsrBridge.dispose()` 只用 `unref` 定时器等待子进程退出，Node 22 的测试运行器会因事件循环提前结束而取消用例。改为保持定时器引用后，Node 22、24、26 上均 **517 项全过**（Node 22/24 由 npx 临时运行，不是宿主环境）。该修复已部署（发布目录 `~/dsh-plugin-pkgs/dsh-channels/f7f9700/`）。
+
 ## 2026-11-20 重构 Phase 2：状态持久化换成 SQLite
 
 状态层从「整份 JSON 原子重写 + v1/v2 迁移 + legacy 镜像 + 双文件锁」换成 SQLite：`state.db` 的 `sections` 表按事务保存七个段，单写者锁改为原子 `mkdir` 的 `state.lock.d/owner.json`。首次打开在事务里导入旧 `state.json` 与六个旧段文件，校验后归档到 `legacy-state/*.bak`；归档中断会在下次打开补完，不重复导入。`doctor --state` 只读查询数据库，`--migrate` 执行同一导入。
