@@ -1,5 +1,33 @@
 # 验证状态
 
+## 2026-11-20 飞书适配器部署到 mini 并完成宿主全链路验证
+
+在真机协议验证之后，把提交 `d4a662a` 的 core、微信、飞书三个包部署到 mini 的 Web profile，与既有微信通道并行运行。发布目录为 mini 的 `~/dsh-plugin-pkgs/dsh-channels/d4a662a/`，含 `release.json`、`deployment.json` 和 `backup-20261120T005207Z/`（profile 文件与通道配置备份）。
+
+| 包 | 归档 SHA-256 | 安装校验 |
+|---|---|---|
+| core | `838992ae6912c33a91b66d9ae83a6ba3bdf9fa262bfa9dde0fe4383c0f30dc98` | 148 个文件逐一比对一致 |
+| 微信 | `d65ec9c2829467ab4d85890da05e680ca57f6874ab6d3ae837134bc9b2845280` | 124 个文件逐一比对一致 |
+| 飞书 | `cd01d028233c28e59a7c6a1e9ab342cb1b0cd282f0e5849f8802b0a1f220a42e` | 21 个文件逐一比对一致，`ws` 依赖已解析 |
+
+部署流程沿用既有约定：停 `com.dsh.web` → 备份 profile 与 `config.json` → 写入依赖并 `pnpm install`（新增 `ws`，从 registry 拉取成功）→ 合并通道配置 → 重启。通道配置只**追加**飞书条目和发送者 `open_id`，微信的 `asrCommand`、`asrModelDir` 与原有白名单原样保留，文件权限维持 0600。宿主新进程 `74060`，启动无 warn/error：
+
+```
+channel 'weixin' registered
+channel 'feishu' registered
+weixin adapter polling account fd22aefdda85@im.bot
+feishu adapter connecting app app:cli_aa74460e03789c10
+feishu persistent connection established
+```
+
+宿主层验证结果：
+
+- `/whoami`：入站落流水，回复「【当前聊天】…通道：feishu…角色：管理员…DSH 会话：chan-feishu-…」以 `delivery:"accepted"` 结算，拿到飞书消息 ID。
+- 真实回合：入站「用一句话回复：宿主全链路 OK」→ 接收回执 → 模型回合 `settled in 1348ms` → 回复「宿主全链路 OK」`accepted`。即入站、权限、路由、模型回合、出站完整闭环。
+- 两个通道并行，微信轮询与飞书长连接同时在线，无告警。
+
+本轮未发布 npm；媒体双向在宿主层未做真机验收（仅有模拟测试覆盖）。
+
 ## 2026-11-20 飞书真实应用端到端验证
 
 用真实自建应用（`open.feishu.cn`，长连接网关 `msg-frontier.feishu.cn`，`service_id=33554678`，服务端 `PingInterval=90s`）做了真机端到端验证，凭证只经环境变量传入仓库外的临时探针，未写入任何 git 跟踪文件。
