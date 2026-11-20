@@ -204,7 +204,8 @@ export class AsrBridge {
         }
         resolve()
       }, 2000)
-      timer.unref?.()
+      // Keep the timer referenced: a bridge that never emits 'exit' must not
+      // leave the host with nothing on the event loop while stop() waits.
       child.once('exit', () => {
         clearTimeout(timer)
         resolve()
